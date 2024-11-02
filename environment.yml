@@ -1,10 +1,9 @@
-name: petsird
+name: petsird-v0.2-parallelproj
 channels:
   - conda-forge
   - defaults
 dependencies:
   - h5py>=3.7.0
-  - hdf5>=1.12.1
   - ipykernel>=6.19.2
   - numpy>=1.24.3
   - python>=3.11.3
