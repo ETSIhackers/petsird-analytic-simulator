@@ -24,6 +24,8 @@ python petsird_analysis.py < test.bin
 
 **TODO**: 
 - start from this [example here](https://parallelproj.readthedocs.io/en/stable/auto_examples/01_pet_geometry/03_run_block_scanner.html#sphx-glr-auto-examples-01-pet-geometry-03-run-block-scanner-py)
+- map PETSIRD scanner detector elements to LOR endpoints
+- use LOR endpoints to setup [BlockScannerModules](https://parallelproj.readthedocs.io/en/stable/python_api.html#parallelproj.pet_scanners.BlockPETScannerModule) tha can be used in [ModularizedPETScannerGeometry](https://parallelproj.readthedocs.io/en/stable/python_api.html#parallelproj.pet_scanners.ModularizedPETScannerGeometry) or a [RegularPolygonPETScannerGeometry](https://parallelproj.readthedocs.io/en/stable/python_api.html#parallelproj.pet_scanners.RegularPolygonPETScannerGeometry) - depending of the system geometry and module definition. Using the latter is more convient for the definition of sinograms, the former is better for systems with less symmetries where it is less straight forward to define "sinograms".
 
 ### Simulation of PETSIRD LM data using parallelproj
 
