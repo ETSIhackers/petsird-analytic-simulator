@@ -32,7 +32,7 @@ python petsird_analysis.py < test.bin
 Start from this [parallelproj example](https://parallelproj.readthedocs.io/en/stable/auto_examples/06_listmode_algorithms/01_listmode_mlem.html#sphx-glr-auto-examples-06-listmode-algorithms-01-listmode-mlem-py).
 
 **TODO**: 
-- rewrite (simplify) util function that converts sinogram to listmode including event detectors IDs instead of coordinates. See [here](https://parallelproj.readthedocs.io/en/stable/_modules/parallelproj/projectors.html#RegularPolygonPETProjector.convert_sinogram_to_listmode)
+- rewrite (simplify) util function that converts sinogram to listmode including event detectors IDs instead of coordinates. Write an updated noisy emission sinogram to LM converter similar to  [this](https://parallelproj.readthedocs.io/en/stable/_modules/parallelproj/projectors.html#RegularPolygonPETProjector.convert_sinogram_to_listmode) but skipping the detector ID to world coordinate lookup.
 - write scanner geometry to file
 
 
