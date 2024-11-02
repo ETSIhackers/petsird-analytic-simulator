@@ -1,4 +1,4 @@
-# PETSIRD v0.2 - parallelproj repositoru
+# PETSIRD v0.2 - parallelproj repository
 
 The purpose of this repo is to provide a starting point for developing software that uses PETSIRD.
 Here we will focus on python usecases using parallelproj projection library.
