@@ -10,3 +10,6 @@ dependencies:
   - matplotlib~=3.8.0
   - parallelproj>=1.10.0
   - pymirc>=0.29
+  - pip
+  - pip:
+     - petsird==0.2 
