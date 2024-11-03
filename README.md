@@ -23,8 +23,9 @@ python petsird_analysis.py < test.bin
 ### Read scanner geometry from a PETSIRD file and visualize it
 
 **TODO**: 
-- start from this [example here](https://parallelproj.readthedocs.io/en/stable/auto_examples/01_pet_geometry/03_run_block_scanner.html#sphx-glr-auto-examples-01-pet-geometry-03-run-block-scanner-py)
+- start from this [parallel example here](https://parallelproj.readthedocs.io/en/stable/auto_examples/01_pet_geometry/03_run_block_scanner.html#sphx-glr-auto-examples-01-pet-geometry-03-run-block-scanner-py) and this [petsird example here](python/petsird_plot_scanner_and_events.py)
 - map PETSIRD scanner detector elements to LOR endpoints
+- How to map BoxShape to a single LOR point? (center of the Box is not want we want. We need most likely interaction point.)
 - use LOR endpoints to setup [BlockScannerModules](https://parallelproj.readthedocs.io/en/stable/python_api.html#parallelproj.pet_scanners.BlockPETScannerModule) tha can be used in [ModularizedPETScannerGeometry](https://parallelproj.readthedocs.io/en/stable/python_api.html#parallelproj.pet_scanners.ModularizedPETScannerGeometry) or a [RegularPolygonPETScannerGeometry](https://parallelproj.readthedocs.io/en/stable/python_api.html#parallelproj.pet_scanners.RegularPolygonPETScannerGeometry) - depending of the system geometry and module definition. Using the latter is more convient for the definition of sinograms, the former is better for systems with less symmetries where it is less straight forward to define "sinograms".
 
 ### Simulation of PETSIRD LM data using parallelproj

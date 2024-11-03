@@ -5,19 +5,19 @@
 # basic plotting of the scanner geometry
 # preliminary code!
 
-import sys
 import numpy
 import numpy.typing as npt
 import petsird
 
 from petsird_helpers import (
-    get_num_det_els,
     get_module_and_element,
     get_detection_efficiency,
 )
 
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+from pathlib import Path
 
 
 def transform_to_mat44(
@@ -84,14 +84,19 @@ def draw_BoxShape(ax, box: petsird.BoxShape) -> None:
         [vertices[j] for j in [1, 2, 6, 5]],
         [vertices[j] for j in [4, 7, 3, 0]],
     ]
-    box = Poly3DCollection(edges, alpha=0.25, linewidths=1, edgecolors="r")
+    box = Poly3DCollection(edges, alpha=0.1, linewidths=0.1, edgecolors=plt.cm.tab10(0))
     ax.add_collection3d(box)
 
 
 if __name__ == "__main__":
 
+    if not Path("test.bin").exists():
+        raise FileNotFoundError(
+            "test.bin not found. Create it first using the generator."
+        )
+
     # Create a new figure
-    fig = plt.figure()
+    fig = plt.figure(figsize=(8, 8))
     ax = fig.add_subplot(111, projection="3d")
 
     # dictionary to store the transformations and centers of the detecting elements
@@ -122,9 +127,19 @@ if __name__ == "__main__":
                         draw_BoxShape(ax, transformed_boxshape)
 
                         element_transforms[(i_mod, i_el)] = combined_transform
+
                         element_centers[(i_mod, i_el)] = (
                             transformed_boxshape_vertices.mean(axis=0)
                         )
+
+                        if i_el == 0 or i_el == len(rep_volume.transforms) - 1:
+                            ax.text(
+                                float(transformed_boxshape_vertices[0][0]),
+                                float(transformed_boxshape_vertices[0][1]),
+                                float(transformed_boxshape_vertices[0][2]),
+                                f"{i_mod}/{i_el}",
+                                fontsize=7,
+                            )
 
         # ----
         # read and draw events
@@ -149,12 +164,16 @@ if __name__ == "__main__":
                     ]
 
                     # draw line between the two 3D points (event_start_coord, event_end_coord)
-                    # for the first 2 events in the time block
-                    if i_event < 2:
+                    # for the first event in the first time block
+                    if i_event == 0:
                         ax.plot(
                             [event_start_coord[0], event_end_coord[0]],
                             [event_start_coord[1], event_end_coord[1]],
                             [event_start_coord[2], event_end_coord[2]],
+                        )
+
+                        print(
+                            f"time block {i_time_block:04}, event in time block {i_event:04}, event {event_counter:04}, {event_mods_and_els}"
                         )
 
                     event_eff = get_detection_efficiency(header.scanner, event)
@@ -164,4 +183,5 @@ if __name__ == "__main__":
     ax.set_xlim(-400, 400)
     ax.set_ylim(-400, 400)
     ax.set_zlim(-25, 50)
-    fig.show()
+
+    plt.show()
