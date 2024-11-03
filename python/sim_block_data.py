@@ -123,20 +123,6 @@ if show_plots:
 
 
 # %%
-# Forward project an image full of ones. The forward projection has the
-# shape (num_block_pairs, num_lors_per_block_pair)
-
-img_fwd = proj(img)
-print(img_fwd.shape)
-
-# %%
-# Backproject a "histogram" full of ones ("sensitivity image" when attenuation
-# and normalization are ignored)
-
-ones_back = proj.adjoint(xp.ones(proj.out_shape, dtype=xp.float32, device=dev))
-print(ones_back.shape)
-
-# %%
 # Visualize the forward and backward projection results
 
 if show_plots:
@@ -174,19 +160,23 @@ proj_tof.tof_parameters = parallelproj.TOFParameters(
 assert proj_tof.adjointness_test(xp, dev)
 
 # %%
+sig = 1.0 / (2.35 * xp.asarray(voxel_size, device=dev))
+res_model = parallelproj.GaussianFilterOperator(img_shape, sigma=sig)
+
+fwd_op = parallelproj.CompositeLinearOperator([proj_tof, res_model])
+
+# %%
 # TOF forward project an image full of ones. The forward projection has the
 # shape (num_block_pairs, num_lors_per_block_pair, num_tofbins)
 
-img_fwd_tof = proj_tof(img)
+img_fwd_tof = fwd_op(img)
 print(img_fwd_tof.shape)
 
 # %%
 # TOF backproject a "TOF histogram" full of ones ("sensitivity image" when attenuation
 # and normalization are ignored)
 
-ones_back_tof = proj_tof.adjoint(
-    xp.ones(proj_tof.out_shape, dtype=xp.float32, device=dev)
-)
+ones_back_tof = fwd_op.adjoint(xp.ones(fwd_op.out_shape, dtype=xp.float32, device=dev))
 print(ones_back_tof.shape)
 
 # %%
@@ -220,7 +210,6 @@ histogrammed_contam = xp.full(
     img_fwd_tof.shape, img_fwd_tof.mean(), dtype=xp.float32, device=dev
 )
 histogrammed_data = xp.random.poisson(img_fwd_tof + histogrammed_contam)
-# histogrammed_data = img_fwd_tof + histogrammed_contam
 
 # %%
 recon = xp.ones(img_shape, dtype=xp.float32, device=dev)
@@ -228,8 +217,8 @@ num_iter = 200
 
 for i in range(num_iter):
     print(f"{(i+1):03}/{num_iter}", end="\r")
-    exp = proj_tof(recon) + histogrammed_contam
+    exp = fwd_op(recon) + histogrammed_contam
     ratio = histogrammed_data / exp
-    recon = recon * proj_tof.adjoint(ratio) / ones_back_tof
+    recon = recon * fwd_op.adjoint(ratio) / ones_back_tof
 
 print("")
