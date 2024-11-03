@@ -19,6 +19,8 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 from pathlib import Path
 
+import argparse
+
 
 def transform_to_mat44(
     transform: petsird.RigidTransformation,
@@ -90,9 +92,17 @@ def draw_BoxShape(ax, box: petsird.BoxShape) -> None:
 
 if __name__ == "__main__":
 
-    if not Path("test.bin").exists():
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--fname", default="test.bin")
+
+    args = parser.parse_args()
+    fname = args.fname
+
+    if not Path(args.fname).exists():
         raise FileNotFoundError(
-            "test.bin not found. Create it first using the generator."
+            f"{args.fname} not found. Create it first using the generator."
         )
 
     # Create a new figure
@@ -137,7 +147,7 @@ if __name__ == "__main__":
                                 float(transformed_boxshape_vertices[0][0]),
                                 float(transformed_boxshape_vertices[0][1]),
                                 float(transformed_boxshape_vertices[0][2]),
-                                f"{i_mod}/{i_el}",
+                                f"{i_el:02}/{i_mod:02}",
                                 fontsize=7,
                             )
 
@@ -182,6 +192,7 @@ if __name__ == "__main__":
 
     ax.set_xlim(-400, 400)
     ax.set_ylim(-400, 400)
-    ax.set_zlim(-25, 50)
+    ax.set_zlim(-20, 50)
+    ax.set_title("figure not in scale (z axis is streched)")
 
     plt.show()
