@@ -18,7 +18,6 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 from pathlib import Path
-
 import argparse
 
 
@@ -91,8 +90,6 @@ def draw_BoxShape(ax, box: petsird.BoxShape) -> None:
 
 
 if __name__ == "__main__":
-
-    import argparse
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--fname", default="test.bin")
