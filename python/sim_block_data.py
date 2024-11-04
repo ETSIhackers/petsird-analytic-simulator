@@ -19,17 +19,22 @@ elif "torch" in xp.__name__:
     # using torch valid choices are 'cpu' or 'cuda'
     dev = "cuda"
 
-show_plots = False
+show_plots = True
 
 # %%
 # input paraters
 
 # grid shape of LOR endpoints forming a block module
-block_shape = (3, 1, 2)
+block_shape = (10, 1, 3)
 # spacing between LOR endpoints in a block module
-block_spacing = (1.5, 1.2, 1.7)
+block_spacing = (4.5, 4.5, 4.5)
 # radius of the scanner
-scanner_radius = 10
+scanner_radius = 100
+# number of modules
+num_modules = 12
+# FWHM of the Gaussian res model in mm
+fwhm_mm = 4.0
+
 
 # %%
 # Setup of a modularized PET scanner geometry
@@ -43,14 +48,14 @@ scanner_radius = 10
 
 mods = []
 
-delta_phi = 2 * xp.pi / 12
+delta_phi = 2 * xp.pi / num_modules
 
 # setup an affine transformation matrix to translate the block modules from the
 # center to the radius of the scanner
 aff_mat_trans = xp.eye(4, device=dev)
 aff_mat_trans[1, -1] = scanner_radius
 
-for phi in xp.linspace(0, 2 * xp.pi, 12, endpoint=False):
+for phi in xp.linspace(0, 2 * xp.pi, num_modules, endpoint=False):
     # setup an affine transformation matrix to rotate the block modules around the center
     # (of the "2" axis)
     aff_mat_rot = xp.asarray(
@@ -86,8 +91,8 @@ scanner = parallelproj.ModularizedPETScannerGeometry(mods)
 
 block_pairs = []
 
-for j in range(12):
-    block_pairs += [[j, (j + 3 + i) % 12] for i in range(7)]
+for j in range(num_modules):
+    block_pairs += [[j, (j + 3 + i) % num_modules] for i in range(7)]
 
 lor_desc = parallelproj.EqualBlockPETLORDescriptor(
     scanner,
@@ -100,11 +105,11 @@ lor_desc = parallelproj.EqualBlockPETLORDescriptor(
 #
 # Now that the LOR descriptor is defined, we can setup the projector.
 
-img_shape = (28, 20, 3)
-voxel_size = (0.5, 0.5, 1.0)
-img = xp.zeros(img_shape, dtype=xp.float32, device=dev)
-img[4:-4, 4:-4, 1:2] = 50.0
-img[8:-8, 8:-8, 1:2] = 100.0
+img_shape = (50, 50, 6)
+voxel_size = (2.0, 2.0, 2.0)
+img = xp.full(img_shape, 0.01, dtype=xp.float32, device=dev)
+img[4:-4, 4:-4, :] = 0.02
+img[16:-16, 16:-16, 2:-2] = 0.04
 
 proj = parallelproj.EqualBlockPETProjector(lor_desc, img_shape, voxel_size)
 assert proj.adjointness_test(xp, dev)
@@ -118,33 +123,11 @@ if show_plots:
     ax1 = fig.add_subplot(122, projection="3d")
     proj.show_geometry(ax0)
     proj.show_geometry(ax1)
-    lor_desc.show_block_pair_lors(ax1, block_pair_nums=None, color=plt.cm.tab10(0))
+    # lor_desc.show_block_pair_lors(
+    #    ax1, block_pair_nums=xp.arange(7), color=plt.cm.tab10(0)
+    # )
     fig.show()
 
-
-# %%
-# Visualize the forward and backward projection results
-
-if show_plots:
-    fig3, ax3 = plt.subplots(figsize=(8, 2), tight_layout=True)
-    ax3.imshow(parallelproj.to_numpy_array(img_fwd), cmap="Greys", aspect=3.0)
-    ax3.set_xlabel("LOR number in block pair")
-    ax3.set_ylabel("block pair")
-    ax3.set_title("forward projection of ones")
-    fig3.show()
-
-    fig4, ax4 = plt.subplots(1, 3, figsize=(7, 3), tight_layout=True)
-    vmin = float(xp.min(ones_back))
-    vmax = float(xp.max(ones_back))
-    for i in range(3):
-        ax4[i].imshow(
-            parallelproj.to_numpy_array(ones_back[:, :, i]),
-            vmin=vmin,
-            vmax=vmax,
-            cmap="Greys",
-        )
-    ax4[1].set_title("back projection of ones")
-    fig4.show()
 
 # %%
 # Setup of a TOF projector
@@ -154,13 +137,13 @@ if show_plots:
 
 proj_tof = parallelproj.EqualBlockPETProjector(lor_desc, img_shape, voxel_size)
 proj_tof.tof_parameters = parallelproj.TOFParameters(
-    num_tofbins=27, tofbin_width=0.8, sigma_tof=2.0, num_sigmas=3.0
+    num_tofbins=21, tofbin_width=10.0, sigma_tof=12.0, num_sigmas=3.0
 )
 
 assert proj_tof.adjointness_test(xp, dev)
 
 # %%
-sig = 1.0 / (2.35 * xp.asarray(voxel_size, device=dev))
+sig = fwhm_mm / (2.35 * xp.asarray(voxel_size, device=dev))
 res_model = parallelproj.GaussianFilterOperator(img_shape, sigma=sig)
 
 fwd_op = parallelproj.CompositeLinearOperator([proj_tof, res_model])
@@ -184,17 +167,19 @@ print(ones_back_tof.shape)
 
 if show_plots:
     fig5, ax5 = plt.subplots(figsize=(6, 3), tight_layout=True)
-    ax5.plot(parallelproj.to_numpy_array(img_fwd_tof[0, 0, :]), ".-")
+    ax5.plot(parallelproj.to_numpy_array(img_fwd_tof[3, 0, :]), ".-")
     ax5.set_xlabel("TOF bin")
-    ax5.set_title("TOF profile of LOR 0 in block pair 0")
+    ax5.set_title("TOF profile of LOR 0 in block pair 3")
     fig5.show()
 
     fig6, ax6 = plt.subplots(1, 3, figsize=(7, 3), tight_layout=True)
     vmin = float(xp.min(ones_back_tof))
     vmax = float(xp.max(ones_back_tof))
-    for i in range(3):
+    for i, sl in enumerate(
+        [img_shape[2] // 4, img_shape[2] // 2, 3 * img_shape[2] // 4]
+    ):
         ax6[i].imshow(
-            parallelproj.to_numpy_array(ones_back_tof[:, :, i]),
+            parallelproj.to_numpy_array(ones_back_tof[:, :, sl]),
             vmin=vmin,
             vmax=vmax,
             cmap="Greys",
@@ -206,19 +191,17 @@ if show_plots:
 # put poisson noise on the forward projection
 
 xp.random.seed(0)
-histogrammed_contam = xp.full(
-    img_fwd_tof.shape, img_fwd_tof.mean(), dtype=xp.float32, device=dev
-)
-histogrammed_data = xp.random.poisson(img_fwd_tof + histogrammed_contam)
+histogrammed_data = xp.random.poisson(img_fwd_tof)
 
 # %%
 recon = xp.ones(img_shape, dtype=xp.float32, device=dev)
-num_iter = 200
+num_iter = 20
 
 for i in range(num_iter):
     print(f"{(i+1):03}/{num_iter}", end="\r")
-    exp = fwd_op(recon) + histogrammed_contam
-    ratio = histogrammed_data / exp
-    recon = recon * fwd_op.adjoint(ratio) / ones_back_tof
+    exp = xp.clip(fwd_op(recon), 1e-6, None)
+    grad = fwd_op.adjoint((exp - histogrammed_data) / exp)
+    step = recon / ones_back_tof
+    recon -= step * grad
 
 print("")
