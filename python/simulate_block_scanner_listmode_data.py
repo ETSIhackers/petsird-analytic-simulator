@@ -1,38 +1,41 @@
 # %%
 import array_api_compat.numpy as xp
 import pymirc.viewer as pv
+import argparse
 from array_api_compat import size
-
-# import array_api_compat.cupy as xp
-# import array_api_compat.torch as xp
 
 import parallelproj
 import petsird
 import matplotlib.pyplot as plt
 import math
 
-# choose a device (CPU or CUDA GPU)
-if "numpy" in xp.__name__:
-    # using numpy, device must be cpu
-    dev = "cpu"
-elif "cupy" in xp.__name__:
-    # using cupy, only cuda devices are possible
-    dev = xp.cuda.Device(0)
-elif "torch" in xp.__name__:
-    # using torch valid choices are 'cpu' or 'cuda'
-    dev = "cuda"
+# %%
+# parse the command line for the input parameters below
+parser = argparse.ArgumentParser()
 
-show_plots = False
-check_backprojection = False
-run_recon = False
+parser.add_argument("--fname", type=str, default="sim_lm.bin")
+parser.add_argument("--num_true_counts", type=int, default=int(1e6))
+parser.add_argument("--show_plots", default=False, action="store_true")
+parser.add_argument("--check_backprojection", default=False, action="store_true")
+parser.add_argument("--run_recon", default=False, action="store_true")
+
+args = parser.parse_args()
+
+fname = args.fname
+show_plots = args.show_plots
+check_backprojection = args.check_backprojection
+run_recon = args.run_recon
+num_true_counts = args.num_true_counts
+
+dev = "cpu"
 
 # %%
 # input parameters
 
 # grid shape of LOR endpoints forming a block module
-block_shape = (10, 1, 3)
+block_shape = (10, 2, 3)
 # spacing between LOR endpoints in a block module
-block_spacing = (4.5, 4.5, 4.5)
+block_spacing = (4.5, 10.0, 4.5)
 # radius of the scanner
 scanner_radius = 100
 # number of modules
@@ -120,9 +123,9 @@ lor_desc = parallelproj.EqualBlockPETLORDescriptor(
 img_shape = (50, 50, 6)
 voxel_size = (2.0, 2.0, 2.0)
 img = xp.zeros(img_shape, dtype=xp.float32, device=dev)
-img[4:-4, 4:-4, :] = 0.02
-img[16:-16, 16:-16, 2:-2] = 0.04
-img[30:32, 30:32, 2:-2] = 0.1
+img[4:-4, 4:-4, :] = 3
+img[16:-16, 16:-16, 2:-2] = 9
+img[30:32, 30:32, 2:-2] = 18
 
 # %%
 # Setup of a TOF projector
@@ -164,6 +167,11 @@ fwd_op = parallelproj.CompositeLinearOperator([proj, res_model])
 # shape (num_block_pairs, num_lors_per_block_pair, num_tofbins)
 
 img_fwd_tof = fwd_op(img)
+scale_fac = num_true_counts / img_fwd_tof.sum()
+
+img *= scale_fac
+img_fwd_tof *= scale_fac
+
 print(img_fwd_tof.shape)
 
 # %%
@@ -383,9 +391,9 @@ crystal_centers = parallelproj.BlockPETScannerModule(
 ).lor_endpoints
 
 # crystal widths in all dimensions
-cw0 = 4.5
-cw1 = 20.0
-cw2 = 4.5
+cw0 = block_spacing[0]
+cw1 = block_spacing[1]
+cw2 = block_spacing[2]
 
 crystal_shape = petsird.BoxShape(
     corners=[
@@ -472,7 +480,10 @@ det_ID_end = event_end_block * num_el_per_block + event_end_el
 
 
 # %%
-with petsird.BinaryPETSIRDWriter("zz.bin") as writer:
+# write petsird data
+
+print("Writing LM file")
+with petsird.BinaryPETSIRDWriter(fname) as writer:
     # with petsird.NDJsonPETSIRDWriter(sys.stdout) as writer:
     writer.write_header(header)
     for i_t in range(1):
