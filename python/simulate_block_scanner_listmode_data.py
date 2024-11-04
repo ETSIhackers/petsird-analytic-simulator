@@ -292,3 +292,5 @@ if run_recon:
     print("")
 
 # %%
+
+# CoincidenceEvent(detectorIds=[396, 1021], tofIdx=162, energyIndices=[2, 2])I
