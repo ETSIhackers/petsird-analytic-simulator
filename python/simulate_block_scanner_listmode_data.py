@@ -60,7 +60,9 @@ delta_phi = 2 * xp.pi / num_blocks
 aff_mat_trans = xp.eye(4, device=dev)
 aff_mat_trans[1, -1] = scanner_radius
 
-for phi in xp.linspace(0, 2 * xp.pi, num_blocks, endpoint=False):
+module_transforms = []
+
+for i, phi in enumerate(xp.linspace(0, 2 * xp.pi, num_blocks, endpoint=False)):
     # setup an affine transformation matrix to rotate the block modules around the center
     # (of the "2" axis)
     aff_mat_rot = xp.asarray(
@@ -71,13 +73,16 @@ for phi in xp.linspace(0, 2 * xp.pi, num_blocks, endpoint=False):
             [0, 0, 0, 1],
         ]
     )
+
+    module_transforms.append(aff_mat_rot @ aff_mat_trans)
+
     mods.append(
         parallelproj.BlockPETScannerModule(
             xp,
             dev,
             block_shape,
             block_spacing,
-            affine_transformation_matrix=(aff_mat_rot @ aff_mat_trans),
+            affine_transformation_matrix=module_transforms[i],
         )
     )
 
@@ -364,7 +369,15 @@ det_effs = petsird.DetectionEfficiencies(
 
 
 # %%
+# setup the PETSIRD scanner geometry
+rep_module = petsird.ReplicatedDetectorModule(object=detector_module)
 
+
+for i in range(num_blocks):
+    transform = petsird.RigidTransformation(matrix=module_transforms[i][:-1, :])
+
+    rep_module.ids.append(i)
+    rep_module.transforms.append(module_transforms[i])
 
 # %%
 
@@ -380,6 +393,7 @@ scanner = petsird.ScannerInformation(
     event_time_block_duration=1,  # ms
 )
 
+scanner.detection_efficiencies = det_effs
 
 # header = petsird.Header(
 #        exam=petsird.ExamInformation(subject=subject, institution=institution),
