@@ -173,7 +173,7 @@ if __name__ == "__main__":
 
                     # draw line between the two 3D points (event_start_coord, event_end_coord)
                     # for the first event in the first time block
-                    if i_event < 50:
+                    if i_event < 3:
                         ax.plot(
                             [event_start_coord[0], event_end_coord[0]],
                             [event_start_coord[1], event_end_coord[1]],
@@ -183,6 +183,20 @@ if __name__ == "__main__":
                         print(
                             f"time block {i_time_block:04}, event in time block {i_event:04}, event {event_counter:04}, {event_mods_and_els}"
                         )
+
+                        print(
+                            "start world coordinates",
+                            event_start_coord[0],
+                            event_start_coord[1],
+                            event_start_coord[2],
+                        )
+                        print(
+                            "end world coordinates",
+                            event_end_coord[0],
+                            event_end_coord[1],
+                            event_end_coord[2],
+                        )
+                        print()
 
                     event_eff = get_detection_efficiency(header.scanner, event)
 

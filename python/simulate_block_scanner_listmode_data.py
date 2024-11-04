@@ -297,6 +297,16 @@ if check_backprojection:
         nsigmas=proj.tof_parameters.num_sigmas,
         tofbin=event_tof_bin,
     )
+
+    lm_back_non_tof = parallelproj.joseph3d_back(
+        xstart=scanner.get_lor_endpoints(event_start_block, event_start_el),
+        xend=scanner.get_lor_endpoints(event_end_block, event_end_el),
+        img_shape=img_shape,
+        img_origin=proj.img_origin,
+        voxsize=proj.voxel_size,
+        img_fwd=xp.ones(num_events, dtype=xp.float32, device=dev),
+    )
+
     vi = pv.ThreeAxisViewer([histo_back, lm_back, histo_back - lm_back])
 
 # %%
