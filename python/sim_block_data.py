@@ -20,6 +20,7 @@ elif "torch" in xp.__name__:
     dev = "cuda"
 
 show_plots = True
+run_recon = False
 
 # %%
 # input paraters
@@ -194,14 +195,15 @@ xp.random.seed(0)
 histogrammed_data = xp.random.poisson(img_fwd_tof)
 
 # %%
-recon = xp.ones(img_shape, dtype=xp.float32, device=dev)
-num_iter = 20
+if run_recon:
+    recon = xp.ones(img_shape, dtype=xp.float32, device=dev)
+    num_iter = 20
 
-for i in range(num_iter):
-    print(f"{(i+1):03}/{num_iter}", end="\r")
-    exp = xp.clip(fwd_op(recon), 1e-6, None)
-    grad = fwd_op.adjoint((exp - histogrammed_data) / exp)
-    step = recon / ones_back_tof
-    recon -= step * grad
+    for i in range(num_iter):
+        print(f"{(i+1):03}/{num_iter}", end="\r")
+        exp = xp.clip(fwd_op(recon), 1e-6, None)
+        grad = fwd_op.adjoint((exp - histogrammed_data) / exp)
+        step = recon / ones_back_tof
+        recon -= step * grad
 
-print("")
+    print("")
