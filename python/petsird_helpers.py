@@ -40,9 +40,14 @@ def get_module_and_element(
     assert len(scanner_geometry.replicated_modules) == 1
     rep_module = scanner_geometry.replicated_modules[0]
     assert len(rep_module.object.detecting_elements) == 1
-    num_modules = len(rep_module.transforms)
+    # num_modules = len(rep_module.transforms)
+
+    num_el_per_module = len(
+        scanner_geometry.replicated_modules[0].object.detecting_elements[0].ids
+    )
+
     return [
-        ModuleAndElement(module=det % num_modules, el=det // num_modules)
+        ModuleAndElement(module=det // num_el_per_module, el=det % num_el_per_module)
         for det in scanner_det_ids
     ]
 
@@ -73,7 +78,7 @@ def get_detection_efficiency(
         )
         assert len(scanner.scanner_geometry.replicated_modules) == 1
         SGID = module_pair_SGID_LUT[mod_and_els[0].module, mod_and_els[1].module]
-        assert SGID >= 0
+
         module_pair_efficiencies = module_pair_efficiencies_vector[SGID]
         assert module_pair_efficiencies.sgid == SGID
         eff *= module_pair_efficiencies.values[
