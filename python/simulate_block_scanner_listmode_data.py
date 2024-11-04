@@ -7,6 +7,7 @@ from array_api_compat import size
 # import array_api_compat.torch as xp
 
 import parallelproj
+import petsird
 import matplotlib.pyplot as plt
 import math
 
@@ -22,7 +23,7 @@ elif "torch" in xp.__name__:
     dev = "cuda"
 
 show_plots = False
-check_backprojection = True
+check_backprojection = False
 run_recon = False
 
 # %%
@@ -35,7 +36,7 @@ block_spacing = (4.5, 4.5, 4.5)
 # radius of the scanner
 scanner_radius = 100
 # number of modules
-num_modules = 12
+num_blocks = 12
 # FWHM of the Gaussian res model in mm
 fwhm_mm = 4.0
 
@@ -52,14 +53,14 @@ fwhm_mm = 4.0
 
 mods = []
 
-delta_phi = 2 * xp.pi / num_modules
+delta_phi = 2 * xp.pi / num_blocks
 
 # setup an affine transformation matrix to translate the block modules from the
 # center to the radius of the scanner
 aff_mat_trans = xp.eye(4, device=dev)
 aff_mat_trans[1, -1] = scanner_radius
 
-for phi in xp.linspace(0, 2 * xp.pi, num_modules, endpoint=False):
+for phi in xp.linspace(0, 2 * xp.pi, num_blocks, endpoint=False):
     # setup an affine transformation matrix to rotate the block modules around the center
     # (of the "2" axis)
     aff_mat_rot = xp.asarray(
@@ -95,8 +96,8 @@ scanner = parallelproj.ModularizedPETScannerGeometry(mods)
 
 block_pairs = []
 
-for j in range(num_modules):
-    block_pairs += [[j, (j + 3 + i) % num_modules] for i in range(7)]
+for j in range(num_blocks):
+    block_pairs += [[j, (j + 3 + i) % num_blocks] for i in range(7)]
 
 lor_desc = parallelproj.EqualBlockPETLORDescriptor(
     scanner,
@@ -292,5 +293,113 @@ if run_recon:
     print("")
 
 # %%
+# create header
 
-# CoincidenceEvent(detectorIds=[396, 1021], tofIdx=162, energyIndices=[2, 2])I
+subject = petsird.Subject(id="42")
+institution = petsird.Institution(
+    name="Ministry of Silly Walks",
+    address="42 Silly Walks Street, Silly Walks City",
+)
+
+# %%
+# create petsird scanner geometry
+
+# scanner_geometry = get_scanner_geometry()
+
+# TODO scanner_info.bulk_materials
+
+# %%
+# create non geometry related scanner information
+
+num_energy_bins = 1
+
+# TOF bin edges (in mm)
+tofBinEdges = xp.linspace(
+    -proj.tof_parameters.num_tofbins * proj.tof_parameters.tofbin_width / 2,
+    proj.tof_parameters.num_tofbins * proj.tof_parameters.tofbin_width / 2,
+    proj.tof_parameters.num_tofbins + 1,
+    dtype="float32",
+)
+
+energyBinEdges = xp.linspace(430, 650, num_energy_bins, dtype="float32")
+
+num_total_elements = proj.lor_descriptor.scanner.num_lor_endpoints
+
+# create detectors efficiencies (all ones)
+det_el_efficiencies = xp.ones(
+    (num_total_elements, num_energy_bins), dtype="float32", device=dev
+)
+
+# setup the symmetry group ID LUT
+# we only create one symmetry group ID (1) and set the group ID to -1 for block
+# block pairs that are not in coincidence
+
+num_SGIDs = 1
+
+module_pair_sgid_lut = xp.full((num_blocks, num_blocks), -1, dtype="int16")
+
+for bp in proj.lor_descriptor.all_block_pairs:
+    module_pair_sgid_lut[bp[0], bp[1]] = 0
+    module_pair_sgid_lut[bp[1], bp[0]] = 0
+
+num_el_per_module = proj.lor_descriptor.scanner.num_lor_endpoints_per_module[0]
+module_pair_efficiencies = xp.ones(
+    (num_el_per_module, num_energy_bins, num_el_per_module, num_energy_bins),
+    dtype="float32",
+    device=dev,
+)
+
+module_pair_efficiencies_vector = []
+
+for i in range(num_SGIDs):
+    module_pair_efficiencies_vector.append(
+        petsird.ModulePairEfficiencies(values=module_pair_efficiencies, sgid=i)
+    )
+
+det_effs = petsird.DetectionEfficiencies(
+    det_el_efficiencies=det_el_efficiencies,
+    module_pair_sgidlut=module_pair_sgid_lut,
+    module_pair_efficiencies_vector=module_pair_efficiencies_vector,
+)
+
+
+# %%
+
+
+# %%
+
+# need energy bin info before being able to construct the detection efficiencies
+# so we will construct a scanner without the efficiencies first
+scanner = petsird.ScannerInformation(
+    model_name="PETSIRD_TEST",
+    scanner_geometry=scanner_geometry,
+    tof_bin_edges=tofBinEdges,
+    tof_resolution=2.35 * proj.tof_parameters.sigma_tof,  # FWHM in mm
+    energy_bin_edges=energyBinEdges,
+    energy_resolution_at_511=0.11,  # as fraction of 511
+    event_time_block_duration=1,  # ms
+)
+
+
+# header = petsird.Header(
+#        exam=petsird.ExamInformation(subject=subject, institution=institution),
+#        scanner=get_scanner_info(),
+#    )
+
+# %%
+# create petsird coincidence events - all in one timeblock without energy information
+
+
+num_el_per_block = proj.lor_descriptor.num_lorendpoints_per_block
+
+det_ID_start = event_start_block * num_el_per_block + event_start_el
+det_ID_end = event_end_block * num_el_per_block + event_end_el
+
+time_block_coinc_events = [
+    petsird.CoincidenceEvent(
+        detector_ids=[det_ID_start[i], det_ID_end[i]],
+        tof_idx=event_tof_bin[i],
+        energy_indices=[0, 0],
+    )
+    for i in range(num_events)
+]
