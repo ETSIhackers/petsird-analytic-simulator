@@ -70,6 +70,7 @@ def mult_transforms_coord(
 def transform_BoxShape(
     transform: petsird.RigidTransformation, box_shape: petsird.BoxShape
 ) -> petsird.BoxShape:
+
     return petsird.BoxShape(
         corners=[mult_transforms_coord([transform], c) for c in box_shape.corners]
     )
@@ -172,7 +173,7 @@ if __name__ == "__main__":
 
                     # draw line between the two 3D points (event_start_coord, event_end_coord)
                     # for the first event in the first time block
-                    if i_event == 0:
+                    if i_event < 50:
                         ax.plot(
                             [event_start_coord[0], event_end_coord[0]],
                             [event_start_coord[1], event_end_coord[1]],
@@ -187,9 +188,9 @@ if __name__ == "__main__":
 
                     event_counter += 1
 
-    ax.set_xlim(-400, 400)
-    ax.set_ylim(-400, 400)
-    ax.set_zlim(-20, 50)
-    ax.set_title("figure not in scale (z axis is streched)")
+    ax.set_xlim(-100, 100)
+    ax.set_ylim(-100, 100)
+    ax.set_zlim(-100, 100)
+    # ax.set_title("figure not in scale (z axis is streched)")
 
     plt.show()

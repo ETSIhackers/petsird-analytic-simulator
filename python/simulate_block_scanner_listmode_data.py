@@ -119,9 +119,10 @@ lor_desc = parallelproj.EqualBlockPETLORDescriptor(
 
 img_shape = (50, 50, 6)
 voxel_size = (2.0, 2.0, 2.0)
-img = xp.full(img_shape, 0.01, dtype=xp.float32, device=dev)
+img = xp.zeros(img_shape, dtype=xp.float32, device=dev)
 img[4:-4, 4:-4, :] = 0.02
 img[16:-16, 16:-16, 2:-2] = 0.04
+img[30:32, 30:32, 2:-2] = 0.1
 
 # %%
 # Setup of a TOF projector
@@ -399,15 +400,11 @@ crystal_shape = petsird.BoxShape(
             c=xp.asarray((-cw0 / 2, cw1 / 2, -cw2 / 2), dtype="float32")
         ),
         petsird.Coordinate(
-            c=xp.asarray((-cw0 / 2, -cw1 / 2, -cw2 / 2), dtype="float32")
+            c=xp.asarray((cw0 / 2, -cw1 / 2, -cw2 / 2), dtype="float32")
         ),
-        petsird.Coordinate(
-            c=xp.asarray((-cw0 / 2, -cw1 / 2, cw2 / 2), dtype="float32")
-        ),
-        petsird.Coordinate(c=xp.asarray((-cw0 / 2, cw1 / 2, cw2 / 2), dtype="float32")),
-        petsird.Coordinate(
-            c=xp.asarray((-cw0 / 2, cw1 / 2, -cw2 / 2), dtype="float32")
-        ),
+        petsird.Coordinate(c=xp.asarray((cw0 / 2, -cw1 / 2, cw2 / 2), dtype="float32")),
+        petsird.Coordinate(c=xp.asarray((cw0 / 2, cw1 / 2, cw2 / 2), dtype="float32")),
+        petsird.Coordinate(c=xp.asarray((cw0 / 2, cw1 / 2, -cw2 / 2), dtype="float32")),
     ]
 )
 crystal = petsird.BoxSolidVolume(shape=crystal_shape, material_id=1)
