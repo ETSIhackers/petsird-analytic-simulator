@@ -1,5 +1,6 @@
 # %%
 import array_api_compat.numpy as xp
+import pymirc.viewer as pv
 from array_api_compat import size
 
 # import array_api_compat.cupy as xp
@@ -21,10 +22,11 @@ elif "torch" in xp.__name__:
     dev = "cuda"
 
 show_plots = False
+check_backprojection = True
 run_recon = False
 
 # %%
-# input paraters
+# input parameters
 
 # grid shape of LOR endpoints forming a block module
 block_shape = (10, 1, 3)
@@ -113,8 +115,19 @@ img = xp.full(img_shape, 0.01, dtype=xp.float32, device=dev)
 img[4:-4, 4:-4, :] = 0.02
 img[16:-16, 16:-16, 2:-2] = 0.04
 
+# %%
+# Setup of a TOF projector
+# ------------------------
+#
+# Now that the LOR descriptor is defined, we can setup the projector.
+
 proj = parallelproj.EqualBlockPETProjector(lor_desc, img_shape, voxel_size)
+proj.tof_parameters = parallelproj.TOFParameters(
+    num_tofbins=21, tofbin_width=10.0, sigma_tof=12.0, num_sigmas=3.0
+)
+
 assert proj.adjointness_test(xp, dev)
+
 
 # %%
 # Visualize the projector geometry and all LORs
@@ -132,23 +145,10 @@ if show_plots:
 
 
 # %%
-# Setup of a TOF projector
-# ------------------------
-#
-# Now that the LOR descriptor is defined, we can setup the projector.
-
-proj_tof = parallelproj.EqualBlockPETProjector(lor_desc, img_shape, voxel_size)
-proj_tof.tof_parameters = parallelproj.TOFParameters(
-    num_tofbins=21, tofbin_width=10.0, sigma_tof=12.0, num_sigmas=3.0
-)
-
-assert proj_tof.adjointness_test(xp, dev)
-
-# %%
 sig = fwhm_mm / (2.35 * xp.asarray(voxel_size, device=dev))
 res_model = parallelproj.GaussianFilterOperator(img_shape, sigma=sig)
 
-fwd_op = parallelproj.CompositeLinearOperator([proj_tof, res_model])
+fwd_op = parallelproj.CompositeLinearOperator([proj, res_model])
 
 # %%
 # TOF forward project an image full of ones. The forward projection has the
@@ -194,49 +194,88 @@ if show_plots:
 
 xp.random.seed(0)
 emission_data = xp.random.poisson(img_fwd_tof)
+# emission_data = xp.zeros(img_fwd_tof.shape, dtype=xp.int32, device=dev)
+# emission_data[3, 1, 10] = 1
 
 # %%
 # convert emission histogram to LM
 
-tmp = xp.arange(proj_tof.lor_descriptor.num_lorendpoints_per_block)
+tmp = xp.arange(proj.lor_descriptor.num_lorendpoints_per_block)
 start_el, end_el = xp.meshgrid(tmp, tmp, indexing="ij")
 
 start_el_arr = xp.reshape(start_el, (size(start_el),))
 end_el_arr = xp.reshape(end_el, (size(end_el),))
 
-lm_event_table = xp.zeros((emission_data.sum(), 5), dtype=xp.int16)
+num_events = emission_data.sum()
+event_start_block = xp.zeros(num_events, dtype=xp.int16, device=dev)
+event_start_el = xp.zeros(num_events, dtype=xp.int16, device=dev)
+event_end_block = xp.zeros(num_events, dtype=xp.int16, device=dev)
+event_end_el = xp.zeros(num_events, dtype=xp.int16, device=dev)
+event_tof_bin = xp.zeros(num_events, dtype=xp.int16, device=dev)
 
 event_counter = 0
 
-for ibp, block_pair in enumerate(proj_tof.lor_descriptor.all_block_pairs):
+for ibp, block_pair in enumerate(proj.lor_descriptor.all_block_pairs):
     for it, tof_bin in enumerate(
-        xp.arange(proj_tof.tof_parameters.num_tofbins)
-        - proj_tof.tof_parameters.num_tofbins // 2
+        xp.arange(proj.tof_parameters.num_tofbins)
+        - proj.tof_parameters.num_tofbins // 2
     ):
         ss = emission_data[ibp, :, it]
-        num_events = ss.sum()
+        num_slice_events = ss.sum()
         inds = xp.repeat(xp.arange(ss.shape[0]), ss)
 
         # event start block
-        lm_event_table[event_counter : (event_counter + num_events), 0] = block_pair[0]
+        event_start_block[event_counter : (event_counter + num_slice_events)] = (
+            block_pair[0]
+        )
         # event start element in block
-        lm_event_table[event_counter : (event_counter + num_events), 1] = xp.take(
+        event_start_el[event_counter : (event_counter + num_slice_events)] = xp.take(
             start_el_arr, inds
         )
         # event end module
-        lm_event_table[event_counter : (event_counter + num_events), 2] = block_pair[1]
+        event_end_block[event_counter : (event_counter + num_slice_events)] = (
+            block_pair[1]
+        )
         # event end element in block
-        lm_event_table[event_counter : (event_counter + num_events), 3] = xp.take(
+        event_end_el[event_counter : (event_counter + num_slice_events)] = xp.take(
             end_el_arr, inds
         )
         # event TOF bin
-        lm_event_table[event_counter : (event_counter + num_events), 4] = tof_bin
+        event_tof_bin[event_counter : (event_counter + num_slice_events)] = tof_bin
 
-        event_counter += num_events
+        event_counter += num_slice_events
 
 # shuffle lm_event_table along 0 axis
-xp.random.shuffle(lm_event_table)
+inds = xp.arange(num_events)
+xp.random.shuffle(inds)
 
+event_start_block = event_start_block[inds]
+event_start_el = event_start_el[inds]
+event_end_block = event_end_block[inds]
+event_end_el = event_end_el[inds]
+event_tof_bin = event_tof_bin[inds]
+
+del inds
+
+# %%
+# do a sinogram and LM back projection of the emission data
+
+if check_backprojection:
+    histo_back = proj.adjoint(emission_data)
+    lm_back = parallelproj.joseph3d_back_tof_lm(
+        xstart=scanner.get_lor_endpoints(event_start_block, event_start_el),
+        xend=scanner.get_lor_endpoints(event_end_block, event_end_el),
+        img_shape=img_shape,
+        img_origin=proj.img_origin,
+        voxsize=proj.voxel_size,
+        img_fwd=xp.ones(num_events, dtype=xp.float32, device=dev),
+        tofbin_width=proj.tof_parameters.tofbin_width,
+        sigma_tof=xp.asarray([proj.tof_parameters.sigma_tof]),
+        tofcenter_offset=xp.asarray([proj.tof_parameters.tofcenter_offset]),
+        nsigmas=proj.tof_parameters.num_sigmas,
+        tofbin=event_tof_bin,
+    )
+    vi = pv.ThreeAxisViewer([histo_back, lm_back, histo_back - lm_back])
 
 # %%
 if run_recon:
@@ -246,7 +285,7 @@ if run_recon:
     for i in range(num_iter):
         print(f"{(i+1):03}/{num_iter}", end="\r")
         exp = xp.clip(fwd_op(recon), 1e-6, None)
-        grad = fwd_op.adjoint((exp - histogrammed_data) / exp)
+        grad = fwd_op.adjoint((exp - emission_data) / exp)
         step = recon / ones_back_tof
         recon -= step * grad
 
