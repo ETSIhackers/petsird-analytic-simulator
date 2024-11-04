@@ -18,7 +18,7 @@ NUMBER_OF_TOF_BINS = 300
 RADIUS = 400
 CRYSTAL_LENGTH = (20, 4, 4)
 # num crystals in a module
-NUM_CRYSTALS_PER_MODULE = (2, 4,5)
+NUM_CRYSTALS_PER_MODULE = (2, 4, 5)
 NUM_MODULES_ALONG_RING = 20
 NUM_MODULES_ALONG_AXIS = 2
 MODULE_AXIS_SPACING = (NUM_CRYSTALS_PER_MODULE[2] + 4) * CRYSTAL_LENGTH[2]
@@ -62,14 +62,15 @@ def get_detector_module() -> petsird.DetectorModule:
                     matrix=numpy.array(
                         (
                             (1.0, 0.0, 0.0, RADIUS + rep0 * CRYSTAL_LENGTH[0]),
-                            (0.0, 1.0, 0.0, (rep1 - N1/2) * CRYSTAL_LENGTH[1]),
-                            (0.0, 0.0, 1.0, (rep2 - N2/2) * CRYSTAL_LENGTH[2]),
+                            (0.0, 1.0, 0.0, (rep1 - N1 / 2) * CRYSTAL_LENGTH[1]),
+                            (0.0, 0.0, 1.0, (rep2 - N2 / 2) * CRYSTAL_LENGTH[2]),
                         ),
                         dtype="float32",
                     )
                 )
                 rep_volume.transforms.append(transform)
-                rep_volume.ids.append(rep0 + N0 * (rep1 + N1 * rep2))
+                # rep_volume.ids.append(rep0 + N0 * (rep1 + N1 * rep2))
+                rep_volume.ids.append(rep2 + N2 * (rep1 + N1 * rep0))
 
     return petsird.DetectorModule(
         detecting_elements=[rep_volume], detecting_element_ids=[0]
@@ -80,7 +81,9 @@ def get_scanner_geometry() -> petsird.ScannerGeometry:
     """return a scanner build by rotating a module around the (0,0,1) axis"""
     detector_module = get_detector_module()
     radius = RADIUS
-    angles = [2 * math.pi * i / NUM_MODULES_ALONG_RING for i in range(NUM_MODULES_ALONG_RING)]
+    angles = [
+        2 * math.pi * i / NUM_MODULES_ALONG_RING for i in range(NUM_MODULES_ALONG_RING)
+    ]
 
     rep_module = petsird.ReplicatedDetectorModule(object=detector_module)
     module_id = 0
@@ -91,7 +94,7 @@ def get_scanner_geometry() -> petsird.ScannerGeometry:
                     (
                         (math.cos(angle), math.sin(angle), 0.0, 0.0),
                         (-math.sin(angle), math.cos(angle), 0.0, 0.0),
-                        (0.0, 0.0, 1.0, MODULE_AXIS_SPACING*ax_mod),
+                        (0.0, 0.0, 1.0, MODULE_AXIS_SPACING * ax_mod),
                     ),
                     dtype="float32",
                 )
@@ -122,7 +125,9 @@ def get_detection_efficiencies(
     # or in linear indices
     #   eff(z1 + NZ * a1, z2 + NZ * a2) == eff(z1, z2 + NZ * abs(a2 - a1))
     # (coincident) SGIDs need to start from 0, so ignoring self-coincident angles
-    num_SGIDs = NUM_MODULES_ALONG_AXIS * NUM_MODULES_ALONG_AXIS * (NUM_MODULES_ALONG_RING-1)
+    num_SGIDs = (
+        NUM_MODULES_ALONG_AXIS * NUM_MODULES_ALONG_AXIS * (NUM_MODULES_ALONG_RING - 1)
+    )
     # SGID = z1 + NZ * (z2 + NZ * abs(a2 - a1) - 1)
     NZ = NUM_MODULES_ALONG_AXIS
     module_pair_SGID_LUT = numpy.ndarray((num_modules, num_modules), dtype="int32")
@@ -133,9 +138,11 @@ def get_detection_efficiencies(
             z2 = mod2 % NZ
             a2 = mod2 // NZ
             if a1 == a2:
-                module_pair_SGID_LUT[mod1, mod2]= -1
+                module_pair_SGID_LUT[mod1, mod2] = -1
             else:
-                module_pair_SGID_LUT[mod1, mod2] = z1 + NZ * (z2 + NZ * (abs(a2 - a1) - 1))
+                module_pair_SGID_LUT[mod1, mod2] = z1 + NZ * (
+                    z2 + NZ * (abs(a2 - a1) - 1)
+                )
 
     # print("SGID LUT:\n", module_pair_SGID_LUT, file=sys.stderr)
     assert numpy.max(module_pair_SGID_LUT) == num_SGIDs - 1
@@ -226,7 +233,12 @@ def get_events(
             mod_and_els = get_module_and_element(
                 header.scanner.scanner_geometry, detector_ids
             )
-            if header.scanner.detection_efficiencies.module_pair_sgidlut[mod_and_els[0].module, mod_and_els[1].module] >= 0:
+            if (
+                header.scanner.detection_efficiencies.module_pair_sgidlut[
+                    mod_and_els[0].module, mod_and_els[1].module
+                ]
+                >= 0
+            ):
                 # in coincidence, we can get out of the loop
                 break
 
