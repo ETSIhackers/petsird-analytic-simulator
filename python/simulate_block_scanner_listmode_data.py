@@ -57,7 +57,7 @@ delta_phi = 2 * xp.pi / num_blocks
 
 # setup an affine transformation matrix to translate the block modules from the
 # center to the radius of the scanner
-aff_mat_trans = xp.eye(4, device=dev)
+aff_mat_trans = xp.eye(4, dtype="float32", device=dev)
 aff_mat_trans[1, -1] = scanner_radius
 
 module_transforms = []
@@ -71,7 +71,9 @@ for i, phi in enumerate(xp.linspace(0, 2 * xp.pi, num_blocks, endpoint=False)):
             [math.sin(phi), math.cos(phi), 0, 0],
             [0, 0, 1, 0],
             [0, 0, 0, 1],
-        ]
+        ],
+        dtype="float32",
+        device=dev,
     )
 
     module_transforms.append(aff_mat_rot @ aff_mat_trans)
@@ -213,11 +215,11 @@ start_el_arr = xp.reshape(start_el, (size(start_el),))
 end_el_arr = xp.reshape(end_el, (size(end_el),))
 
 num_events = emission_data.sum()
-event_start_block = xp.zeros(num_events, dtype=xp.int16, device=dev)
-event_start_el = xp.zeros(num_events, dtype=xp.int16, device=dev)
-event_end_block = xp.zeros(num_events, dtype=xp.int16, device=dev)
-event_end_el = xp.zeros(num_events, dtype=xp.int16, device=dev)
-event_tof_bin = xp.zeros(num_events, dtype=xp.int16, device=dev)
+event_start_block = xp.zeros(num_events, dtype="uint32", device=dev)
+event_start_el = xp.zeros(num_events, dtype="uint32", device=dev)
+event_end_block = xp.zeros(num_events, dtype="uint32", device=dev)
+event_end_el = xp.zeros(num_events, dtype="uint32", device=dev)
+event_tof_bin = xp.zeros(num_events, dtype="int32", device=dev)
 
 event_counter = 0
 
@@ -246,7 +248,7 @@ for ibp, block_pair in enumerate(proj.lor_descriptor.all_block_pairs):
         event_end_el[event_counter : (event_counter + num_slice_events)] = xp.take(
             end_el_arr, inds
         )
-        # event TOF bin
+        # event TOF bin - starting at 0
         event_tof_bin[event_counter : (event_counter + num_slice_events)] = tof_bin
 
         event_counter += num_slice_events
@@ -262,6 +264,11 @@ event_end_el = event_end_el[inds]
 event_tof_bin = event_tof_bin[inds]
 
 del inds
+
+# create the unsigned tof bin (the index to the tof bin edges) that we need to write
+unsigned_event_tof_bin = xp.asarray(
+    event_tof_bin + proj.tof_parameters.num_tofbins // 2, dtype="uint32"
+)
 
 # %%
 # do a sinogram and LM back projection of the emission data
@@ -341,7 +348,7 @@ det_el_efficiencies = xp.ones(
 
 num_SGIDs = 1
 
-module_pair_sgid_lut = xp.full((num_blocks, num_blocks), -1, dtype="int16")
+module_pair_sgid_lut = xp.full((num_blocks, num_blocks), -1, dtype="int32")
 
 for bp in proj.lor_descriptor.all_block_pairs:
     module_pair_sgid_lut[bp[0], bp[1]] = 0
@@ -367,23 +374,81 @@ det_effs = petsird.DetectionEfficiencies(
     module_pair_efficiencies_vector=module_pair_efficiencies_vector,
 )
 
+# %%
+# setup crystal box object
+
+crystal_centers = parallelproj.BlockPETScannerModule(
+    xp, dev, block_shape, block_spacing
+).lor_endpoints
+
+# crystal widths in all dimensions
+cw0 = 4.5
+cw1 = 20.0
+cw2 = 4.5
+
+crystal_shape = petsird.BoxShape(
+    corners=[
+        petsird.Coordinate(
+            c=xp.asarray((-cw0 / 2, -cw1 / 2, -cw2 / 2), dtype="float32")
+        ),
+        petsird.Coordinate(
+            c=xp.asarray((-cw0 / 2, -cw1 / 2, cw2 / 2), dtype="float32")
+        ),
+        petsird.Coordinate(c=xp.asarray((-cw0 / 2, cw1 / 2, cw2 / 2), dtype="float32")),
+        petsird.Coordinate(
+            c=xp.asarray((-cw0 / 2, cw1 / 2, -cw2 / 2), dtype="float32")
+        ),
+        petsird.Coordinate(
+            c=xp.asarray((-cw0 / 2, -cw1 / 2, -cw2 / 2), dtype="float32")
+        ),
+        petsird.Coordinate(
+            c=xp.asarray((-cw0 / 2, -cw1 / 2, cw2 / 2), dtype="float32")
+        ),
+        petsird.Coordinate(c=xp.asarray((-cw0 / 2, cw1 / 2, cw2 / 2), dtype="float32")),
+        petsird.Coordinate(
+            c=xp.asarray((-cw0 / 2, cw1 / 2, -cw2 / 2), dtype="float32")
+        ),
+    ]
+)
+crystal = petsird.BoxSolidVolume(shape=crystal_shape, material_id=1)
+# %%
+# setup the petsird geometry of a module / block
+
+rep_volume = petsird.ReplicatedBoxSolidVolume(object=crystal)
+
+for i_c, crystal_center in enumerate(crystal_centers):
+    translation_matrix = xp.eye(4, dtype="float32")[:-1, :]
+    for j in range(3):
+        translation_matrix[j, -1] = crystal_center[j]
+    transform = petsird.RigidTransformation(matrix=translation_matrix)
+
+    rep_volume.transforms.append(transform)
+    rep_volume.ids.append(i_c)
+
+
+detector_module = petsird.DetectorModule(
+    detecting_elements=[rep_volume], detecting_element_ids=[0]
+)
+
 
 # %%
 # setup the PETSIRD scanner geometry
 rep_module = petsird.ReplicatedDetectorModule(object=detector_module)
 
-
 for i in range(num_blocks):
     transform = petsird.RigidTransformation(matrix=module_transforms[i][:-1, :])
 
     rep_module.ids.append(i)
-    rep_module.transforms.append(module_transforms[i])
+    rep_module.transforms.append(
+        petsird.RigidTransformation(matrix=module_transforms[i][:-1, :])
+    )
 
+scanner_geometry = petsird.ScannerGeometry(replicated_modules=[rep_module], ids=[0])
 # %%
 
 # need energy bin info before being able to construct the detection efficiencies
 # so we will construct a scanner without the efficiencies first
-scanner = petsird.ScannerInformation(
+petsird_scanner = petsird.ScannerInformation(
     model_name="PETSIRD_TEST",
     scanner_geometry=scanner_geometry,
     tof_bin_edges=tofBinEdges,
@@ -393,27 +458,45 @@ scanner = petsird.ScannerInformation(
     event_time_block_duration=1,  # ms
 )
 
-scanner.detection_efficiencies = det_effs
+petsird_scanner.detection_efficiencies = det_effs
 
-# header = petsird.Header(
-#        exam=petsird.ExamInformation(subject=subject, institution=institution),
-#        scanner=get_scanner_info(),
-#    )
+header = petsird.Header(
+    exam=petsird.ExamInformation(subject=subject, institution=institution),
+    scanner=petsird_scanner,
+)
 
 # %%
 # create petsird coincidence events - all in one timeblock without energy information
-
 
 num_el_per_block = proj.lor_descriptor.num_lorendpoints_per_block
 
 det_ID_start = event_start_block * num_el_per_block + event_start_el
 det_ID_end = event_end_block * num_el_per_block + event_end_el
 
-time_block_coinc_events = [
-    petsird.CoincidenceEvent(
-        detector_ids=[det_ID_start[i], det_ID_end[i]],
-        tof_idx=event_tof_bin[i],
-        energy_indices=[0, 0],
-    )
-    for i in range(num_events)
-]
+
+# %%
+with petsird.BinaryPETSIRDWriter("zz.bin") as writer:
+    # with petsird.NDJsonPETSIRDWriter(sys.stdout) as writer:
+    writer.write_header(header)
+    for i_t in range(1):
+        start = i_t * header.scanner.event_time_block_duration
+
+        time_block_prompt_events = [
+            petsird.CoincidenceEvent(
+                detector_ids=[det_ID_start[i], det_ID_end[i]],
+                tof_idx=unsigned_event_tof_bin[i],
+                energy_indices=[0, 0],
+            )
+            for i in range(num_events)
+        ]
+
+        # Normally we'd write multiple blocks, but here we have just one, so let's write a tuple with just one element
+        writer.write_time_blocks(
+            (
+                petsird.TimeBlock.EventTimeBlock(
+                    petsird.EventTimeBlock(
+                        start=start, prompt_events=time_block_prompt_events
+                    )
+                ),
+            )
+        )

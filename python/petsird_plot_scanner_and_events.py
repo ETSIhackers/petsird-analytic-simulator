@@ -97,7 +97,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     fname = args.fname
 
-    if not Path(args.fname).exists():
+    if not Path(fname).exists():
         raise FileNotFoundError(
             f"{args.fname} not found. Create it first using the generator."
         )
@@ -112,7 +112,7 @@ if __name__ == "__main__":
     element_centers = dict()
 
     # with petsird.BinaryPETSIRDReader(sys.stdin.buffer) as reader:
-    with petsird.BinaryPETSIRDReader("test.bin") as reader:
+    with petsird.BinaryPETSIRDReader(fname) as reader:
         header = reader.read_header()
 
         # draw all crystals
