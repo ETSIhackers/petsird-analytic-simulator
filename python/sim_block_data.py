@@ -1,5 +1,6 @@
 # %%
 import array_api_compat.numpy as xp
+from array_api_compat import size
 
 # import array_api_compat.cupy as xp
 # import array_api_compat.torch as xp
@@ -19,7 +20,7 @@ elif "torch" in xp.__name__:
     # using torch valid choices are 'cpu' or 'cuda'
     dev = "cuda"
 
-show_plots = True
+show_plots = False
 run_recon = False
 
 # %%
@@ -192,7 +193,50 @@ if show_plots:
 # put poisson noise on the forward projection
 
 xp.random.seed(0)
-histogrammed_data = xp.random.poisson(img_fwd_tof)
+emission_data = xp.random.poisson(img_fwd_tof)
+
+# %%
+# convert emission histogram to LM
+
+tmp = xp.arange(proj_tof.lor_descriptor.num_lorendpoints_per_block)
+start_el, end_el = xp.meshgrid(tmp, tmp, indexing="ij")
+
+start_el_arr = xp.reshape(start_el, (size(start_el),))
+end_el_arr = xp.reshape(end_el, (size(end_el),))
+
+lm_event_table = xp.zeros((emission_data.sum(), 5), dtype=xp.int16)
+
+event_counter = 0
+
+for ibp, block_pair in enumerate(proj_tof.lor_descriptor.all_block_pairs):
+    for it, tof_bin in enumerate(
+        xp.arange(proj_tof.tof_parameters.num_tofbins)
+        - proj_tof.tof_parameters.num_tofbins // 2
+    ):
+        ss = emission_data[ibp, :, it]
+        num_events = ss.sum()
+        inds = xp.repeat(xp.arange(ss.shape[0]), ss)
+
+        # event start block
+        lm_event_table[event_counter : (event_counter + num_events), 0] = block_pair[0]
+        # event start element in block
+        lm_event_table[event_counter : (event_counter + num_events), 1] = xp.take(
+            start_el_arr, inds
+        )
+        # event end module
+        lm_event_table[event_counter : (event_counter + num_events), 2] = block_pair[1]
+        # event end element in block
+        lm_event_table[event_counter : (event_counter + num_events), 3] = xp.take(
+            end_el_arr, inds
+        )
+        # event TOF bin
+        lm_event_table[event_counter : (event_counter + num_events), 4] = tof_bin
+
+        event_counter += num_events
+
+# shuffle lm_event_table along 0 axis
+xp.random.shuffle(lm_event_table)
+
 
 # %%
 if run_recon:
@@ -207,3 +251,5 @@ if run_recon:
         recon -= step * grad
 
     print("")
+
+# %%
