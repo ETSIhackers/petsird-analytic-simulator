@@ -24,7 +24,7 @@ def sgid_from_module_pair(i_mod_1: int, i_mod_2: int, num_modules: int) -> int:
 # %%
 def module_pair_eff_from_sgd(i_sgd: int) -> float:
     """a random mapping from symmetry group id (sgid) to efficiency"""
-    return float((i_sgd + 1) ** 1.5)
+    return 1 + 0.5 * ((-1) ** i_sgd)
 
 
 # %%
@@ -168,7 +168,7 @@ elif phantom == "squares":
     img[2:-12, 32:-20, 2:] = 3
     img[24:-40, 36:-28, 4:-2] = 9
     img[76:78, 68:72, :-2] = 18
-    img[52:56, 38:42, :-2] = 0
+    img[14:20, 35:75, 5:-3] = 0
 else:
     raise ValueError("Invalid phantom {phantom}")
 
@@ -212,20 +212,18 @@ end_el_arr = xp.reshape(end_el, (size(end_el),))
 nontof_sens_sino = xp.ones(proj.out_shape[:-1], dtype="float32", device=dev)
 
 # simulate random crystal eff. uniformly distributed between 0.2 - 2.2
-det_el_efficiencies = 0.2 + 2 * xp.random.rand(
-    lor_desc.num_block_pairs, lor_desc.num_lorendpoints_per_block
+det_el_efficiencies = 0.2 + 2 * xp.astype(
+    xp.random.rand(scanner.num_modules, lor_desc.num_lorendpoints_per_block), "float32"
 )
 # simulate a few dead crystals
-det_el_efficiencies[det_el_efficiencies < 0.25] = 0
+det_el_efficiencies[det_el_efficiencies < 0.21] = 0
 
 for i, bp in enumerate(proj.lor_descriptor.all_block_pairs):
     sgid = sgid_from_module_pair(bp[0], bp[1], num_blocks)
+    sg_eff = module_pair_eff_from_sgd(sgid)
     start_crystal_eff = det_el_efficiencies[bp[0], start_el_arr]
     end_crystal_eff = det_el_efficiencies[bp[1], end_el_arr]
-
-    nontof_sens_sino[i, ...] = (
-        module_pair_eff_from_sgd(sgid) * start_crystal_eff * end_crystal_eff
-    )
+    nontof_sens_sino[i, ...] = sg_eff * start_crystal_eff * end_crystal_eff
 
 # %%
 # setup the complete forward operator consisting of diag(s) P G
@@ -247,11 +245,6 @@ fwd_op = parallelproj.CompositeLinearOperator(
 # shape (num_block_pairs, num_lors_per_block_pair, num_tofbins)
 
 img_fwd_tof = fwd_op(img)
-scale_fac = num_true_counts / img_fwd_tof.sum()
-
-img *= scale_fac
-img_fwd_tof *= scale_fac
-
 print(img_fwd_tof.shape)
 
 # %%
@@ -263,69 +256,87 @@ print(ones_back_tof.shape)
 
 # %%
 # put poisson noise on the forward projection
-emission_data = xp.random.poisson(img_fwd_tof)
-# emission_data = xp.zeros(img_fwd_tof.shape, dtype=xp.int32, device=dev)
-# emission_data[3, 1, 10] = 1
+if num_true_counts > 0:
+    scale_fac = num_true_counts / img_fwd_tof.sum()
+    img *= scale_fac
+    img_fwd_tof *= scale_fac
+    emission_data = xp.random.poisson(img_fwd_tof)
+else:
+    emission_data = img_fwd_tof
+
+# %%
+if run_recon:
+    recon = xp.ones(img_shape, dtype=xp.float32, device=dev)
+
+    for i in range(num_iter):
+        print(f"{(i+1):03}/{num_iter:03}", end="\r")
+
+        exp = xp.clip(fwd_op(recon), 1e-6, None)
+        grad = fwd_op.adjoint((exp - emission_data) / exp)
+        step = recon / ones_back_tof
+        recon -= step * grad
+
+    print("")
 
 # %%
 # convert emission histogram to LM
 
+if num_true_counts > 0:
+    num_events = emission_data.sum()
+    event_start_block = xp.zeros(num_events, dtype="uint32", device=dev)
+    event_start_el = xp.zeros(num_events, dtype="uint32", device=dev)
+    event_end_block = xp.zeros(num_events, dtype="uint32", device=dev)
+    event_end_el = xp.zeros(num_events, dtype="uint32", device=dev)
+    event_tof_bin = xp.zeros(num_events, dtype="int32", device=dev)
 
-num_events = emission_data.sum()
-event_start_block = xp.zeros(num_events, dtype="uint32", device=dev)
-event_start_el = xp.zeros(num_events, dtype="uint32", device=dev)
-event_end_block = xp.zeros(num_events, dtype="uint32", device=dev)
-event_end_el = xp.zeros(num_events, dtype="uint32", device=dev)
-event_tof_bin = xp.zeros(num_events, dtype="int32", device=dev)
+    event_counter = 0
 
-event_counter = 0
+    for ibp, block_pair in enumerate(proj.lor_descriptor.all_block_pairs):
+        for it, tof_bin in enumerate(
+            xp.arange(proj.tof_parameters.num_tofbins)
+            - proj.tof_parameters.num_tofbins // 2
+        ):
+            ss = emission_data[ibp, :, it]
+            num_slice_events = ss.sum()
+            inds = xp.repeat(xp.arange(ss.shape[0]), ss)
 
-for ibp, block_pair in enumerate(proj.lor_descriptor.all_block_pairs):
-    for it, tof_bin in enumerate(
-        xp.arange(proj.tof_parameters.num_tofbins)
-        - proj.tof_parameters.num_tofbins // 2
-    ):
-        ss = emission_data[ibp, :, it]
-        num_slice_events = ss.sum()
-        inds = xp.repeat(xp.arange(ss.shape[0]), ss)
+            # event start block
+            event_start_block[event_counter : (event_counter + num_slice_events)] = (
+                block_pair[0]
+            )
+            # event start element in block
+            event_start_el[event_counter : (event_counter + num_slice_events)] = (
+                xp.take(start_el_arr, inds)
+            )
+            # event end module
+            event_end_block[event_counter : (event_counter + num_slice_events)] = (
+                block_pair[1]
+            )
+            # event end element in block
+            event_end_el[event_counter : (event_counter + num_slice_events)] = xp.take(
+                end_el_arr, inds
+            )
+            # event TOF bin - starting at 0
+            event_tof_bin[event_counter : (event_counter + num_slice_events)] = tof_bin
 
-        # event start block
-        event_start_block[event_counter : (event_counter + num_slice_events)] = (
-            block_pair[0]
-        )
-        # event start element in block
-        event_start_el[event_counter : (event_counter + num_slice_events)] = xp.take(
-            start_el_arr, inds
-        )
-        # event end module
-        event_end_block[event_counter : (event_counter + num_slice_events)] = (
-            block_pair[1]
-        )
-        # event end element in block
-        event_end_el[event_counter : (event_counter + num_slice_events)] = xp.take(
-            end_el_arr, inds
-        )
-        # event TOF bin - starting at 0
-        event_tof_bin[event_counter : (event_counter + num_slice_events)] = tof_bin
+            event_counter += num_slice_events
 
-        event_counter += num_slice_events
+    # shuffle lm_event_table along 0 axis
+    inds = xp.arange(num_events)
+    xp.random.shuffle(inds)
 
-# shuffle lm_event_table along 0 axis
-inds = xp.arange(num_events)
-xp.random.shuffle(inds)
+    event_start_block = event_start_block[inds]
+    event_start_el = event_start_el[inds]
+    event_end_block = event_end_block[inds]
+    event_end_el = event_end_el[inds]
+    event_tof_bin = event_tof_bin[inds]
 
-event_start_block = event_start_block[inds]
-event_start_el = event_start_el[inds]
-event_end_block = event_end_block[inds]
-event_end_el = event_end_el[inds]
-event_tof_bin = event_tof_bin[inds]
+    del inds
 
-del inds
-
-# create the unsigned tof bin (the index to the tof bin edges) that we need to write
-unsigned_event_tof_bin = xp.asarray(
-    event_tof_bin + proj.tof_parameters.num_tofbins // 2, dtype="uint32"
-)
+    # create the unsigned tof bin (the index to the tof bin edges) that we need to write
+    unsigned_event_tof_bin = xp.asarray(
+        event_tof_bin + proj.tof_parameters.num_tofbins // 2, dtype="uint32"
+    )
 
 # %%
 # Visualize the projector geometry and and the first 3 coincidences
@@ -338,19 +349,20 @@ if show_plots:
     ax_geom.set_zlabel("x2")
     proj.show_geometry(ax_geom)
 
-    for i in range(3):
-        event_start_coord = scanner.get_lor_endpoints(
-            event_start_block[i : (i + 1)], event_start_el[i : (i + 1)]
-        )[0]
-        event_end_coord = scanner.get_lor_endpoints(
-            event_end_block[i : (i + 1)], event_end_el[i : (i + 1)]
-        )[0]
+    if num_true_counts > 0:
+        for i in range(3):
+            event_start_coord = scanner.get_lor_endpoints(
+                event_start_block[i : (i + 1)], event_start_el[i : (i + 1)]
+            )[0]
+            event_end_coord = scanner.get_lor_endpoints(
+                event_end_block[i : (i + 1)], event_end_el[i : (i + 1)]
+            )[0]
 
-        ax_geom.plot(
-            [event_start_coord[0], event_end_coord[0]],
-            [event_start_coord[1], event_end_coord[1]],
-            [event_start_coord[2], event_end_coord[2]],
-        )
+            ax_geom.plot(
+                [event_start_coord[0], event_end_coord[0]],
+                [event_start_coord[1], event_end_coord[1]],
+                [event_start_coord[2], event_end_coord[2]],
+            )
 
     fig_geom.show()
 
@@ -386,8 +398,9 @@ if show_plots:
 # if the Poisson emission sinogram to LM conversion is correct, those should
 # look very similar
 
-if check_backprojection:
+if check_backprojection and (num_true_counts > 0):
     histo_back = proj.adjoint(emission_data)
+
     lm_back = parallelproj.joseph3d_back_tof_lm(
         xstart=scanner.get_lor_endpoints(event_start_block, event_start_el),
         xend=scanner.get_lor_endpoints(event_end_block, event_end_el),
@@ -414,218 +427,200 @@ if check_backprojection:
     vi = pv.ThreeAxisViewer([histo_back, lm_back, histo_back - lm_back])
 
 # %%
-if run_recon:
-    recon = xp.ones(img_shape, dtype=xp.float32, device=dev)
-
-    for i in range(num_iter):
-        print(f"{(i+1):03}/{num_iter:03}", end="\r")
-
-        exp = xp.clip(fwd_op(recon), 1e-6, None)
-        grad = fwd_op.adjoint((exp - emission_data) / exp)
-        step = recon / ones_back_tof
-        recon -= step * grad
-
-    print("")
-
-# %%
 # create header
 
-subject = petsird.Subject(id="42")
-institution = petsird.Institution(
-    name="Ministry of Silly Walks",
-    address="42 Silly Walks Street, Silly Walks City",
-)
-
-# %%
-# create petsird scanner geometry
-
-# scanner_geometry = get_scanner_geometry()
-
-# TODO scanner_info.bulk_materials
-
-# %%
-# create non geometry related scanner information
-
-num_energy_bins = 1
-
-# TOF bin edges (in mm)
-tofBinEdges = xp.linspace(
-    -proj.tof_parameters.num_tofbins * proj.tof_parameters.tofbin_width / 2,
-    proj.tof_parameters.num_tofbins * proj.tof_parameters.tofbin_width / 2,
-    proj.tof_parameters.num_tofbins + 1,
-    dtype="float32",
-)
-
-energyBinEdges = xp.linspace(430, 650, num_energy_bins, dtype="float32")
-
-num_total_elements = proj.lor_descriptor.scanner.num_lor_endpoints
-
-# create detectors efficiencies (all ones)
-det_el_efficiencies = xp.ones(
-    (num_total_elements, num_energy_bins), dtype="float32", device=dev
-)
-
-# setup the symmetry group ID LUT
-# we only create one symmetry group ID (1) and set the group ID to -1 for block
-# block pairs that are not in coincidence
-
-module_pair_sgid_lut = xp.full((num_blocks, num_blocks), -1, dtype="int32")
-
-for bp in proj.lor_descriptor.all_block_pairs:
-    # generate a random sgd
-    sgid = sgid_from_module_pair(bp[0], bp[1], num_blocks)
-    module_pair_sgid_lut[bp[0], bp[1]] = sgid
-    module_pair_sgid_lut[bp[1], bp[0]] = sgid
-
-num_SGIDs = module_pair_sgid_lut.max() - 1
-
-num_el_per_module = proj.lor_descriptor.scanner.num_lor_endpoints_per_module[0]
-
-module_pair_efficiencies_shape = (
-    num_el_per_module,
-    num_energy_bins,
-    num_el_per_module,
-    num_energy_bins,
-)
-
-module_pair_efficiencies_vector = []
-
-for sgid in range(num_SGIDs):
-    eff = module_pair_eff_from_sgd(sgid)
-    vals = xp.full(module_pair_efficiencies_shape, eff, dtype="float32", device=dev)
-
-    module_pair_efficiencies_vector.append(
-        petsird.ModulePairEfficiencies(values=vals, sgid=sgid)
+if num_true_counts > 0:
+    subject = petsird.Subject(id="42")
+    institution = petsird.Institution(
+        name="Ministry of Silly Walks",
+        address="42 Silly Walks Street, Silly Walks City",
     )
 
-det_effs = petsird.DetectionEfficiencies(
-    det_el_efficiencies=det_el_efficiencies,
-    module_pair_sgidlut=module_pair_sgid_lut,
-    module_pair_efficiencies_vector=module_pair_efficiencies_vector,
-)
+    # %%
+    # create non geometry related scanner information
 
-# %%
-# setup crystal box object
+    num_energy_bins = 1
 
-crystal_centers = parallelproj.BlockPETScannerModule(
-    xp, dev, block_shape, block_spacing
-).lor_endpoints
-
-# crystal widths in all dimensions
-cw0 = block_spacing[0]
-cw1 = block_spacing[1]
-cw2 = block_spacing[2]
-
-crystal_shape = petsird.BoxShape(
-    corners=[
-        petsird.Coordinate(
-            c=xp.asarray((-cw0 / 2, -cw1 / 2, -cw2 / 2), dtype="float32")
-        ),
-        petsird.Coordinate(
-            c=xp.asarray((-cw0 / 2, -cw1 / 2, cw2 / 2), dtype="float32")
-        ),
-        petsird.Coordinate(c=xp.asarray((-cw0 / 2, cw1 / 2, cw2 / 2), dtype="float32")),
-        petsird.Coordinate(
-            c=xp.asarray((-cw0 / 2, cw1 / 2, -cw2 / 2), dtype="float32")
-        ),
-        petsird.Coordinate(
-            c=xp.asarray((cw0 / 2, -cw1 / 2, -cw2 / 2), dtype="float32")
-        ),
-        petsird.Coordinate(c=xp.asarray((cw0 / 2, -cw1 / 2, cw2 / 2), dtype="float32")),
-        petsird.Coordinate(c=xp.asarray((cw0 / 2, cw1 / 2, cw2 / 2), dtype="float32")),
-        petsird.Coordinate(c=xp.asarray((cw0 / 2, cw1 / 2, -cw2 / 2), dtype="float32")),
-    ]
-)
-crystal = petsird.BoxSolidVolume(shape=crystal_shape, material_id=1)
-# %%
-# setup the petsird geometry of a module / block
-
-rep_volume = petsird.ReplicatedBoxSolidVolume(object=crystal)
-
-for i_c, crystal_center in enumerate(crystal_centers):
-    translation_matrix = xp.eye(4, dtype="float32")[:-1, :]
-    for j in range(3):
-        translation_matrix[j, -1] = crystal_center[j]
-    transform = petsird.RigidTransformation(matrix=translation_matrix)
-
-    rep_volume.transforms.append(transform)
-    rep_volume.ids.append(i_c)
-
-
-detector_module = petsird.DetectorModule(
-    detecting_elements=[rep_volume], detecting_element_ids=[0]
-)
-
-
-# %%
-# setup the PETSIRD scanner geometry
-rep_module = petsird.ReplicatedDetectorModule(object=detector_module)
-
-for i in range(num_blocks):
-    transform = petsird.RigidTransformation(matrix=module_transforms[i][:-1, :])
-
-    rep_module.ids.append(i)
-    rep_module.transforms.append(
-        petsird.RigidTransformation(matrix=module_transforms[i][:-1, :])
+    # TOF bin edges (in mm)
+    tofBinEdges = xp.linspace(
+        -proj.tof_parameters.num_tofbins * proj.tof_parameters.tofbin_width / 2,
+        proj.tof_parameters.num_tofbins * proj.tof_parameters.tofbin_width / 2,
+        proj.tof_parameters.num_tofbins + 1,
+        dtype="float32",
     )
 
-scanner_geometry = petsird.ScannerGeometry(replicated_modules=[rep_module], ids=[0])
-# %%
+    energyBinEdges = xp.linspace(430, 650, num_energy_bins, dtype="float32")
 
-# need energy bin info before being able to construct the detection efficiencies
-# so we will construct a scanner without the efficiencies first
-petsird_scanner = petsird.ScannerInformation(
-    model_name="PETSIRD_TEST",
-    scanner_geometry=scanner_geometry,
-    tof_bin_edges=tofBinEdges,
-    tof_resolution=2.35 * proj.tof_parameters.sigma_tof,  # FWHM in mm
-    energy_bin_edges=energyBinEdges,
-    energy_resolution_at_511=0.11,  # as fraction of 511
-    event_time_block_duration=1,  # ms
-)
+    num_total_elements = proj.lor_descriptor.scanner.num_lor_endpoints
 
-petsird_scanner.detection_efficiencies = det_effs
+    # setup the symmetry group ID LUT
+    # we only create one symmetry group ID (1) and set the group ID to -1 for block
+    # block pairs that are not in coincidence
 
-header = petsird.Header(
-    exam=petsird.ExamInformation(subject=subject, institution=institution),
-    scanner=petsird_scanner,
-)
+    module_pair_sgid_lut = xp.full((num_blocks, num_blocks), -1, dtype="int32")
 
-# %%
-# create petsird coincidence events - all in one timeblock without energy information
+    for bp in proj.lor_descriptor.all_block_pairs:
+        # generate a random sgd
+        sgid = sgid_from_module_pair(bp[0], bp[1], num_blocks)
+        module_pair_sgid_lut[bp[0], bp[1]] = sgid
+        module_pair_sgid_lut[bp[1], bp[0]] = sgid
 
-num_el_per_block = proj.lor_descriptor.num_lorendpoints_per_block
+    num_SGIDs = module_pair_sgid_lut.max() - 1
 
-det_ID_start = event_start_block * num_el_per_block + event_start_el
-det_ID_end = event_end_block * num_el_per_block + event_end_el
+    num_el_per_module = proj.lor_descriptor.scanner.num_lor_endpoints_per_module[0]
 
+    module_pair_efficiencies_shape = (
+        num_el_per_module,
+        num_energy_bins,
+        num_el_per_module,
+        num_energy_bins,
+    )
 
-# %%
-# write petsird data
+    module_pair_efficiencies_vector = []
 
-if not skip_writing:
-    print("Writing LM file")
-    with petsird.BinaryPETSIRDWriter(fname) as writer:
-        writer.write_header(header)
-        for i_t in range(1):
-            start = i_t * header.scanner.event_time_block_duration
+    for sgid in range(num_SGIDs):
+        eff = module_pair_eff_from_sgd(sgid)
+        vals = xp.full(module_pair_efficiencies_shape, eff, dtype="float32", device=dev)
 
-            time_block_prompt_events = [
-                petsird.CoincidenceEvent(
-                    detector_ids=[det_ID_start[i], det_ID_end[i]],
-                    tof_idx=unsigned_event_tof_bin[i],
-                    energy_indices=[0, 0],
+        module_pair_efficiencies_vector.append(
+            petsird.ModulePairEfficiencies(values=vals, sgid=sgid)
+        )
+
+    det_effs = petsird.DetectionEfficiencies(
+        det_el_efficiencies=xp.reshape(
+            det_el_efficiencies, (size(det_el_efficiencies), 1)
+        ),
+        module_pair_sgidlut=module_pair_sgid_lut,
+        module_pair_efficiencies_vector=module_pair_efficiencies_vector,
+    )
+
+    # %%
+    # setup crystal box object
+
+    crystal_centers = parallelproj.BlockPETScannerModule(
+        xp, dev, block_shape, block_spacing
+    ).lor_endpoints
+
+    # crystal widths in all dimensions
+    cw0 = block_spacing[0]
+    cw1 = block_spacing[1]
+    cw2 = block_spacing[2]
+
+    crystal_shape = petsird.BoxShape(
+        corners=[
+            petsird.Coordinate(
+                c=xp.asarray((-cw0 / 2, -cw1 / 2, -cw2 / 2), dtype="float32")
+            ),
+            petsird.Coordinate(
+                c=xp.asarray((-cw0 / 2, -cw1 / 2, cw2 / 2), dtype="float32")
+            ),
+            petsird.Coordinate(
+                c=xp.asarray((-cw0 / 2, cw1 / 2, cw2 / 2), dtype="float32")
+            ),
+            petsird.Coordinate(
+                c=xp.asarray((-cw0 / 2, cw1 / 2, -cw2 / 2), dtype="float32")
+            ),
+            petsird.Coordinate(
+                c=xp.asarray((cw0 / 2, -cw1 / 2, -cw2 / 2), dtype="float32")
+            ),
+            petsird.Coordinate(
+                c=xp.asarray((cw0 / 2, -cw1 / 2, cw2 / 2), dtype="float32")
+            ),
+            petsird.Coordinate(
+                c=xp.asarray((cw0 / 2, cw1 / 2, cw2 / 2), dtype="float32")
+            ),
+            petsird.Coordinate(
+                c=xp.asarray((cw0 / 2, cw1 / 2, -cw2 / 2), dtype="float32")
+            ),
+        ]
+    )
+    crystal = petsird.BoxSolidVolume(shape=crystal_shape, material_id=1)
+    # %%
+    # setup the petsird geometry of a module / block
+
+    rep_volume = petsird.ReplicatedBoxSolidVolume(object=crystal)
+
+    for i_c, crystal_center in enumerate(crystal_centers):
+        translation_matrix = xp.eye(4, dtype="float32")[:-1, :]
+        for j in range(3):
+            translation_matrix[j, -1] = crystal_center[j]
+        transform = petsird.RigidTransformation(matrix=translation_matrix)
+
+        rep_volume.transforms.append(transform)
+        rep_volume.ids.append(i_c)
+
+    detector_module = petsird.DetectorModule(
+        detecting_elements=[rep_volume], detecting_element_ids=[0]
+    )
+
+    # %%
+    # setup the PETSIRD scanner geometry
+    rep_module = petsird.ReplicatedDetectorModule(object=detector_module)
+
+    for i in range(num_blocks):
+        transform = petsird.RigidTransformation(matrix=module_transforms[i][:-1, :])
+
+        rep_module.ids.append(i)
+        rep_module.transforms.append(
+            petsird.RigidTransformation(matrix=module_transforms[i][:-1, :])
+        )
+
+    scanner_geometry = petsird.ScannerGeometry(replicated_modules=[rep_module], ids=[0])
+    # %%
+
+    # need energy bin info before being able to construct the detection efficiencies
+    # so we will construct a scanner without the efficiencies first
+    petsird_scanner = petsird.ScannerInformation(
+        model_name="PETSIRD_TEST",
+        scanner_geometry=scanner_geometry,
+        tof_bin_edges=tofBinEdges,
+        tof_resolution=2.35 * proj.tof_parameters.sigma_tof,  # FWHM in mm
+        energy_bin_edges=energyBinEdges,
+        energy_resolution_at_511=0.11,  # as fraction of 511
+        event_time_block_duration=1,  # ms
+    )
+
+    petsird_scanner.detection_efficiencies = det_effs
+
+    header = petsird.Header(
+        exam=petsird.ExamInformation(subject=subject, institution=institution),
+        scanner=petsird_scanner,
+    )
+
+    # %%
+    # create petsird coincidence events - all in one timeblock without energy information
+
+    num_el_per_block = proj.lor_descriptor.num_lorendpoints_per_block
+
+    det_ID_start = event_start_block * num_el_per_block + event_start_el
+    det_ID_end = event_end_block * num_el_per_block + event_end_el
+
+    # %%
+    # write petsird data
+
+    if not skip_writing:
+        print("Writing LM file")
+        with petsird.BinaryPETSIRDWriter(fname) as writer:
+            writer.write_header(header)
+            for i_t in range(1):
+                start = i_t * header.scanner.event_time_block_duration
+
+                time_block_prompt_events = [
+                    petsird.CoincidenceEvent(
+                        detector_ids=[det_ID_start[i], det_ID_end[i]],
+                        tof_idx=unsigned_event_tof_bin[i],
+                        energy_indices=[0, 0],
+                    )
+                    for i in range(num_events)
+                ]
+
+                # Normally we'd write multiple blocks, but here we have just one, so let's write a tuple with just one element
+                writer.write_time_blocks(
+                    (
+                        petsird.TimeBlock.EventTimeBlock(
+                            petsird.EventTimeBlock(
+                                start=start, prompt_events=time_block_prompt_events
+                            )
+                        ),
+                    )
                 )
-                for i in range(num_events)
-            ]
-
-            # Normally we'd write multiple blocks, but here we have just one, so let's write a tuple with just one element
-            writer.write_time_blocks(
-                (
-                    petsird.TimeBlock.EventTimeBlock(
-                        petsird.EventTimeBlock(
-                            start=start, prompt_events=time_block_prompt_events
-                        )
-                    ),
-                )
-            )
