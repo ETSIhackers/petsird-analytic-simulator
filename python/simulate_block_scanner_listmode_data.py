@@ -469,7 +469,7 @@ if num_true_counts > 0:
         sgid = sgid_from_module_pair(bp[0], bp[1], num_blocks)
         module_pair_sgid_lut[bp[0], bp[1]] = sgid
 
-    num_SGIDs = module_pair_sgid_lut.max() - 1
+    num_SGIDs = module_pair_sgid_lut.max() + 1
 
     num_el_per_module = proj.lor_descriptor.scanner.num_lor_endpoints_per_module[0]
 
