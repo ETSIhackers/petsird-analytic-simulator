@@ -75,91 +75,97 @@ def transform_BoxShape(
     )
 
 
-if __name__ == "__main__":
+# %%
+# parse the command line
 
-    dev = "cpu"
+parser = argparse.ArgumentParser()
+parser.add_argument("--fname", default="sim_lm.bin")
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--fname", default="sim_lm.bin")
+args = parser.parse_args()
+fname = args.fname
+dev = "cpu"
 
-    args = parser.parse_args()
-    fname = args.fname
+if not Path(fname).exists():
+    raise FileNotFoundError(
+        f"{args.fname} not found. Create it first using the generator."
+    )
 
-    if not Path(fname).exists():
-        raise FileNotFoundError(
-            f"{args.fname} not found. Create it first using the generator."
-        )
+# %%
+# read the scanner geometry
 
-    # dictionary to store the transformations and centers of the detecting elements
-    # here we assume that we only have BoxShapes
-    element_transforms = dict()
-    element_centers = dict()
+# dictionary to store the transformations and centers of the detecting elements
+# here we assume that we only have BoxShapes
+element_transforms = dict()
+element_centers = dict()
 
-    # with petsird.BinaryPETSIRDReader(sys.stdin.buffer) as reader:
-    with petsird.BinaryPETSIRDReader(fname) as reader:
-        header = reader.read_header()
+reader = petsird.BinaryPETSIRDReader(fname)
+header = reader.read_header()
 
-        # draw all crystals
-        for rep_module in header.scanner.scanner_geometry.replicated_modules:
-            det_el = rep_module.object.detecting_elements
-            for i_mod, mod_transform in enumerate(rep_module.transforms):
-                for rep_volume in det_el:
-                    for i_el, transform in enumerate(rep_volume.transforms):
+# draw all crystals
+for rep_module in header.scanner.scanner_geometry.replicated_modules:
+    det_el = rep_module.object.detecting_elements
+    for i_mod, mod_transform in enumerate(rep_module.transforms):
+        for rep_volume in det_el:
+            for i_el, transform in enumerate(rep_volume.transforms):
 
-                        combined_transform = mult_transforms([mod_transform, transform])
-                        transformed_boxshape = transform_BoxShape(
-                            combined_transform, rep_volume.object.shape
-                        )
+                combined_transform = mult_transforms([mod_transform, transform])
+                transformed_boxshape = transform_BoxShape(
+                    combined_transform, rep_volume.object.shape
+                )
 
-                        transformed_boxshape_vertices = xp.array(
-                            [c.c for c in transformed_boxshape.corners]
-                        )
+                transformed_boxshape_vertices = xp.array(
+                    [c.c for c in transformed_boxshape.corners]
+                )
 
-                        element_transforms[(i_mod, i_el)] = combined_transform
+                element_transforms[(i_mod, i_el)] = combined_transform
 
-                        element_centers[(i_mod, i_el)] = (
-                            transformed_boxshape_vertices.mean(axis=0)
-                        )
+                element_centers[(i_mod, i_el)] = transformed_boxshape_vertices.mean(
+                    axis=0
+                )
 
-        # ----
-        # read events
+# %%
+# read all coincidence events
 
-        num_prompts = 0
-        event_counter = 0
-        num_tof_bins = len(header.scanner.tof_bin_edges) - 1
+num_prompts = 0
+event_counter = 0
+num_tof_bins = header.scanner.number_of_tof_bins()
 
-        xstart = []
-        xend = []
-        tof_bin = []
-        effs = []
+xstart = []
+xend = []
+tof_bin = []
+effs = []
 
-        for i_time_block, time_block in enumerate(reader.read_time_blocks()):
-            if isinstance(time_block, petsird.TimeBlock.EventTimeBlock):
-                num_prompts += len(time_block.value.prompt_events)
+for i_time_block, time_block in enumerate(reader.read_time_blocks()):
+    if isinstance(time_block, petsird.TimeBlock.EventTimeBlock):
+        num_prompts += len(time_block.value.prompt_events)
 
-                for i_event, event in enumerate(time_block.value.prompt_events):
-                    event_mods_and_els = get_module_and_element(
-                        header.scanner.scanner_geometry, event.detector_ids
-                    )
+        for i_event, event in enumerate(time_block.value.prompt_events):
+            event_mods_and_els = get_module_and_element(
+                header.scanner.scanner_geometry, event.detector_ids
+            )
 
-                    event_start_coord = element_centers[
-                        event_mods_and_els[0].module, event_mods_and_els[0].el
-                    ]
-                    xstart.append(event_start_coord)
+            event_start_coord = element_centers[
+                event_mods_and_els[0].module, event_mods_and_els[0].el
+            ]
+            xstart.append(event_start_coord)
 
-                    event_end_coord = element_centers[
-                        event_mods_and_els[1].module, event_mods_and_els[1].el
-                    ]
-                    xend.append(event_end_coord)
+            event_end_coord = element_centers[
+                event_mods_and_els[1].module, event_mods_and_els[1].el
+            ]
+            xend.append(event_end_coord)
 
-                    # get the event efficiencies
-                    effs.append(get_detection_efficiency(header.scanner, event))
-                    # get the signed event TOF bin (0 is the central bin)
-                    tof_bin.append(event.tof_idx - num_tof_bins // 2)
+            # get the event efficiencies
+            effs.append(get_detection_efficiency(header.scanner, event))
+            # get the signed event TOF bin (0 is the central bin)
+            tof_bin.append(event.tof_idx - num_tof_bins // 2)
 
-                    event_counter += 1
+            event_counter += 1
 
-    xstart = xp.asarray(xstart, device=dev)
-    xend = xp.asarray(xend, device=dev)
-    effs = xp.asarray(effs, device=dev)
-    tof_bin = xp.asarray(tof_bin, device=dev)
+reader.close()
+
+xstart = xp.asarray(xstart, device=dev)
+xend = xp.asarray(xend, device=dev)
+effs = xp.asarray(effs, device=dev)
+tof_bin = xp.asarray(tof_bin, device=dev)
+
+# %%

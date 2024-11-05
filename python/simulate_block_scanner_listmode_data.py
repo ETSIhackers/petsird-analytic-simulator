@@ -163,7 +163,12 @@ img[52:56, 38:42, :-2] = 0
 
 sig_tof = tof_fwhm_mm / 2.35
 tof_bin_width = 0.8 * sig_tof
-num_tof_bins = int(2 * (scanner_radius // tof_bin_width) + 1)
+# calculate the number of TOF bins
+# we set it to twice the image diagonal divided by the tof bin width
+# and make sure it is an odd number
+num_tof_bins = int(2 * xp.sqrt(2) * img_shape[0] * voxel_size[0] / tof_bin_width)
+if num_tof_bins % 2 == 0:
+    num_tof_bins += 1
 
 proj = parallelproj.EqualBlockPETProjector(lor_desc, img_shape, voxel_size)
 proj.tof_parameters = parallelproj.TOFParameters(
@@ -180,10 +185,10 @@ assert proj.adjointness_test(xp, dev)
 # Visualize the projector geometry and all LORs
 
 if show_plots:
-    fig = plt.figure(figsize=(4, 4), tight_layout=True)
-    ax0 = fig.add_subplot(111, projection="3d")
-    proj.show_geometry(ax0)
-    fig.show()
+    fig_geom = plt.figure(figsize=(4, 4), tight_layout=True)
+    ax_geom = fig_geom.add_subplot(111, projection="3d")
+    proj.show_geometry(ax_geom)
+    fig_geom.show()
 
 
 # %%
@@ -247,7 +252,7 @@ if show_plots:
             vmax=vmax,
             cmap="Greys",
         )
-    ax6[1].set_title("TOF back projection of ones")
+        ax6[i].set_title(f"sens. img. sl {sl}", fontsize="medium")
     fig6.show()
 
 # %%
@@ -322,6 +327,23 @@ del inds
 unsigned_event_tof_bin = xp.asarray(
     event_tof_bin + proj.tof_parameters.num_tofbins // 2, dtype="uint32"
 )
+
+# visualize the first 3 coincidence events
+if show_plots:
+    for i in range(3):
+        event_start_coord = scanner.get_lor_endpoints(
+            event_start_block[i : (i + 1)], event_start_el[i : (i + 1)]
+        )[0]
+        event_end_coord = scanner.get_lor_endpoints(
+            event_end_block[i : (i + 1)], event_end_el[i : (i + 1)]
+        )[0]
+
+        ax_geom.plot(
+            [event_start_coord[0], event_end_coord[0]],
+            [event_start_coord[1], event_end_coord[1]],
+            [event_start_coord[2], event_end_coord[2]],
+        )
+
 
 # %%
 # do a sinogram and LM back projection of the emission data
