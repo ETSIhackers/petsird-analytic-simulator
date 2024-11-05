@@ -3,6 +3,7 @@ import array_api_compat.numpy as xp
 import pymirc.viewer as pv
 import argparse
 from array_api_compat import size
+from itertools import combinations
 
 import parallelproj
 import petsird
@@ -10,15 +11,19 @@ import matplotlib.pyplot as plt
 import math
 
 
-# %%
-def sgid_from_module_pair(i_mod_1: int, i_mod_2: int, num_modules: int) -> int:
-    """a random mapping between two modules into a symmetry group"""
+# %% c
+def circular_distance(i_mod_1: int, i_mod_2: int, num_modules: int) -> int:
     clockwise_distance = abs(i_mod_1 - i_mod_2)
     counterclockwise_distance = num_modules - clockwise_distance
 
-    sgid = (min(clockwise_distance, counterclockwise_distance) + 2) % 3
+    return min(clockwise_distance, counterclockwise_distance)
 
-    return sgid
+
+# %%
+def sgid_from_module_pair(i_mod_1: int, i_mod_2: int, num_modules: int) -> int:
+    """a random mapping between two modules into a symmetry group"""
+
+    return circular_distance(i_mod_1, i_mod_2, num_modules) % 3
 
 
 # %%
@@ -138,10 +143,10 @@ scanner = parallelproj.ModularizedPETScannerGeometry(mods)
 # To do this, we have manually define a list containing pairs of block numbers.
 # Here, we define 9 block pairs. Note that more pairs would be possible.
 
-block_pairs = []
-
-for j in range(num_blocks):
-    block_pairs += [[j, (j + 3 + i) % num_blocks] for i in range(7)]
+all_combinations = combinations(range(num_blocks), 2)
+block_pairs = [
+    (v1, v2) for v1, v2 in all_combinations if circular_distance(v1, v2, num_blocks) > 2
+]
 
 lor_desc = parallelproj.EqualBlockPETLORDescriptor(
     scanner,
@@ -165,7 +170,7 @@ if phantom == "uniform_cylinder":
     for i in range(img_shape[2]):
         img[..., i] = disk
 elif phantom == "squares":
-    img[2:-12, 32:-20, 2:] = 3
+    img[2:-12, 32:-20, 2:-1] = 3
     img[24:-40, 36:-28, 4:-2] = 9
     img[76:78, 68:72, :-2] = 18
     img[14:20, 35:75, 5:-3] = 0
@@ -463,7 +468,6 @@ if num_true_counts > 0:
         # generate a random sgd
         sgid = sgid_from_module_pair(bp[0], bp[1], num_blocks)
         module_pair_sgid_lut[bp[0], bp[1]] = sgid
-        module_pair_sgid_lut[bp[1], bp[0]] = sgid
 
     num_SGIDs = module_pair_sgid_lut.max() - 1
 
