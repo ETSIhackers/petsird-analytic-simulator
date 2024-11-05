@@ -9,6 +9,20 @@ import petsird
 import matplotlib.pyplot as plt
 import math
 
+
+# %%
+def module_distance(i_mod_1, i_mod_2, num_modules):
+    clockwise_distance = abs(i_mod_1 - i_mod_2)
+    counterclockwise_distance = num_modules - clockwise_distance
+
+    return min(clockwise_distance, counterclockwise_distance)
+
+
+# %%
+def module_pair_eff_from_sgd(i_sgd):
+    return ((i_sgd % 3) + 1) ** 2
+
+
 # %%
 # parse the command line for the input parameters below
 parser = argparse.ArgumentParser()
@@ -18,6 +32,9 @@ parser.add_argument("--num_true_counts", type=int, default=int(1e6))
 parser.add_argument("--show_plots", default=False, action="store_true")
 parser.add_argument("--check_backprojection", default=False, action="store_true")
 parser.add_argument("--run_recon", default=False, action="store_true")
+parser.add_argument("--num_iter", type=int, default=10)
+parser.add_argument("--skip_writing", default=False, action="store_true")
+parser.add_argument("--fwhm_mm", type=float, default=3.0)
 
 args = parser.parse_args()
 
@@ -26,6 +43,9 @@ show_plots = args.show_plots
 check_backprojection = args.check_backprojection
 run_recon = args.run_recon
 num_true_counts = args.num_true_counts
+skip_writing = args.skip_writing
+num_iter = args.num_iter
+fwhm_mm = args.fwhm_mm
 
 dev = "cpu"
 
@@ -40,8 +60,6 @@ block_spacing = (4.5, 10.0, 4.5)
 scanner_radius = 100
 # number of modules
 num_blocks = 12
-# FWHM of the Gaussian res model in mm
-fwhm_mm = 4.0
 
 
 # %%
@@ -120,12 +138,13 @@ lor_desc = parallelproj.EqualBlockPETLORDescriptor(
 #
 # Now that the LOR descriptor is defined, we can setup the projector.
 
-img_shape = (50, 50, 6)
-voxel_size = (2.0, 2.0, 2.0)
+img_shape = (100, 100, 12)
+voxel_size = (1.0, 1.0, 1.0)
 img = xp.zeros(img_shape, dtype=xp.float32, device=dev)
-img[4:-4, 4:-4, :] = 3
-img[16:-16, 16:-16, 2:-2] = 9
-img[30:32, 30:32, 2:-2] = 18
+img[2:-12, 32:-20, 2:] = 3
+img[24:-40, 36:-28, 4:-2] = 9
+img[76:78, 68:72, :-2] = 18
+img[52:56, 38:42, :-2] = 0
 
 # %%
 # Setup of a TOF projector
@@ -145,14 +164,9 @@ assert proj.adjointness_test(xp, dev)
 # Visualize the projector geometry and all LORs
 
 if show_plots:
-    fig = plt.figure(figsize=(8, 4), tight_layout=True)
-    ax0 = fig.add_subplot(121, projection="3d")
-    ax1 = fig.add_subplot(122, projection="3d")
+    fig = plt.figure(figsize=(4, 4), tight_layout=True)
+    ax0 = fig.add_subplot(111, projection="3d")
     proj.show_geometry(ax0)
-    proj.show_geometry(ax1)
-    # lor_desc.show_block_pair_lors(
-    #    ax1, block_pair_nums=xp.arange(7), color=plt.cm.tab10(0)
-    # )
     fig.show()
 
 
@@ -160,7 +174,21 @@ if show_plots:
 sig = fwhm_mm / (2.35 * xp.asarray(voxel_size, device=dev))
 res_model = parallelproj.GaussianFilterOperator(img_shape, sigma=sig)
 
-fwd_op = parallelproj.CompositeLinearOperator([proj, res_model])
+nontof_sens_sino = xp.ones(proj.out_shape[:-1], dtype="float32", device=dev)
+
+for i, bp in enumerate(proj.lor_descriptor.all_block_pairs):
+    i_sgd = module_distance(bp[0], bp[1], num_blocks)
+    nontof_sens_sino[i, ...] = module_pair_eff_from_sgd(i_sgd)
+
+fwd_op = parallelproj.CompositeLinearOperator(
+    [
+        parallelproj.TOFNonTOFElementwiseMultiplicationOperator(
+            proj.out_shape, nontof_sens_sino
+        ),
+        proj,
+        res_model,
+    ]
+)
 
 # %%
 # TOF forward project an image full of ones. The forward projection has the
@@ -312,7 +340,6 @@ if check_backprojection:
 # %%
 if run_recon:
     recon = xp.ones(img_shape, dtype=xp.float32, device=dev)
-    num_iter = 20
 
     for i in range(num_iter):
         print(f"{(i+1):03}/{num_iter}", end="\r")
@@ -365,26 +392,33 @@ det_el_efficiencies = xp.ones(
 # we only create one symmetry group ID (1) and set the group ID to -1 for block
 # block pairs that are not in coincidence
 
-num_SGIDs = 1
+num_SGIDs = 3
 
 module_pair_sgid_lut = xp.full((num_blocks, num_blocks), -1, dtype="int32")
 
 for bp in proj.lor_descriptor.all_block_pairs:
-    module_pair_sgid_lut[bp[0], bp[1]] = 0
-    module_pair_sgid_lut[bp[1], bp[0]] = 0
+    # generate a random sgd
+    sgd = module_distance(bp[0], bp[1], num_blocks)
+    module_pair_sgid_lut[bp[0], bp[1]] = sgd
+    module_pair_sgid_lut[bp[1], bp[0]] = sgd
 
 num_el_per_module = proj.lor_descriptor.scanner.num_lor_endpoints_per_module[0]
-module_pair_efficiencies = xp.ones(
-    (num_el_per_module, num_energy_bins, num_el_per_module, num_energy_bins),
-    dtype="float32",
-    device=dev,
+
+module_pair_efficiencies_shape = (
+    num_el_per_module,
+    num_energy_bins,
+    num_el_per_module,
+    num_energy_bins,
 )
 
 module_pair_efficiencies_vector = []
 
 for i in range(num_SGIDs):
+    eff = module_pair_eff_from_sgd(sgd)
+    vals = xp.full(module_pair_efficiencies_shape, eff, dtype="float32", device=dev)
+
     module_pair_efficiencies_vector.append(
-        petsird.ModulePairEfficiencies(values=module_pair_efficiencies, sgid=i)
+        petsird.ModulePairEfficiencies(values=vals, sgid=i)
     )
 
 det_effs = petsird.DetectionEfficiencies(
@@ -492,29 +526,29 @@ det_ID_end = event_end_block * num_el_per_block + event_end_el
 # %%
 # write petsird data
 
-print("Writing LM file")
-with petsird.BinaryPETSIRDWriter(fname) as writer:
-    # with petsird.NDJsonPETSIRDWriter(sys.stdout) as writer:
-    writer.write_header(header)
-    for i_t in range(1):
-        start = i_t * header.scanner.event_time_block_duration
+if not skip_writing:
+    print("Writing LM file")
+    with petsird.BinaryPETSIRDWriter(fname) as writer:
+        writer.write_header(header)
+        for i_t in range(1):
+            start = i_t * header.scanner.event_time_block_duration
 
-        time_block_prompt_events = [
-            petsird.CoincidenceEvent(
-                detector_ids=[det_ID_start[i], det_ID_end[i]],
-                tof_idx=unsigned_event_tof_bin[i],
-                energy_indices=[0, 0],
-            )
-            for i in range(num_events)
-        ]
+            time_block_prompt_events = [
+                petsird.CoincidenceEvent(
+                    detector_ids=[det_ID_start[i], det_ID_end[i]],
+                    tof_idx=unsigned_event_tof_bin[i],
+                    energy_indices=[0, 0],
+                )
+                for i in range(num_events)
+            ]
 
-        # Normally we'd write multiple blocks, but here we have just one, so let's write a tuple with just one element
-        writer.write_time_blocks(
-            (
-                petsird.TimeBlock.EventTimeBlock(
-                    petsird.EventTimeBlock(
-                        start=start, prompt_events=time_block_prompt_events
-                    )
-                ),
+            # Normally we'd write multiple blocks, but here we have just one, so let's write a tuple with just one element
+            writer.write_time_blocks(
+                (
+                    petsird.TimeBlock.EventTimeBlock(
+                        petsird.EventTimeBlock(
+                            start=start, prompt_events=time_block_prompt_events
+                        )
+                    ),
+                )
             )
-        )
