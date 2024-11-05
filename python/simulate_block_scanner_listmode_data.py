@@ -16,13 +16,18 @@ def sgid_from_module_pair(i_mod_1: int, i_mod_2: int, num_modules: int) -> int:
     clockwise_distance = abs(i_mod_1 - i_mod_2)
     counterclockwise_distance = num_modules - clockwise_distance
 
-    return (min(clockwise_distance, counterclockwise_distance) + 2) % 3
+    if (i_mod_1 == 1 and i_mod_2 == 7) or (i_mod_1 == 7 and i_mod_2 == 1):
+        sgid = 3
+    else:
+        sgid = (min(clockwise_distance, counterclockwise_distance) + 2) % 3
+
+    return sgid
 
 
 # %%
 def module_pair_eff_from_sgd(i_sgd: int) -> float:
     """a random mapping from symmetry group id (sgid) to efficiency"""
-    return float((i_sgd + 1) ** 2)
+    return float((i_sgd + 1) ** 1.5)
 
 
 # %%
@@ -404,7 +409,7 @@ det_el_efficiencies = xp.ones(
 # we only create one symmetry group ID (1) and set the group ID to -1 for block
 # block pairs that are not in coincidence
 
-num_SGIDs = 3
+num_SGIDs = 4
 
 module_pair_sgid_lut = xp.full((num_blocks, num_blocks), -1, dtype="int32")
 
