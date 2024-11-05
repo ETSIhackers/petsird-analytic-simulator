@@ -104,8 +104,11 @@ if __name__ == "__main__":
         )
 
     # Create a new figure
-    fig = plt.figure(figsize=(8, 8))
+    fig = plt.figure(figsize=(8, 8), tight_layout=True)
     ax = fig.add_subplot(111, projection="3d")
+    ax.set_xlabel("x0")
+    ax.set_ylabel("x1")
+    ax.set_zlabel("x2")
 
     # dictionary to store the transformations and centers of the detecting elements
     # here we assume that we only have BoxShapes

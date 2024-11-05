@@ -182,16 +182,6 @@ assert proj.adjointness_test(xp, dev)
 
 
 # %%
-# Visualize the projector geometry and all LORs
-
-if show_plots:
-    fig_geom = plt.figure(figsize=(4, 4), tight_layout=True)
-    ax_geom = fig_geom.add_subplot(111, projection="3d")
-    proj.show_geometry(ax_geom)
-    fig_geom.show()
-
-
-# %%
 sig = fwhm_mm / (2.35 * xp.asarray(voxel_size, device=dev))
 res_model = parallelproj.GaussianFilterOperator(img_shape, sigma=sig)
 
@@ -229,31 +219,6 @@ print(img_fwd_tof.shape)
 
 ones_back_tof = fwd_op.adjoint(xp.ones(fwd_op.out_shape, dtype=xp.float32, device=dev))
 print(ones_back_tof.shape)
-
-# %%
-# Visualize the forward and backward projection results
-
-if show_plots:
-    fig5, ax5 = plt.subplots(figsize=(6, 3), tight_layout=True)
-    ax5.plot(parallelproj.to_numpy_array(img_fwd_tof[17, 0, :]), ".-")
-    ax5.set_xlabel("TOF bin")
-    ax5.set_title(f"TOF profile of LOR 0 in block pair {block_pairs[17]}")
-    fig5.show()
-
-    fig6, ax6 = plt.subplots(1, 3, figsize=(7, 3), tight_layout=True)
-    vmin = float(xp.min(ones_back_tof))
-    vmax = float(xp.max(ones_back_tof))
-    for i, sl in enumerate(
-        [img_shape[2] // 4, img_shape[2] // 2, 3 * img_shape[2] // 4]
-    ):
-        ax6[i].imshow(
-            parallelproj.to_numpy_array(ones_back_tof[:, :, sl]),
-            vmin=vmin,
-            vmax=vmax,
-            cmap="Greys",
-        )
-        ax6[i].set_title(f"sens. img. sl {sl}", fontsize="medium")
-    fig6.show()
 
 # %%
 # put poisson noise on the forward projection
@@ -328,8 +293,17 @@ unsigned_event_tof_bin = xp.asarray(
     event_tof_bin + proj.tof_parameters.num_tofbins // 2, dtype="uint32"
 )
 
-# visualize the first 3 coincidence events
+# %%
+# Visualize the projector geometry and and the first 3 coincidences
+
 if show_plots:
+    fig_geom = plt.figure(figsize=(4, 4), tight_layout=True)
+    ax_geom = fig_geom.add_subplot(111, projection="3d")
+    ax_geom.set_xlabel("x0")
+    ax_geom.set_ylabel("x1")
+    ax_geom.set_zlabel("x2")
+    proj.show_geometry(ax_geom)
+
     for i in range(3):
         event_start_coord = scanner.get_lor_endpoints(
             event_start_block[i : (i + 1)], event_start_el[i : (i + 1)]
@@ -344,9 +318,39 @@ if show_plots:
             [event_start_coord[2], event_end_coord[2]],
         )
 
+    fig_geom.show()
+
+# %%
+# Visualize the TOF profile of one LOR of the noise free data and the sensitivity image
+
+if show_plots:
+    fig6, ax6 = plt.subplots(1, 4, figsize=(12, 3), tight_layout=True)
+    vmin = float(xp.min(ones_back_tof))
+    vmax = float(xp.max(ones_back_tof))
+    for i, sl in enumerate(
+        [img_shape[2] // 4, img_shape[2] // 2, 3 * img_shape[2] // 4]
+    ):
+        ax6[i].imshow(
+            parallelproj.to_numpy_array(ones_back_tof[:, :, sl]),
+            vmin=vmin,
+            vmax=vmax,
+            cmap="Greys",
+        )
+        ax6[i].set_title(f"sens. img. sl {sl}", fontsize="small")
+
+    ax6[-1].plot(parallelproj.to_numpy_array(img_fwd_tof[17, 0, :]), ".-")
+    ax6[-1].set_xlabel("TOF bin")
+    ax6[-1].set_title(
+        f"TOF profile of LOR 0 in block pair {block_pairs[17]}", fontsize="small"
+    )
+
+    fig6.show()
+
 
 # %%
 # do a sinogram and LM back projection of the emission data
+# if the Poisson emission sinogram to LM conversion is correct, those should
+# look very similar
 
 if check_backprojection:
     histo_back = proj.adjoint(emission_data)
