@@ -11,16 +11,18 @@ import math
 
 
 # %%
-def module_distance(i_mod_1, i_mod_2, num_modules):
+def sgid_from_module_pair(i_mod_1: int, i_mod_2: int, num_modules: int) -> int:
+    """a random mapping between two modules into a symmetry group"""
     clockwise_distance = abs(i_mod_1 - i_mod_2)
     counterclockwise_distance = num_modules - clockwise_distance
 
-    return min(clockwise_distance, counterclockwise_distance)
+    return (min(clockwise_distance, counterclockwise_distance) + 2) % 3
 
 
 # %%
-def module_pair_eff_from_sgd(i_sgd):
-    return ((i_sgd % 3) + 1) ** 2
+def module_pair_eff_from_sgd(i_sgd: int) -> float:
+    """a random mapping from symmetry group id (sgid) to efficiency"""
+    return float((i_sgd + 1) ** 2)
 
 
 # %%
@@ -160,7 +162,10 @@ num_tof_bins = int(2 * (scanner_radius // tof_bin_width) + 1)
 
 proj = parallelproj.EqualBlockPETProjector(lor_desc, img_shape, voxel_size)
 proj.tof_parameters = parallelproj.TOFParameters(
-    num_tofbins=21, tofbin_width=tof_bin_width, sigma_tof=sig_tof, num_sigmas=3.0
+    num_tofbins=num_tof_bins,
+    tofbin_width=tof_bin_width,
+    sigma_tof=sig_tof,
+    num_sigmas=3.0,
 )
 
 assert proj.adjointness_test(xp, dev)
@@ -183,8 +188,8 @@ res_model = parallelproj.GaussianFilterOperator(img_shape, sigma=sig)
 nontof_sens_sino = xp.ones(proj.out_shape[:-1], dtype="float32", device=dev)
 
 for i, bp in enumerate(proj.lor_descriptor.all_block_pairs):
-    i_sgd = module_distance(bp[0], bp[1], num_blocks)
-    nontof_sens_sino[i, ...] = module_pair_eff_from_sgd(i_sgd)
+    sgid = sgid_from_module_pair(bp[0], bp[1], num_blocks)
+    nontof_sens_sino[i, ...] = module_pair_eff_from_sgd(sgid)
 
 fwd_op = parallelproj.CompositeLinearOperator(
     [
@@ -348,7 +353,8 @@ if run_recon:
     recon = xp.ones(img_shape, dtype=xp.float32, device=dev)
 
     for i in range(num_iter):
-        print(f"{(i+1):03}/{num_iter}", end="\r")
+        print(f"{(i+1):03}/{num_iter:03}", end="\r")
+
         exp = xp.clip(fwd_op(recon), 1e-6, None)
         grad = fwd_op.adjoint((exp - emission_data) / exp)
         step = recon / ones_back_tof
@@ -404,9 +410,9 @@ module_pair_sgid_lut = xp.full((num_blocks, num_blocks), -1, dtype="int32")
 
 for bp in proj.lor_descriptor.all_block_pairs:
     # generate a random sgd
-    sgd = module_distance(bp[0], bp[1], num_blocks)
-    module_pair_sgid_lut[bp[0], bp[1]] = sgd
-    module_pair_sgid_lut[bp[1], bp[0]] = sgd
+    sgid = sgid_from_module_pair(bp[0], bp[1], num_blocks)
+    module_pair_sgid_lut[bp[0], bp[1]] = sgid
+    module_pair_sgid_lut[bp[1], bp[0]] = sgid
 
 num_el_per_module = proj.lor_descriptor.scanner.num_lor_endpoints_per_module[0]
 
@@ -419,12 +425,12 @@ module_pair_efficiencies_shape = (
 
 module_pair_efficiencies_vector = []
 
-for i in range(num_SGIDs):
-    eff = module_pair_eff_from_sgd(sgd)
+for sgid in range(num_SGIDs):
+    eff = module_pair_eff_from_sgd(sgid)
     vals = xp.full(module_pair_efficiencies_shape, eff, dtype="float32", device=dev)
 
     module_pair_efficiencies_vector.append(
-        petsird.ModulePairEfficiencies(values=vals, sgid=i)
+        petsird.ModulePairEfficiencies(values=vals, sgid=sgid)
     )
 
 det_effs = petsird.DetectionEfficiencies(
