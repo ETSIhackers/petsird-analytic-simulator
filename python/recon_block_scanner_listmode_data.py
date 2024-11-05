@@ -5,7 +5,7 @@
 # basic plotting of the scanner geometry
 # preliminary code!
 
-import numpy
+import array_api_compat.numpy as xp
 import numpy.typing as npt
 import petsird
 
@@ -14,29 +14,28 @@ from petsird_helpers import (
     get_detection_efficiency,
 )
 
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-
 from pathlib import Path
 import argparse
+
+# %%
 
 
 def transform_to_mat44(
     transform: petsird.RigidTransformation,
-) -> npt.NDArray[numpy.float32]:
-    return numpy.vstack([transform.matrix, [0, 0, 0, 1]])
+) -> npt.NDArray[xp.float32]:
+    return xp.vstack([transform.matrix, [0, 0, 0, 1]])
 
 
-def mat44_to_transform(mat: npt.NDArray[numpy.float32]) -> petsird.RigidTransformation:
+def mat44_to_transform(mat: npt.NDArray[xp.float32]) -> petsird.RigidTransformation:
     return petsird.RigidTransformation(matrix=mat[0:3, :])
 
 
-def coordinate_to_homogeneous(coord: petsird.Coordinate) -> npt.NDArray[numpy.float32]:
-    return numpy.hstack([coord.c, 1])
+def coordinate_to_homogeneous(coord: petsird.Coordinate) -> npt.NDArray[xp.float32]:
+    return xp.hstack([coord.c, 1])
 
 
 def homogeneous_to_coordinate(
-    hom_coord: npt.NDArray[numpy.float32],
+    hom_coord: npt.NDArray[xp.float32],
 ) -> petsird.Coordinate:
     return petsird.Coordinate(c=hom_coord[0:3])
 
@@ -45,13 +44,13 @@ def mult_transforms(
     transforms: list[petsird.RigidTransformation],
 ) -> petsird.RigidTransformation:
     """multiply rigid transformations"""
-    mat = numpy.array(
+    mat = xp.array(
         ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)),
         dtype="float32",
     )
 
     for t in reversed(transforms):
-        mat = numpy.matmul(transform_to_mat44(t), mat)
+        mat = xp.matmul(transform_to_mat44(t), mat)
     return mat44_to_transform(mat)
 
 
@@ -60,7 +59,7 @@ def mult_transforms_coord(
 ) -> petsird.Coordinate:
     """apply list of transformations to coordinate"""
     # TODO better to multiply with coordinates in sequence, as first multiplying the matrices
-    hom = numpy.matmul(
+    hom = xp.matmul(
         transform_to_mat44(mult_transforms(transforms)),
         coordinate_to_homogeneous(coord),
     )
@@ -76,24 +75,12 @@ def transform_BoxShape(
     )
 
 
-def draw_BoxShape(ax, box: petsird.BoxShape) -> None:
-    vertices = numpy.array([c.c for c in box.corners])
-    edges = [
-        [vertices[j] for j in [0, 1, 2, 3]],
-        [vertices[j] for j in [4, 5, 6, 7]],
-        [vertices[j] for j in [0, 1, 5, 4]],
-        [vertices[j] for j in [2, 3, 7, 6]],
-        [vertices[j] for j in [1, 2, 6, 5]],
-        [vertices[j] for j in [4, 7, 3, 0]],
-    ]
-    box = Poly3DCollection(edges, alpha=0.1, linewidths=0.1, edgecolors=plt.cm.tab10(0))
-    ax.add_collection3d(box)
-
-
 if __name__ == "__main__":
 
+    dev = "cpu"
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--fname", default="test.bin")
+    parser.add_argument("--fname", default="sim_lm.bin")
 
     args = parser.parse_args()
     fname = args.fname
@@ -102,10 +89,6 @@ if __name__ == "__main__":
         raise FileNotFoundError(
             f"{args.fname} not found. Create it first using the generator."
         )
-
-    # Create a new figure
-    fig = plt.figure(figsize=(8, 8))
-    ax = fig.add_subplot(111, projection="3d")
 
     # dictionary to store the transformations and centers of the detecting elements
     # here we assume that we only have BoxShapes
@@ -128,11 +111,9 @@ if __name__ == "__main__":
                             combined_transform, rep_volume.object.shape
                         )
 
-                        transformed_boxshape_vertices = numpy.array(
+                        transformed_boxshape_vertices = xp.array(
                             [c.c for c in transformed_boxshape.corners]
                         )
-
-                        draw_BoxShape(ax, transformed_boxshape)
 
                         element_transforms[(i_mod, i_el)] = combined_transform
 
@@ -140,20 +121,17 @@ if __name__ == "__main__":
                             transformed_boxshape_vertices.mean(axis=0)
                         )
 
-                        if i_el == 0 or i_el == len(rep_volume.transforms) - 1:
-                            ax.text(
-                                float(transformed_boxshape_vertices[0][0]),
-                                float(transformed_boxshape_vertices[0][1]),
-                                float(transformed_boxshape_vertices[0][2]),
-                                f"{i_el:02}/{i_mod:02}",
-                                fontsize=7,
-                            )
-
         # ----
-        # read and draw events
+        # read events
 
         num_prompts = 0
         event_counter = 0
+        num_tof_bins = len(header.scanner.tof_bin_edges) - 1
+
+        xstart = []
+        xend = []
+        tof_bin = []
+        effs = []
 
         for i_time_block, time_block in enumerate(reader.read_time_blocks()):
             if isinstance(time_block, petsird.TimeBlock.EventTimeBlock):
@@ -167,46 +145,21 @@ if __name__ == "__main__":
                     event_start_coord = element_centers[
                         event_mods_and_els[0].module, event_mods_and_els[0].el
                     ]
+                    xstart.append(event_start_coord)
+
                     event_end_coord = element_centers[
                         event_mods_and_els[1].module, event_mods_and_els[1].el
                     ]
+                    xend.append(event_end_coord)
 
                     # get the event efficiencies
-                    event_eff = get_detection_efficiency(header.scanner, event)
-
-                    # draw line between the two 3D points (event_start_coord, event_end_coord)
-                    # for the first event in the first time block
-                    if i_event < 3:
-                        ax.plot(
-                            [event_start_coord[0], event_end_coord[0]],
-                            [event_start_coord[1], event_end_coord[1]],
-                            [event_start_coord[2], event_end_coord[2]],
-                        )
-
-                        print(
-                            f"time block {i_time_block:04}, event in time block {i_event:04}, event {event_counter:04}, {event_mods_and_els}"
-                        )
-
-                        print(
-                            "start world coordinates",
-                            event_start_coord[0],
-                            event_start_coord[1],
-                            event_start_coord[2],
-                        )
-                        print(
-                            "end world coordinates",
-                            event_end_coord[0],
-                            event_end_coord[1],
-                            event_end_coord[2],
-                        )
-                        print(f"event eff {event_eff}")
-                        print()
+                    effs.append(get_detection_efficiency(header.scanner, event))
+                    # get the signed event TOF bin (0 is the central bin)
+                    tof_bin.append(event.tof_idx - num_tof_bins // 2)
 
                     event_counter += 1
 
-    ax.set_xlim(-100, 100)
-    ax.set_ylim(-100, 100)
-    ax.set_zlim(-100, 100)
-    # ax.set_title("figure not in scale (z axis is streched)")
-
-    plt.show()
+    xstart = xp.asarray(xstart, device=dev)
+    xend = xp.asarray(xend, device=dev)
+    effs = xp.asarray(effs, device=dev)
+    tof_bin = xp.asarray(tof_bin, device=dev)

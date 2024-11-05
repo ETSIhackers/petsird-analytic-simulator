@@ -230,9 +230,9 @@ print(ones_back_tof.shape)
 
 if show_plots:
     fig5, ax5 = plt.subplots(figsize=(6, 3), tight_layout=True)
-    ax5.plot(parallelproj.to_numpy_array(img_fwd_tof[3, 0, :]), ".-")
+    ax5.plot(parallelproj.to_numpy_array(img_fwd_tof[17, 0, :]), ".-")
     ax5.set_xlabel("TOF bin")
-    ax5.set_title("TOF profile of LOR 0 in block pair 3")
+    ax5.set_title(f"TOF profile of LOR 0 in block pair {block_pairs[17]}")
     fig5.show()
 
     fig6, ax6 = plt.subplots(1, 3, figsize=(7, 3), tight_layout=True)
