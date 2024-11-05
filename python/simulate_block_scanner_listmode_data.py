@@ -41,8 +41,9 @@ parser.add_argument("--check_backprojection", default=False, action="store_true"
 parser.add_argument("--run_recon", default=False, action="store_true")
 parser.add_argument("--num_iter", type=int, default=10)
 parser.add_argument("--skip_writing", default=False, action="store_true")
-parser.add_argument("--fwhm_mm", type=float, default=3.0)
+parser.add_argument("--fwhm_mm", type=float, default=1.5)
 parser.add_argument("--tof_fwhm_mm", type=float, default=30.0)
+parser.add_argument("--seed", type=int, default=0)
 
 args = parser.parse_args()
 
@@ -55,8 +56,10 @@ skip_writing = args.skip_writing
 num_iter = args.num_iter
 fwhm_mm = args.fwhm_mm
 tof_fwhm_mm = args.tof_fwhm_mm
+seed = args.seed
 
 dev = "cpu"
+xp.random.seed(args.seed)
 
 # %%
 # input parameters
@@ -182,15 +185,39 @@ assert proj.adjointness_test(xp, dev)
 
 
 # %%
+# setup a simple image space resolution model
 sig = fwhm_mm / (2.35 * xp.asarray(voxel_size, device=dev))
 res_model = parallelproj.GaussianFilterOperator(img_shape, sigma=sig)
 
+# setup the sensitivity sinogram
+tmp = xp.arange(proj.lor_descriptor.num_lorendpoints_per_block)
+start_el, end_el = xp.meshgrid(tmp, tmp, indexing="ij")
+start_el_arr = xp.reshape(start_el, (size(start_el),))
+end_el_arr = xp.reshape(end_el, (size(end_el),))
+
 nontof_sens_sino = xp.ones(proj.out_shape[:-1], dtype="float32", device=dev)
+
+# simulate random crystal eff. uniformly distributed between 0.2 - 2.2
+det_el_efficiencies = 0.2 + 2 * xp.random.rand(
+    lor_desc.num_block_pairs, lor_desc.num_lorendpoints_per_block
+)
+# simulate a few dead crystals
+det_el_efficiencies[det_el_efficiencies < 0.25] = 0
 
 for i, bp in enumerate(proj.lor_descriptor.all_block_pairs):
     sgid = sgid_from_module_pair(bp[0], bp[1], num_blocks)
-    nontof_sens_sino[i, ...] = module_pair_eff_from_sgd(sgid)
+    start_crystal_eff = det_el_efficiencies[bp[0], start_el_arr]
+    end_crystal_eff = det_el_efficiencies[bp[1], end_el_arr]
 
+    nontof_sens_sino[i, ...] = (
+        module_pair_eff_from_sgd(sgid) * start_crystal_eff * end_crystal_eff
+    )
+
+# %%
+# setup the complete forward operator consisting of diag(s) P G
+# where G is the image-based resolution model
+# P is the (TOF) forward projector
+# diag(s) is the elementwise multiplication with a non-TOF sens. sinogram
 fwd_op = parallelproj.CompositeLinearOperator(
     [
         parallelproj.TOFNonTOFElementwiseMultiplicationOperator(
@@ -222,8 +249,6 @@ print(ones_back_tof.shape)
 
 # %%
 # put poisson noise on the forward projection
-
-xp.random.seed(0)
 emission_data = xp.random.poisson(img_fwd_tof)
 # emission_data = xp.zeros(img_fwd_tof.shape, dtype=xp.int32, device=dev)
 # emission_data[3, 1, 10] = 1
@@ -231,11 +256,6 @@ emission_data = xp.random.poisson(img_fwd_tof)
 # %%
 # convert emission histogram to LM
 
-tmp = xp.arange(proj.lor_descriptor.num_lorendpoints_per_block)
-start_el, end_el = xp.meshgrid(tmp, tmp, indexing="ij")
-
-start_el_arr = xp.reshape(start_el, (size(start_el),))
-end_el_arr = xp.reshape(end_el, (size(end_el),))
 
 num_events = emission_data.sum()
 event_start_block = xp.zeros(num_events, dtype="uint32", device=dev)
