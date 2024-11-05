@@ -153,10 +153,18 @@ lor_desc = parallelproj.EqualBlockPETLORDescriptor(
 img_shape = (100, 100, 12)
 voxel_size = (1.0, 1.0, 1.0)
 img = xp.zeros(img_shape, dtype=xp.float32, device=dev)
-img[2:-12, 32:-20, 2:] = 3
-img[24:-40, 36:-28, 4:-2] = 9
-img[76:78, 68:72, :-2] = 18
-img[52:56, 38:42, :-2] = 0
+
+if True:
+    tmp = xp.linspace(-1, 1, img_shape[0])
+    X0, X1 = xp.meshgrid(tmp, tmp, indexing="ij")
+    disk = xp.astype(xp.sqrt(X0**2 + X1**2) < 0.7, "float32")
+    for i in range(img_shape[2]):
+        img[..., i] = disk
+else:
+    img[2:-12, 32:-20, 2:] = 3
+    img[24:-40, 36:-28, 4:-2] = 9
+    img[76:78, 68:72, :-2] = 18
+    img[52:56, 38:42, :-2] = 0
 
 # %%
 # Setup of a TOF projector
