@@ -171,6 +171,8 @@ if __name__ == "__main__":
                         event_mods_and_els[1].module, event_mods_and_els[1].el
                     ]
 
+                    eff = get_detection_efficiency(header.scanner, event)
+
                     # draw line between the two 3D points (event_start_coord, event_end_coord)
                     # for the first event in the first time block
                     if i_event < 3:
@@ -196,6 +198,7 @@ if __name__ == "__main__":
                             event_end_coord[1],
                             event_end_coord[2],
                         )
+                        print(f"event eff {eff}")
                         print()
 
                     event_eff = get_detection_efficiency(header.scanner, event)
