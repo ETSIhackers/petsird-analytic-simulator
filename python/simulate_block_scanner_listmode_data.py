@@ -16,10 +16,7 @@ def sgid_from_module_pair(i_mod_1: int, i_mod_2: int, num_modules: int) -> int:
     clockwise_distance = abs(i_mod_1 - i_mod_2)
     counterclockwise_distance = num_modules - clockwise_distance
 
-    if (i_mod_1 == 1 and i_mod_2 == 7) or (i_mod_1 == 7 and i_mod_2 == 1):
-        sgid = 3
-    else:
-        sgid = (min(clockwise_distance, counterclockwise_distance) + 2) % 3
+    sgid = (min(clockwise_distance, counterclockwise_distance) + 2) % 3
 
     return sgid
 
@@ -44,6 +41,12 @@ parser.add_argument("--skip_writing", default=False, action="store_true")
 parser.add_argument("--fwhm_mm", type=float, default=1.5)
 parser.add_argument("--tof_fwhm_mm", type=float, default=30.0)
 parser.add_argument("--seed", type=int, default=0)
+parser.add_argument(
+    "--phantom",
+    type=str,
+    default="uniform_cylinder",
+    choices=["uniform_cylinder", "squares"],
+)
 
 args = parser.parse_args()
 
@@ -57,6 +60,7 @@ num_iter = args.num_iter
 fwhm_mm = args.fwhm_mm
 tof_fwhm_mm = args.tof_fwhm_mm
 seed = args.seed
+phantom = args.phantom
 
 dev = "cpu"
 xp.random.seed(args.seed)
@@ -150,21 +154,23 @@ lor_desc = parallelproj.EqualBlockPETLORDescriptor(
 #
 # Now that the LOR descriptor is defined, we can setup the projector.
 
-img_shape = (100, 100, 12)
+img_shape = (100, 100, 11)
 voxel_size = (1.0, 1.0, 1.0)
 img = xp.zeros(img_shape, dtype=xp.float32, device=dev)
 
-if True:
+if phantom == "uniform_cylinder":
     tmp = xp.linspace(-1, 1, img_shape[0])
     X0, X1 = xp.meshgrid(tmp, tmp, indexing="ij")
     disk = xp.astype(xp.sqrt(X0**2 + X1**2) < 0.7, "float32")
     for i in range(img_shape[2]):
         img[..., i] = disk
-else:
+elif phantom == "squares":
     img[2:-12, 32:-20, 2:] = 3
     img[24:-40, 36:-28, 4:-2] = 9
     img[76:78, 68:72, :-2] = 18
     img[52:56, 38:42, :-2] = 0
+else:
+    raise ValueError("Invalid phantom {phantom}")
 
 # %%
 # Setup of a TOF projector
@@ -463,8 +469,6 @@ det_el_efficiencies = xp.ones(
 # we only create one symmetry group ID (1) and set the group ID to -1 for block
 # block pairs that are not in coincidence
 
-num_SGIDs = 4
-
 module_pair_sgid_lut = xp.full((num_blocks, num_blocks), -1, dtype="int32")
 
 for bp in proj.lor_descriptor.all_block_pairs:
@@ -472,6 +476,8 @@ for bp in proj.lor_descriptor.all_block_pairs:
     sgid = sgid_from_module_pair(bp[0], bp[1], num_blocks)
     module_pair_sgid_lut[bp[0], bp[1]] = sgid
     module_pair_sgid_lut[bp[1], bp[0]] = sgid
+
+num_SGIDs = module_pair_sgid_lut.max() - 1
 
 num_el_per_module = proj.lor_descriptor.scanner.num_lor_endpoints_per_module[0]
 
