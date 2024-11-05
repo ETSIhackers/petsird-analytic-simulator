@@ -35,6 +35,7 @@ parser.add_argument("--run_recon", default=False, action="store_true")
 parser.add_argument("--num_iter", type=int, default=10)
 parser.add_argument("--skip_writing", default=False, action="store_true")
 parser.add_argument("--fwhm_mm", type=float, default=3.0)
+parser.add_argument("--tof_fwhm_mm", type=float, default=30.0)
 
 args = parser.parse_args()
 
@@ -46,6 +47,7 @@ num_true_counts = args.num_true_counts
 skip_writing = args.skip_writing
 num_iter = args.num_iter
 fwhm_mm = args.fwhm_mm
+tof_fwhm_mm = args.tof_fwhm_mm
 
 dev = "cpu"
 
@@ -152,9 +154,13 @@ img[52:56, 38:42, :-2] = 0
 #
 # Now that the LOR descriptor is defined, we can setup the projector.
 
+sig_tof = tof_fwhm_mm / 2.35
+tof_bin_width = 0.8 * sig_tof
+num_tof_bins = int(2 * (scanner_radius // tof_bin_width) + 1)
+
 proj = parallelproj.EqualBlockPETProjector(lor_desc, img_shape, voxel_size)
 proj.tof_parameters = parallelproj.TOFParameters(
-    num_tofbins=21, tofbin_width=10.0, sigma_tof=12.0, num_sigmas=3.0
+    num_tofbins=21, tofbin_width=tof_bin_width, sigma_tof=sig_tof, num_sigmas=3.0
 )
 
 assert proj.adjointness_test(xp, dev)
