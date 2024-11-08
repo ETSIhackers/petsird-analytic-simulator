@@ -78,14 +78,33 @@ def transform_BoxShape(
 
 # %%
 # parse the command line
+def parse_int_tuple(arg):
+    return tuple(map(int, arg.split(",")))
+
+
+def parse_float_tuple(arg):
+    return tuple(map(float, arg.split(",")))
+
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--fname", default="tmp/sim_lm.bin")
+parser.add_argument("--fname", type=str, default="sim_lm.bin")
+parser.add_argument("--num_epochs", type=int, default=5)
+parser.add_argument("--num_subsets", type=int, default=20)
+parser.add_argument("--img_shape", type=parse_int_tuple, default=(100, 100, 11))
+parser.add_argument("--voxel_size", type=parse_float_tuple, default=(1.0, 1.0, 1.0))
+parser.add_argument("--fwhm_mm", type=float, default=1.5)
 
 args = parser.parse_args()
-fname = args.fname
-dev = "cpu"
 
+fname = args.fname
+num_epochs = args.num_epochs
+num_subsets = args.num_subsets
+img_shape = args.img_shape
+voxel_size = args.voxel_size
+fwhm_mm = args.fwhm_mm
+
+dev = "cpu"
+# %%
 if not Path(fname).exists():
     raise FileNotFoundError(
         f"{args.fname} not found. Create it first using the generator."
@@ -171,10 +190,7 @@ print("Calculating sensitivity image")
 # we loop through the symmetric group ID look up table to see which module pairs
 # are in coincidence
 
-img_shape = (100, 100, 11)
-voxel_size = (1.0, 1.0, 1.0)
 
-fwhm_mm = 1.5
 sig = fwhm_mm / (2.35 * xp.asarray(voxel_size, device=dev))
 res_model = parallelproj.GaussianFilterOperator(img_shape, sigma=sig)
 
@@ -273,17 +289,30 @@ tof_bin = xp.asarray(tof_bin, device=dev)
 
 # %%
 # run a LM OSEM recon
-
-num_iter = 50
 recon = xp.ones(img_shape, dtype="float32")
 
-proj = parallelproj.ListmodePETProjector(xstart, xend, img_shape, voxel_size)
-proj.tof_parameters = tof_params
-proj.event_tofbins = tof_bin
+lm_subset_projs = []
+subset_slices = [slice(i, None, num_subsets) for i in range(num_subsets)]
 
-for i in range(num_iter):
-    print(f"it {(i +1):03} / {num_iter:03}")
-    lm_exp = effs * proj(res_model(recon))
-    print(lm_exp.min())
-    tmp = res_model(proj.adjoint(effs / lm_exp))
-    recon *= tmp / sens_img
+for i_subset, sl in enumerate(subset_slices):
+    lm_subset_projs.append(
+        parallelproj.ListmodePETProjector(
+            xstart[sl, :], xend[sl, :], img_shape, voxel_size
+        )
+    )
+    lm_subset_projs[i_subset].tof_parameters = tof_params
+    lm_subset_projs[i_subset].event_tofbins = tof_bin[sl]
+
+for i_epoch in range(num_epochs):
+    for i_subset, sl in enumerate(subset_slices):
+        print(
+            f"it {(i_epoch +1):03} / {num_epochs:03}, ss {(i_subset+1):03} / {num_subsets:03}",
+            end="\r",
+        )
+        lm_exp = effs[sl] * lm_subset_projs[i_subset](res_model(recon))
+        tmp = num_subsets * res_model(
+            lm_subset_projs[i_subset].adjoint(effs[sl] / lm_exp)
+        )
+        recon *= tmp / sens_img
+
+print("")
