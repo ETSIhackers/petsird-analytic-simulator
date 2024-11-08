@@ -18,8 +18,6 @@ from petsird_helpers import (
 from pathlib import Path
 import argparse
 
-# %%
-
 
 def transform_to_mat44(
     transform: petsird.RigidTransformation,
@@ -87,34 +85,40 @@ def parse_float_tuple(arg):
 # %%
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--fname", type=str, default="my_lm_sim/simulated_lm_file.bin")
+parser.add_argument("--lm_fname", type=str, default="my_lm_sim/simulated_lm_file.bin")
 parser.add_argument("--num_epochs", type=int, default=5)
 parser.add_argument("--num_subsets", type=int, default=20)
 parser.add_argument("--img_shape", type=parse_int_tuple, default=(100, 100, 11))
 parser.add_argument("--voxel_size", type=parse_float_tuple, default=(1.0, 1.0, 1.0))
 parser.add_argument("--fwhm_mm", type=float, default=1.5)
+parser.add_argument("--output_dir", type=str, default="my_lm_sim")
 
 args = parser.parse_args()
 
-fname = args.fname
+lm_fname = args.lm_fname
 num_epochs = args.num_epochs
 num_subsets = args.num_subsets
 img_shape = args.img_shape
 voxel_size = args.voxel_size
 fwhm_mm = args.fwhm_mm
+output_dir = Path(args.output_dir)
 
 dev = "cpu"
+
+if not output_dir.exists():
+    output_dir.mkdir(parents=True)
+
 # %%
-if not Path(fname).exists():
+if not Path(lm_fname).exists():
     raise FileNotFoundError(
-        f"{args.fname} not found. Create it first using the generator."
+        f"{args.lm_fname} not found. Create it first using the generator."
     )
 
 # %%
 # read the scanner geometry
 
 
-reader = petsird.BinaryPETSIRDReader(fname)
+reader = petsird.BinaryPETSIRDReader(lm_fname)
 header = reader.read_header()
 
 # %%
@@ -317,3 +321,7 @@ for i_epoch in range(num_epochs):
         recon *= tmp / sens_img
 
 print("")
+
+opath = output_dir / f"lm_osem_{num_epochs}_{num_subsets}.npy"
+xp.save(opath, recon)
+print(f"LM OSEM recon saved to {opath}")

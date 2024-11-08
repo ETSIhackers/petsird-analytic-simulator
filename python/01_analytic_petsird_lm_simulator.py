@@ -305,6 +305,9 @@ if num_true_counts > 0:
 else:
     emission_data = img_fwd_tof
 
+# save the ground truth image
+xp.save(output_dir / "ground_truth_image.npy", img)
+
 # %%
 if num_epochs_mlem > 0:
     recon = xp.ones(img_shape, dtype=xp.float32, device=dev)
