@@ -8,6 +8,7 @@
 import array_api_compat.numpy as xp
 import numpy.typing as npt
 import petsird
+import parallelproj
 
 from petsird_helpers import (
     get_module_and_element,
@@ -79,7 +80,7 @@ def transform_BoxShape(
 # parse the command line
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--fname", default="sim_lm.bin")
+parser.add_argument("--fname", default="tmp/sim_lm.bin")
 
 args = parser.parse_args()
 fname = args.fname
@@ -93,22 +94,43 @@ if not Path(fname).exists():
 # %%
 # read the scanner geometry
 
-# dictionary to store the transformations and centers of the detecting elements
-# here we assume that we only have BoxShapes
-element_transforms = dict()
-element_centers = dict()
 
 reader = petsird.BinaryPETSIRDReader(fname)
 header = reader.read_header()
 
-# draw all crystals
+# %%
+# check whether we only have 1 type of module
+assert (
+    len(header.scanner.scanner_geometry.replicated_modules) == 1
+), "Only scanners with 1 module type supported yet"
+
+# %%
+# lists where we store the detecting element coordinates and transforms for each module
+# the list has one entry per module
+
+det_element_center_list = []
+
+# %%
+# read the LOR endpoint coordinates for each detecting element in each crystal
+# we assume that the LOR endpoint corresponds to the center of the BoxShape
+
 for rep_module in header.scanner.scanner_geometry.replicated_modules:
     det_el = rep_module.object.detecting_elements
+
+    num_modules = len(rep_module.transforms)
+
     for i_mod, mod_transform in enumerate(rep_module.transforms):
         for rep_volume in det_el:
-            for i_el, transform in enumerate(rep_volume.transforms):
 
-                combined_transform = mult_transforms([mod_transform, transform])
+            det_element_centers = xp.zeros(
+                (len(rep_volume.transforms), 3), dtype="float32"
+            )
+
+            num_el_per_module = len(rep_volume.transforms)
+
+            for i_el, el_transform in enumerate(rep_volume.transforms):
+
+                combined_transform = mult_transforms([mod_transform, el_transform])
                 transformed_boxshape = transform_BoxShape(
                     combined_transform, rep_volume.object.shape
                 )
@@ -117,55 +139,108 @@ for rep_module in header.scanner.scanner_geometry.replicated_modules:
                     [c.c for c in transformed_boxshape.corners]
                 )
 
-                element_transforms[(i_mod, i_el)] = combined_transform
-
-                element_centers[(i_mod, i_el)] = transformed_boxshape_vertices.mean(
+                det_element_centers[i_el, ...] = transformed_boxshape_vertices.mean(
                     axis=0
                 )
+            det_element_center_list.append(det_element_centers)
+
+# %%
+# calculate the sensitivity image
+
+# create a list of the element detection efficiencies per module
+# this is a simple re-ordering of the detection efficiencies array which
+# makes the access easier
+# we assume that all modules have the same number of detecting elements
+det_el_efficiencies = [
+    header.scanner.detection_efficiencies.det_el_efficiencies[
+        i * num_el_per_module : (i + 1) * num_el_per_module, 0
+    ]
+    for i in range(num_modules)
+]
+
+# we loop through the symmetric group ID look up table to see which module pairs
+# are in coincidence
+
+img_shape = (100, 100, 11)
+voxel_size = (1.0, 1.0, 1.0)
+
+sens_img = xp.zeros(img_shape, dtype="float32")
+
+for i in range(num_modules):
+    for j in range(num_modules):
+        sgid = header.scanner.detection_efficiencies.module_pair_sgidlut[i, j]
+
+        if sgid >= 0:
+            print(i, j, sgid)
+
+            start_det_el = det_element_center_list[i]
+            end_det_el = det_element_center_list[j]
+
+            # create an array of that contains all possible combinations of start and end detecting element coordinates
+            # these define all possible LORs between the two modules
+            start_coords = xp.repeat(start_det_el, len(end_det_el), axis=0)
+            end_coords = xp.tile(end_det_el, (len(start_det_el), 1))
+
+            proj = parallelproj.ListmodePETProjector(
+                start_coords, end_coords, img_shape, voxel_size
+            )
+            # TODO: add TOF parameters
+
+            # get the module pair efficiencies - asumming that we only use 1 energy bin
+            module_pair_eff = (
+                header.scanner.detection_efficiencies.module_pair_efficiencies_vector[
+                    sgid
+                ].values[:, 0, :, 0]
+            ).ravel()
+
+            start_el_eff = xp.repeat(det_el_efficiencies[i], len(end_det_el), axis=0)
+            end_el_eff = xp.tile(det_el_efficiencies[j], (len(start_det_el)))
+
+            # TODO loop over TOF!
+            sens_img += proj.adjoint(start_el_eff * end_el_eff * module_pair_eff)
 
 # %%
 # read all coincidence events
 
-num_prompts = 0
-event_counter = 0
-num_tof_bins = header.scanner.number_of_tof_bins()
+if False:
+    num_prompts = 0
+    event_counter = 0
+    num_tof_bins = header.scanner.number_of_tof_bins()
 
-xstart = []
-xend = []
-tof_bin = []
-effs = []
+    xstart = []
+    xend = []
+    tof_bin = []
+    effs = []
 
-for i_time_block, time_block in enumerate(reader.read_time_blocks()):
-    if isinstance(time_block, petsird.TimeBlock.EventTimeBlock):
-        num_prompts += len(time_block.value.prompt_events)
+    for i_time_block, time_block in enumerate(reader.read_time_blocks()):
+        if isinstance(time_block, petsird.TimeBlock.EventTimeBlock):
+            num_prompts += len(time_block.value.prompt_events)
 
-        for i_event, event in enumerate(time_block.value.prompt_events):
-            event_mods_and_els = get_module_and_element(
-                header.scanner.scanner_geometry, event.detector_ids
-            )
+            for i_event, event in enumerate(time_block.value.prompt_events):
+                event_mods_and_els = get_module_and_element(
+                    header.scanner.scanner_geometry, event.detector_ids
+                )
 
-            event_start_coord = element_centers[
-                event_mods_and_els[0].module, event_mods_and_els[0].el
-            ]
-            xstart.append(event_start_coord)
+                event_start_coord = element_centers[
+                    event_mods_and_els[0].module, event_mods_and_els[0].el
+                ]
+                xstart.append(event_start_coord)
 
-            event_end_coord = element_centers[
-                event_mods_and_els[1].module, event_mods_and_els[1].el
-            ]
-            xend.append(event_end_coord)
+                event_end_coord = element_centers[
+                    event_mods_and_els[1].module, event_mods_and_els[1].el
+                ]
+                xend.append(event_end_coord)
 
-            # get the event efficiencies
-            effs.append(get_detection_efficiency(header.scanner, event))
-            # get the signed event TOF bin (0 is the central bin)
-            tof_bin.append(event.tof_idx - num_tof_bins // 2)
+                # get the event efficiencies
+                effs.append(get_detection_efficiency(header.scanner, event))
+                # get the signed event TOF bin (0 is the central bin)
+                tof_bin.append(event.tof_idx - num_tof_bins // 2)
 
-            event_counter += 1
+                event_counter += 1
 
-reader.close()
+    reader.close()
 
-xstart = xp.asarray(xstart, device=dev)
-xend = xp.asarray(xend, device=dev)
-effs = xp.asarray(effs, device=dev)
-tof_bin = xp.asarray(tof_bin, device=dev)
-
-# %%
+    xstart = xp.asarray(xstart, device=dev)
+    xend = xp.asarray(xend, device=dev)
+    effs = xp.asarray(effs, device=dev)
+    tof_bin = xp.asarray(tof_bin, device=dev)
