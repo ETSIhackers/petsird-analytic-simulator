@@ -44,7 +44,6 @@ def module_pair_eff_from_sgd(i_sgd: int, uniform: bool = False) -> float:
     return res
 
 
-# parse the command line
 def parse_int_tuple(arg):
     return tuple(map(int, arg.split(",")))
 
@@ -63,7 +62,7 @@ parser = argparse.ArgumentParser()
 
 parser.add_argument("--fname", type=str, default="simulated_lm_file.bin")
 parser.add_argument("--output_dir", type=str, default="my_lm_sim")
-parser.add_argument("--num_true_counts", type=int, default=int(1e6))
+parser.add_argument("--num_true_counts", type=int, default=int(4e6))
 parser.add_argument("--skip_plots", action="store_true")
 parser.add_argument("--check_backprojection", default=False, action="store_true")
 parser.add_argument("--num_epochs_mlem", type=int, default=0)
@@ -78,7 +77,7 @@ parser.add_argument("--voxel_size", type=parse_float_tuple, default=(1.0, 1.0, 1
 parser.add_argument(
     "--phantom",
     type=str,
-    default="uniform_cylinder",
+    default="squares",
     choices=["uniform_cylinder", "squares"],
 )
 

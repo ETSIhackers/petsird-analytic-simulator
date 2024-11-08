@@ -76,10 +76,18 @@ def transform_BoxShape(
     )
 
 
+def parse_int_tuple(arg):
+    return tuple(map(int, arg.split(",")))
+
+
+def parse_float_tuple(arg):
+    return tuple(map(float, arg.split(",")))
+
+
 # %%
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--fname", type=str, default="sim_lm.bin")
+parser.add_argument("--fname", type=str, default="my_lm_sim/simulated_lm_file.bin")
 parser.add_argument("--num_epochs", type=int, default=5)
 parser.add_argument("--num_subsets", type=int, default=20)
 parser.add_argument("--img_shape", type=parse_int_tuple, default=(100, 100, 11))
@@ -223,13 +231,13 @@ for i in range(num_modules):
                 proj.event_tofbins = xp.full(
                     start_coords.shape[0], tofbin, dtype="int32"
                 )
+                proj.tof = True
                 sens_img += proj.adjoint(start_el_eff * end_el_eff * module_pair_eff)
 
 print("")
 
 # for some reason we have to divide the sens image by the number of TOF bins
 # right now unclear why that is
-sens_img /= num_tofbins
 sens_img = res_model.adjoint(sens_img)
 
 # %%
@@ -294,6 +302,7 @@ for i_subset, sl in enumerate(subset_slices):
     )
     lm_subset_projs[i_subset].tof_parameters = tof_params
     lm_subset_projs[i_subset].event_tofbins = tof_bin[sl]
+    lm_subset_projs[i_subset].tof = True
 
 for i_epoch in range(num_epochs):
     for i_subset, sl in enumerate(subset_slices):

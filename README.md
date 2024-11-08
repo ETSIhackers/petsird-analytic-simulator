@@ -1,41 +1,35 @@
-# PETSIRD v0.2 - parallelproj repository
-
-The purpose of this repo is to provide a starting point for developing software that uses PETSIRD.
-Here we will focus on python usecases using parallelproj projection library.
+# Analytic simulation of petsird v0.2 data using parallelproj
 
 ## Create your conda / mamba environment
 
 ```
 conda env create -f environment.yml
-```
-
-## Run a first PETSIRD example
-
-```
 conda activate petsird-v0.2-parallelproj
 cd python
-python petsird_generator.py > test.bin
-python petsird_analysis.py < test.bin
 ```
 
-## Projects to work on
+## Simulate petsird LM data
 
-### Read scanner geometry from a PETSIRD file and visualize it
+```
+python 01_analytic_petsird_lm_simulator.py
+```
 
-**TODO**: 
-- start from this [parallel example here](https://parallelproj.readthedocs.io/en/stable/auto_examples/01_pet_geometry/03_run_block_scanner.html#sphx-glr-auto-examples-01-pet-geometry-03-run-block-scanner-py) and this [petsird example here](python/petsird_plot_scanner_and_events.py)
-- map PETSIRD scanner detector elements to LOR endpoints
-- How to map BoxShape to a single LOR point? (center of the Box is not want we want. We need most likely interaction point.)
-- use LOR endpoints to setup [BlockScannerModules](https://parallelproj.readthedocs.io/en/stable/python_api.html#parallelproj.pet_scanners.BlockPETScannerModule) tha can be used in [ModularizedPETScannerGeometry](https://parallelproj.readthedocs.io/en/stable/python_api.html#parallelproj.pet_scanners.ModularizedPETScannerGeometry) or a [RegularPolygonPETScannerGeometry](https://parallelproj.readthedocs.io/en/stable/python_api.html#parallelproj.pet_scanners.RegularPolygonPETScannerGeometry) - depending of the system geometry and module definition. Using the latter is more convient for the definition of sinograms, the former is better for systems with less symmetries where it is less straight forward to define "sinograms".
+The simulation can be customized in many ways (number of counts to simulate,
+uniform or non-uniform efficiencies ...) via command line options.
 
-### Simulation of PETSIRD LM data using parallelproj
+These option can be listed via
+```
+python 01_analytic_petsird_lm_simulator.py
+```
 
-Start from this [parallelproj example](https://parallelproj.readthedocs.io/en/stable/auto_examples/06_listmode_algorithms/01_listmode_mlem.html#sphx-glr-auto-examples-06-listmode-algorithms-01-listmode-mlem-py).
+## Run a listmode OSEM recon on the simulated
 
-**TODO**: 
-- rewrite (simplify) util function that converts sinogram to listmode including event detectors IDs instead of coordinates. Write an updated noisy emission sinogram to LM converter similar to  [this](https://parallelproj.readthedocs.io/en/stable/_modules/parallelproj/projectors.html#RegularPolygonPETProjector.convert_sinogram_to_listmode) but skipping the detector ID to world coordinate lookup.
-- write scanner geometry to file
+```
+python 02_recon_block_scanner_listmode_data.py
+```
 
-
-
+Thes command line optione for the LM OSEM recon script can be listed via
+```
+python 02_recon_block_scanner_listmode_data.py -h
+```
 
