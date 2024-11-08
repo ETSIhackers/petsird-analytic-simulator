@@ -166,7 +166,7 @@ tof_params = parallelproj.TOFParameters(
 assert num_tofbins % 2 == 1, "Number of TOF bins must be odd"
 # %%
 # calculate the sensitivity image
-
+print("Calculating sensitivity image")
 
 # we loop through the symmetric group ID look up table to see which module pairs
 # are in coincidence
@@ -185,7 +185,7 @@ for i in range(num_modules):
         sgid = header.scanner.detection_efficiencies.module_pair_sgidlut[i, j]
 
         if sgid >= 0:
-            print(i, j, sgid)
+            print(f"mod1 {i:03}, mod2 {j:03}, SGID {sgid:03}", end="\r")
 
             start_det_el = det_element_center_list[i]
             end_det_el = det_element_center_list[j]
@@ -200,8 +200,6 @@ for i in range(num_modules):
             )
             proj.tof_parameters = tof_params
 
-            # TODO: add TOF parameters
-
             # get the module pair efficiencies - asumming that we only use 1 energy bin
             module_pair_eff = (
                 header.scanner.detection_efficiencies.module_pair_efficiencies_vector[
@@ -212,13 +210,14 @@ for i in range(num_modules):
             start_el_eff = xp.repeat(det_el_efficiencies[i], len(end_det_el), axis=0)
             end_el_eff = xp.tile(det_el_efficiencies[j], (len(start_det_el)))
 
-            # TODO loop over TOF!
             for tofbin in xp.arange(-(num_tofbins // 2), num_tofbins // 2 + 1):
                 # print(tofbin)
                 proj.event_tofbins = xp.full(
                     start_coords.shape[0], tofbin, dtype="int32"
                 )
                 sens_img += proj.adjoint(start_el_eff * end_el_eff * module_pair_eff)
+
+print("")
 
 # for some reason we have to divide the sens image by the number of TOF bins
 # right now unclear why that is
@@ -227,46 +226,64 @@ sens_img = res_model.adjoint(sens_img)
 
 # %%
 # read all coincidence events
+print("Reading LM events")
 
-if False:
-    num_prompts = 0
-    event_counter = 0
-    num_tof_bins = header.scanner.number_of_tof_bins()
+num_prompts = 0
+event_counter = 0
+num_tof_bins = header.scanner.number_of_tof_bins()
 
-    xstart = []
-    xend = []
-    tof_bin = []
-    effs = []
+xstart = []
+xend = []
+tof_bin = []
+effs = []
 
-    for i_time_block, time_block in enumerate(reader.read_time_blocks()):
-        if isinstance(time_block, petsird.TimeBlock.EventTimeBlock):
-            num_prompts += len(time_block.value.prompt_events)
+for i_time_block, time_block in enumerate(reader.read_time_blocks()):
+    if isinstance(time_block, petsird.TimeBlock.EventTimeBlock):
+        num_prompts += len(time_block.value.prompt_events)
 
-            for i_event, event in enumerate(time_block.value.prompt_events):
-                event_mods_and_els = get_module_and_element(
-                    header.scanner.scanner_geometry, event.detector_ids
-                )
+        for i_event, event in enumerate(time_block.value.prompt_events):
+            event_mods_and_els = get_module_and_element(
+                header.scanner.scanner_geometry, event.detector_ids
+            )
 
-                event_start_coord = element_centers[
-                    event_mods_and_els[0].module, event_mods_and_els[0].el
-                ]
-                xstart.append(event_start_coord)
+            event_start_coord = det_element_center_list[event_mods_and_els[0].module][
+                event_mods_and_els[0].el
+            ]
+            xstart.append(event_start_coord)
 
-                event_end_coord = element_centers[
-                    event_mods_and_els[1].module, event_mods_and_els[1].el
-                ]
-                xend.append(event_end_coord)
+            event_end_coord = det_element_center_list[event_mods_and_els[1].module][
+                event_mods_and_els[1].el
+            ]
+            xend.append(event_end_coord)
 
-                # get the event efficiencies
-                effs.append(get_detection_efficiency(header.scanner, event))
-                # get the signed event TOF bin (0 is the central bin)
-                tof_bin.append(event.tof_idx - num_tof_bins // 2)
+            # get the event efficiencies
+            effs.append(get_detection_efficiency(header.scanner, event))
+            # get the signed event TOF bin (0 is the central bin)
+            tof_bin.append(event.tof_idx - num_tof_bins // 2)
 
-                event_counter += 1
+            event_counter += 1
 
-    reader.close()
+reader.close()
 
-    xstart = xp.asarray(xstart, device=dev)
-    xend = xp.asarray(xend, device=dev)
-    effs = xp.asarray(effs, device=dev)
-    tof_bin = xp.asarray(tof_bin, device=dev)
+xstart = xp.asarray(xstart, device=dev)
+xend = xp.asarray(xend, device=dev)
+effs = xp.asarray(effs, device=dev)
+tof_bin = xp.asarray(tof_bin, device=dev)
+
+
+# %%
+# run a LM OSEM recon
+
+num_iter = 50
+recon = xp.ones(img_shape, dtype="float32")
+
+proj = parallelproj.ListmodePETProjector(xstart, xend, img_shape, voxel_size)
+proj.tof_parameters = tof_params
+proj.event_tofbins = tof_bin
+
+for i in range(num_iter):
+    print(f"it {(i +1):03} / {num_iter:03}")
+    lm_exp = effs * proj(res_model(recon))
+    print(lm_exp.min())
+    tmp = res_model(proj.adjoint(effs / lm_exp))
+    recon *= tmp / sens_img

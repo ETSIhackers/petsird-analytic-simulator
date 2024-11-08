@@ -220,6 +220,12 @@ nontof_sens_sino = xp.ones(proj.out_shape[:-1], dtype="float32", device=dev)
 det_el_efficiencies = 0.2 + 2 * xp.astype(
     xp.random.rand(scanner.num_modules, lor_desc.num_lorendpoints_per_block), "float32"
 )
+# multiply the det el eff. of the first module by 3 to introduce more variation
+det_el_efficiencies[0, :] *= 3
+
+# divide the det el eff. of the last module by 3 to introduce more variation
+det_el_efficiencies[-1, :] /= 3
+
 # simulate a few dead crystals
 det_el_efficiencies[det_el_efficiencies < 0.21] = 0
 
@@ -257,7 +263,6 @@ print(img_fwd_tof.shape)
 # and normalization are ignored)
 
 ones_back_tof = fwd_op.adjoint(xp.ones(fwd_op.out_shape, dtype=xp.float32, device=dev))
-xp.save("ones_back_tof.npy", ones_back_tof)
 print(ones_back_tof.shape)
 
 # %%
@@ -421,7 +426,6 @@ if check_backprojection and (num_true_counts > 0):
         tofbin=event_tof_bin,
     )
 
-    xp.save("lm_back.npy", lm_back)
     lm_back_non_tof = parallelproj.joseph3d_back(
         xstart=scanner.get_lor_endpoints(event_start_block, event_start_el),
         xend=scanner.get_lor_endpoints(event_end_block, event_end_el),
@@ -430,7 +434,6 @@ if check_backprojection and (num_true_counts > 0):
         voxsize=proj.voxel_size,
         img_fwd=xp.ones(num_events, dtype=xp.float32, device=dev),
     )
-    xp.save("lm_back_non_tof.npy", lm_back_non_tof)
 
     vi = pv.ThreeAxisViewer([histo_back, lm_back, histo_back - lm_back])
 
