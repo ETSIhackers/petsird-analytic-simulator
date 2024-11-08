@@ -9,9 +9,12 @@ import parallelproj
 import petsird
 import matplotlib.pyplot as plt
 import math
+import json
+
+from pathlib import Path
 
 
-# %% c
+# %%
 def circular_distance(i_mod_1: int, i_mod_2: int, num_modules: int) -> int:
     clockwise_distance = abs(i_mod_1 - i_mod_2)
     counterclockwise_distance = num_modules - clockwise_distance
@@ -36,11 +39,12 @@ def module_pair_eff_from_sgd(i_sgd: int) -> float:
 # parse the command line for the input parameters below
 parser = argparse.ArgumentParser()
 
-parser.add_argument("--fname", type=str, default="sim_lm.bin")
+parser.add_argument("--fname", type=str, default="simulated_lm_file.bin")
+parser.add_argument("--output_dir", type=str, default="my_lm_sim")
 parser.add_argument("--num_true_counts", type=int, default=int(1e6))
 parser.add_argument("--show_plots", default=False, action="store_true")
 parser.add_argument("--check_backprojection", default=False, action="store_true")
-parser.add_argument("--run_recon", default=False, action="store_true")
+parser.add_argument("--run_histogram_mlem", default=False, action="store_true")
 parser.add_argument("--num_iter", type=int, default=10)
 parser.add_argument("--skip_writing", default=False, action="store_true")
 parser.add_argument("--fwhm_mm", type=float, default=1.5)
@@ -58,7 +62,7 @@ args = parser.parse_args()
 fname = args.fname
 show_plots = args.show_plots
 check_backprojection = args.check_backprojection
-run_recon = args.run_recon
+run_histogram_mlem = args.run_histogram_mlem
 num_true_counts = args.num_true_counts
 skip_writing = args.skip_writing
 num_iter = args.num_iter
@@ -66,7 +70,16 @@ fwhm_mm = args.fwhm_mm
 tof_fwhm_mm = args.tof_fwhm_mm
 seed = args.seed
 phantom = args.phantom
+output_dir = Path(args.output_dir)
 
+if not output_dir.exists():
+    output_dir.mkdir(parents=True)
+
+# dump args into a json file output_dir / "args.json"
+with open(output_dir / "sim_parameters.json", "w") as f:
+    json.dump(vars(args), f, indent=4)
+
+# %%
 dev = "cpu"
 xp.random.seed(args.seed)
 
@@ -262,8 +275,9 @@ print(img_fwd_tof.shape)
 # TOF backproject a "TOF histogram" full of ones ("sensitivity image" when attenuation
 # and normalization are ignored)
 
-ones_back_tof = fwd_op.adjoint(xp.ones(fwd_op.out_shape, dtype=xp.float32, device=dev))
-print(ones_back_tof.shape)
+sens_img = fwd_op.adjoint(xp.ones(fwd_op.out_shape, dtype=xp.float32, device=dev))
+xp.save(output_dir / "reference_sensitivity_image.npy", sens_img)
+print(sens_img.shape)
 
 # %%
 # put poisson noise on the forward projection
@@ -276,7 +290,7 @@ else:
     emission_data = img_fwd_tof
 
 # %%
-if run_recon:
+if run_histogram_mlem:
     recon = xp.ones(img_shape, dtype=xp.float32, device=dev)
 
     for i in range(num_iter):
@@ -284,10 +298,11 @@ if run_recon:
 
         exp = xp.clip(fwd_op(recon), 1e-6, None)
         grad = fwd_op.adjoint((exp - emission_data) / exp)
-        step = recon / ones_back_tof
+        step = recon / sens_img
         recon -= step * grad
 
     print("")
+    xp.save(output_dir / f"reference_histogram_mlem_{num_iter}.npy", recon)
 
 # %%
 # convert emission histogram to LM
@@ -382,13 +397,13 @@ if show_plots:
 
 if show_plots:
     fig6, ax6 = plt.subplots(1, 4, figsize=(12, 3), tight_layout=True)
-    vmin = float(xp.min(ones_back_tof))
-    vmax = float(xp.max(ones_back_tof))
+    vmin = float(xp.min(sens_img))
+    vmax = float(xp.max(sens_img))
     for i, sl in enumerate(
         [img_shape[2] // 4, img_shape[2] // 2, 3 * img_shape[2] // 4]
     ):
         ax6[i].imshow(
-            parallelproj.to_numpy_array(ones_back_tof[:, :, sl]),
+            parallelproj.to_numpy_array(sens_img[:, :, sl]),
             vmin=vmin,
             vmax=vmax,
             cmap="Greys",
@@ -610,7 +625,7 @@ if num_true_counts > 0:
 
     if not skip_writing:
         print("Writing LM file")
-        with petsird.BinaryPETSIRDWriter(fname) as writer:
+        with petsird.BinaryPETSIRDWriter(str(output_dir / fname)) as writer:
             writer.write_header(header)
             for i_t in range(1):
                 start = i_t * header.scanner.event_time_block_duration
