@@ -77,14 +77,6 @@ def transform_BoxShape(
 
 
 # %%
-# parse the command line
-def parse_int_tuple(arg):
-    return tuple(map(int, arg.split(",")))
-
-
-def parse_float_tuple(arg):
-    return tuple(map(float, arg.split(",")))
-
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--fname", type=str, default="sim_lm.bin")

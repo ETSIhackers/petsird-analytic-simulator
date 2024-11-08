@@ -1,6 +1,10 @@
+"""analytic simulation of petsird v0.2 listmode data for a block PET scanner
+   we only simulate true events and ignore the effect of attenuation
+   however, we simulate the effect of crystal efficiencies and LOR symmetry group efficiencies
+"""
+
 # %%
 import array_api_compat.numpy as xp
-import pymirc.viewer as pv
 import argparse
 from array_api_compat import size
 from itertools import combinations
@@ -30,10 +34,28 @@ def sgid_from_module_pair(i_mod_1: int, i_mod_2: int, num_modules: int) -> int:
 
 
 # %%
-def module_pair_eff_from_sgd(i_sgd: int) -> float:
+def module_pair_eff_from_sgd(i_sgd: int, uniform: bool = False) -> float:
     """a random mapping from symmetry group id (sgid) to efficiency"""
-    return 1 + 0.5 * ((-1) ** i_sgd)
+    if uniform:
+        res = 1.0
+    else:
+        res = 1 + 0.5 * ((-1) ** i_sgd)
 
+    return res
+
+
+# parse the command line
+def parse_int_tuple(arg):
+    return tuple(map(int, arg.split(",")))
+
+
+def parse_float_tuple(arg):
+    return tuple(map(float, arg.split(",")))
+
+
+################################################################################
+################################################################################
+################################################################################
 
 # %%
 # parse the command line for the input parameters below
@@ -42,14 +64,17 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--fname", type=str, default="simulated_lm_file.bin")
 parser.add_argument("--output_dir", type=str, default="my_lm_sim")
 parser.add_argument("--num_true_counts", type=int, default=int(1e6))
-parser.add_argument("--show_plots", default=False, action="store_true")
+parser.add_argument("--skip_plots", action="store_true")
 parser.add_argument("--check_backprojection", default=False, action="store_true")
-parser.add_argument("--run_histogram_mlem", default=False, action="store_true")
-parser.add_argument("--num_iter", type=int, default=10)
+parser.add_argument("--num_epochs_mlem", type=int, default=0)
 parser.add_argument("--skip_writing", default=False, action="store_true")
 parser.add_argument("--fwhm_mm", type=float, default=1.5)
 parser.add_argument("--tof_fwhm_mm", type=float, default=30.0)
 parser.add_argument("--seed", type=int, default=0)
+parser.add_argument("--uniform_crystal_eff", action="store_true")
+parser.add_argument("--uniform_sg_eff", action="store_true")
+parser.add_argument("--img_shape", type=parse_int_tuple, default=(100, 100, 11))
+parser.add_argument("--voxel_size", type=parse_float_tuple, default=(1.0, 1.0, 1.0))
 parser.add_argument(
     "--phantom",
     type=str,
@@ -60,55 +85,50 @@ parser.add_argument(
 args = parser.parse_args()
 
 fname = args.fname
-show_plots = args.show_plots
+skip_plots = args.skip_plots
 check_backprojection = args.check_backprojection
-run_histogram_mlem = args.run_histogram_mlem
 num_true_counts = args.num_true_counts
 skip_writing = args.skip_writing
-num_iter = args.num_iter
+num_epochs_mlem = args.num_epochs_mlem
 fwhm_mm = args.fwhm_mm
 tof_fwhm_mm = args.tof_fwhm_mm
 seed = args.seed
 phantom = args.phantom
 output_dir = Path(args.output_dir)
+uniform_crystal_eff = args.uniform_crystal_eff
+uniform_sg_eff = args.uniform_sg_eff
+img_shape = args.img_shape
+voxel_size = args.voxel_size
 
 if not output_dir.exists():
     output_dir.mkdir(parents=True)
 
 # dump args into a json file output_dir / "args.json"
-with open(output_dir / "sim_parameters.json", "w") as f:
+with open(output_dir / "sim_parameters.json", "w", encoding="UTF-8") as f:
     json.dump(vars(args), f, indent=4)
 
 # %%
+# "fixed" input parameters
 dev = "cpu"
 xp.random.seed(args.seed)
 
 # %%
-# input parameters
+# input parameters related to the scanner geometry
 
-# grid shape of LOR endpoints forming a block module
+# number of LOR endpoints per block module in all 3 directions
 block_shape = (10, 2, 3)
-# spacing between LOR endpoints in a block module
+# spacing between LOR endpoints in a block module in all three directions (mm)
 block_spacing = (4.5, 10.0, 4.5)
-# radius of the scanner
+# radius of the scanner - distance from the center to the block modules (mm)
 scanner_radius = 100
-# number of modules
+# number of modules - we will have 12 block modules arranged in a "circle"
 num_blocks = 12
 
 
 # %%
-# Setup of a modularized PET scanner geometry
-# -------------------------------------------
-#
-# We define 7 block modules arranged in a circle with a radius of 10.
-# The arangement follows a regular polygon with 12 sides, leaving some
-# of the sides empty.
-# Note that all block modules must be identical, but can be anywhere in space.
-# The location of a block module can be changed using an affine transformation matrix.
+# Setup of a modularized parallelproj PET scanner geometry
 
-mods = []
-
-delta_phi = 2 * xp.pi / num_blocks
+modules = []
 
 # setup an affine transformation matrix to translate the block modules from the
 # center to the radius of the scanner
@@ -133,7 +153,7 @@ for i, phi in enumerate(xp.linspace(0, 2 * xp.pi, num_blocks, endpoint=False)):
 
     module_transforms.append(aff_mat_rot @ aff_mat_trans)
 
-    mods.append(
+    modules.append(
         parallelproj.BlockPETScannerModule(
             xp,
             dev,
@@ -145,18 +165,15 @@ for i, phi in enumerate(xp.linspace(0, 2 * xp.pi, num_blocks, endpoint=False)):
 
 # create the scanner geometry from a list of identical block modules at
 # different locations in space
-scanner = parallelproj.ModularizedPETScannerGeometry(mods)
+scanner = parallelproj.ModularizedPETScannerGeometry(modules)
 
 # %%
-# Setup of a LOR descriptor consisting of block pairs
-# ---------------------------------------------------
-#
-# Once the geometry of the LOR endpoints is defined, we can define the LORs
-# by specifying which block pairs are in coincidence and for "valid" LORs.
-# To do this, we have manually define a list containing pairs of block numbers.
-# Here, we define 9 block pairs. Note that more pairs would be possible.
+# Setup of a parllelproj LOR descriptor that connectes LOR endpoints in modules
+# that are in coincidence
 
+# all possible module pairs
 all_combinations = combinations(range(num_blocks), 2)
+# exclude module pairs that are too close to each other
 block_pairs = [
     (v1, v2) for v1, v2 in all_combinations if circular_distance(v1, v2, num_blocks) > 2
 ]
@@ -167,13 +184,8 @@ lor_desc = parallelproj.EqualBlockPETLORDescriptor(
 )
 
 # %%
-# Setup of a non-TOF projector
-# ----------------------------
-#
-# Now that the LOR descriptor is defined, we can setup the projector.
+# setup of the ground truth image used for the data simulation
 
-img_shape = (100, 100, 11)
-voxel_size = (1.0, 1.0, 1.0)
 img = xp.zeros(img_shape, dtype=xp.float32, device=dev)
 
 if phantom == "uniform_cylinder":
@@ -191,11 +203,9 @@ else:
     raise ValueError("Invalid phantom {phantom}")
 
 # %%
-# Setup of a TOF projector
-# ------------------------
-#
-# Now that the LOR descriptor is defined, we can setup the projector.
+# setup of a parallelproj TOF projector
 
+# TOF parameters
 sig_tof = tof_fwhm_mm / 2.35
 tof_bin_width = 0.8 * sig_tof
 # calculate the number of TOF bins
@@ -213,51 +223,61 @@ proj.tof_parameters = parallelproj.TOFParameters(
     num_sigmas=3.0,
 )
 
+# check if the projector passes the adjointness test
 assert proj.adjointness_test(xp, dev)
 
 
 # %%
 # setup a simple image space resolution model
+
 sig = fwhm_mm / (2.35 * xp.asarray(voxel_size, device=dev))
 res_model = parallelproj.GaussianFilterOperator(img_shape, sigma=sig)
 
-# setup the sensitivity sinogram
+# %%
+# setup the sensitivity sinogram consisting of the crystal efficiencies factors
+# and the LOR symmetry group efficiencies
+
 tmp = xp.arange(proj.lor_descriptor.num_lorendpoints_per_block)
 start_el, end_el = xp.meshgrid(tmp, tmp, indexing="ij")
 start_el_arr = xp.reshape(start_el, (size(start_el),))
 end_el_arr = xp.reshape(end_el, (size(end_el),))
 
-nontof_sens_sino = xp.ones(proj.out_shape[:-1], dtype="float32", device=dev)
+nontof_sens_histo = xp.ones(proj.out_shape[:-1], dtype="float32", device=dev)
 
-# simulate random crystal eff. uniformly distributed between 0.2 - 2.2
-det_el_efficiencies = 0.2 + 2 * xp.astype(
-    xp.random.rand(scanner.num_modules, lor_desc.num_lorendpoints_per_block), "float32"
-)
-# multiply the det el eff. of the first module by 3 to introduce more variation
-det_el_efficiencies[0, :] *= 3
-
-# divide the det el eff. of the last module by 3 to introduce more variation
-det_el_efficiencies[-1, :] /= 3
-
-# simulate a few dead crystals
-det_el_efficiencies[det_el_efficiencies < 0.21] = 0
+if uniform_crystal_eff:
+    # crystal efficiencies are all 1
+    det_el_efficiencies = xp.ones(
+        scanner.num_modules, lor_desc.num_lorendpoints_per_block, dtype="float32"
+    )
+else:
+    # simulate random crystal eff. uniformly distributed between 0.2 - 2.2
+    det_el_efficiencies = 0.2 + 2 * xp.astype(
+        xp.random.rand(scanner.num_modules, lor_desc.num_lorendpoints_per_block),
+        "float32",
+    )
+    # multiply the det el eff. of the first module by 3 to introduce more variation
+    det_el_efficiencies[0, :] *= 3
+    # divide the det el eff. of the last module by 3 to introduce more variation
+    det_el_efficiencies[-1, :] /= 3
+    # simulate a few dead crystals
+    det_el_efficiencies[det_el_efficiencies < 0.21] = 0
 
 for i, bp in enumerate(proj.lor_descriptor.all_block_pairs):
     sgid = sgid_from_module_pair(bp[0], bp[1], num_blocks)
-    sg_eff = module_pair_eff_from_sgd(sgid)
+    sg_eff = module_pair_eff_from_sgd(sgid, uniform=uniform_sg_eff)
     start_crystal_eff = det_el_efficiencies[bp[0], start_el_arr]
     end_crystal_eff = det_el_efficiencies[bp[1], end_el_arr]
-    nontof_sens_sino[i, ...] = sg_eff * start_crystal_eff * end_crystal_eff
+    nontof_sens_histo[i, ...] = sg_eff * start_crystal_eff * end_crystal_eff
 
 # %%
 # setup the complete forward operator consisting of diag(s) P G
 # where G is the image-based resolution model
 # P is the (TOF) forward projector
-# diag(s) is the elementwise multiplication with a non-TOF sens. sinogram
+# diag(s) is the elementwise multiplication with a non-TOF sensitivity histogram
 fwd_op = parallelproj.CompositeLinearOperator(
     [
         parallelproj.TOFNonTOFElementwiseMultiplicationOperator(
-            proj.out_shape, nontof_sens_sino
+            proj.out_shape, nontof_sens_histo
         ),
         proj,
         res_model,
@@ -269,18 +289,15 @@ fwd_op = parallelproj.CompositeLinearOperator(
 # shape (num_block_pairs, num_lors_per_block_pair, num_tofbins)
 
 img_fwd_tof = fwd_op(img)
-print(img_fwd_tof.shape)
 
 # %%
-# TOF backproject a "TOF histogram" full of ones ("sensitivity image" when attenuation
-# and normalization are ignored)
+# calculate the sensitivity image
 
 sens_img = fwd_op.adjoint(xp.ones(fwd_op.out_shape, dtype=xp.float32, device=dev))
 xp.save(output_dir / "reference_sensitivity_image.npy", sens_img)
-print(sens_img.shape)
 
 # %%
-# put poisson noise on the forward projection
+# add poisson noise on the forward projection
 if num_true_counts > 0:
     scale_fac = num_true_counts / img_fwd_tof.sum()
     img *= scale_fac
@@ -290,11 +307,11 @@ else:
     emission_data = img_fwd_tof
 
 # %%
-if run_histogram_mlem:
+if num_epochs_mlem > 0:
     recon = xp.ones(img_shape, dtype=xp.float32, device=dev)
 
-    for i in range(num_iter):
-        print(f"{(i+1):03}/{num_iter:03}", end="\r")
+    for i in range(num_epochs_mlem):
+        print(f"{(i+1):03}/{num_epochs_mlem:03}", end="\r")
 
         exp = xp.clip(fwd_op(recon), 1e-6, None)
         grad = fwd_op.adjoint((exp - emission_data) / exp)
@@ -302,7 +319,9 @@ if run_histogram_mlem:
         recon -= step * grad
 
     print("")
-    xp.save(output_dir / f"reference_histogram_mlem_{num_iter}.npy", recon)
+    xp.save(
+        output_dir / f"reference_histogram_mlem_{num_epochs_mlem}_epochs.npy", recon
+    )
 
 # %%
 # convert emission histogram to LM
@@ -366,8 +385,9 @@ if num_true_counts > 0:
 
 # %%
 # Visualize the projector geometry and and the first 3 coincidences
+# Visualize the TOF profile of one LOR of the noise free data and the sensitivity image
 
-if show_plots:
+if not skip_plots:
     fig_geom = plt.figure(figsize=(4, 4), tight_layout=True)
     ax_geom = fig_geom.add_subplot(111, projection="3d")
     ax_geom.set_xlabel("x0")
@@ -390,42 +410,40 @@ if show_plots:
                 [event_start_coord[2], event_end_coord[2]],
             )
 
+    fig_geom.savefig(output_dir / "scanner_geometry.png", dpi=300)
     fig_geom.show()
 
-# %%
-# Visualize the TOF profile of one LOR of the noise free data and the sensitivity image
-
-if show_plots:
-    fig6, ax6 = plt.subplots(1, 4, figsize=(12, 3), tight_layout=True)
+    fig2, ax2 = plt.subplots(1, 4, figsize=(12, 3), tight_layout=True)
     vmin = float(xp.min(sens_img))
     vmax = float(xp.max(sens_img))
     for i, sl in enumerate(
         [img_shape[2] // 4, img_shape[2] // 2, 3 * img_shape[2] // 4]
     ):
-        ax6[i].imshow(
+        ax2[i].imshow(
             parallelproj.to_numpy_array(sens_img[:, :, sl]),
             vmin=vmin,
             vmax=vmax,
             cmap="Greys",
         )
-        ax6[i].set_title(f"sens. img. sl {sl}", fontsize="small")
+        ax2[i].set_title(f"sens. img. sl {sl}", fontsize="small")
 
-    ax6[-1].plot(parallelproj.to_numpy_array(img_fwd_tof[17, 0, :]), ".-")
-    ax6[-1].set_xlabel("TOF bin")
-    ax6[-1].set_title(
+    ax2[-1].plot(parallelproj.to_numpy_array(img_fwd_tof[17, 0, :]), ".-")
+    ax2[-1].set_xlabel("TOF bin")
+    ax2[-1].set_title(
         f"TOF profile of LOR 0 in block pair {block_pairs[17]}", fontsize="small"
     )
 
-    fig6.show()
+    fig2.savefig(output_dir / "tof_profile_and_sensitivity_image.png", dpi=300)
+    fig2.show()
 
 
 # %%
-# do a sinogram and LM back projection of the emission data
-# if the Poisson emission sinogram to LM conversion is correct, those should
-# look very similar
+# do a TOF histogram as well as TOF and nonTOF LM backprojection
 
 if check_backprojection and (num_true_counts > 0):
     histo_back = proj.adjoint(emission_data)
+
+    xp.save(output_dir / "histogram_backprojection_tof.npy", histo_back)
 
     lm_back = parallelproj.joseph3d_back_tof_lm(
         xstart=scanner.get_lor_endpoints(event_start_block, event_start_el),
@@ -440,6 +458,7 @@ if check_backprojection and (num_true_counts > 0):
         nsigmas=proj.tof_parameters.num_sigmas,
         tofbin=event_tof_bin,
     )
+    xp.save(output_dir / "lm_backprojection_tof.npy", lm_back)
 
     lm_back_non_tof = parallelproj.joseph3d_back(
         xstart=scanner.get_lor_endpoints(event_start_block, event_start_el),
@@ -449,11 +468,10 @@ if check_backprojection and (num_true_counts > 0):
         voxsize=proj.voxel_size,
         img_fwd=xp.ones(num_events, dtype=xp.float32, device=dev),
     )
-
-    vi = pv.ThreeAxisViewer([histo_back, lm_back, histo_back - lm_back])
+    xp.save(output_dir / "lm_backprojection_non_tof.npy", lm_back_non_tof)
 
 # %%
-# create header
+# create the petsird header
 
 if num_true_counts > 0:
     subject = petsird.Subject(id="42")
@@ -462,7 +480,6 @@ if num_true_counts > 0:
         address="42 Silly Walks Street, Silly Walks City",
     )
 
-    # %%
     # create non geometry related scanner information
 
     num_energy_bins = 1
@@ -475,7 +492,7 @@ if num_true_counts > 0:
         dtype="float32",
     )
 
-    energyBinEdges = xp.linspace(430, 650, num_energy_bins, dtype="float32")
+    energyBinEdges = xp.linspace(430, 650, num_energy_bins + 1, dtype="float32")
 
     num_total_elements = proj.lor_descriptor.scanner.num_lor_endpoints
 
@@ -504,7 +521,7 @@ if num_true_counts > 0:
     module_pair_efficiencies_vector = []
 
     for sgid in range(num_SGIDs):
-        eff = module_pair_eff_from_sgd(sgid)
+        eff = module_pair_eff_from_sgd(sgid, uniform=uniform_sg_eff)
         vals = xp.full(module_pair_efficiencies_shape, eff, dtype="float32", device=dev)
 
         module_pair_efficiencies_vector.append(
@@ -519,7 +536,6 @@ if num_true_counts > 0:
         module_pair_efficiencies_vector=module_pair_efficiencies_vector,
     )
 
-    # %%
     # setup crystal box object
 
     crystal_centers = parallelproj.BlockPETScannerModule(
@@ -560,7 +576,7 @@ if num_true_counts > 0:
         ]
     )
     crystal = petsird.BoxSolidVolume(shape=crystal_shape, material_id=1)
-    # %%
+
     # setup the petsird geometry of a module / block
 
     rep_volume = petsird.ReplicatedBoxSolidVolume(object=crystal)
@@ -578,7 +594,6 @@ if num_true_counts > 0:
         detecting_elements=[rep_volume], detecting_element_ids=[0]
     )
 
-    # %%
     # setup the PETSIRD scanner geometry
     rep_module = petsird.ReplicatedDetectorModule(object=detector_module)
 
@@ -591,7 +606,6 @@ if num_true_counts > 0:
         )
 
     scanner_geometry = petsird.ScannerGeometry(replicated_modules=[rep_module], ids=[0])
-    # %%
 
     # need energy bin info before being able to construct the detection efficiencies
     # so we will construct a scanner without the efficiencies first
