@@ -144,9 +144,6 @@ for rep_module in header.scanner.scanner_geometry.replicated_modules:
                 )
             det_element_center_list.append(det_element_centers)
 
-# %%
-# calculate the sensitivity image
-
 # create a list of the element detection efficiencies per module
 # this is a simple re-ordering of the detection efficiencies array which
 # makes the access easier
@@ -158,11 +155,28 @@ det_el_efficiencies = [
     for i in range(num_modules)
 ]
 
+num_tofbins = len(header.scanner.tof_bin_edges) - 1
+tofbin_width = header.scanner.tof_bin_edges[1] - header.scanner.tof_bin_edges[0]
+sigma_tof = header.scanner.tof_resolution / 2.35
+
+tof_params = parallelproj.TOFParameters(
+    num_tofbins=num_tofbins, tofbin_width=tofbin_width, sigma_tof=sigma_tof
+)
+
+assert num_tofbins % 2 == 1, "Number of TOF bins must be odd"
+# %%
+# calculate the sensitivity image
+
+
 # we loop through the symmetric group ID look up table to see which module pairs
 # are in coincidence
 
 img_shape = (100, 100, 11)
 voxel_size = (1.0, 1.0, 1.0)
+
+fwhm_mm = 1.5
+sig = fwhm_mm / (2.35 * xp.asarray(voxel_size, device=dev))
+res_model = parallelproj.GaussianFilterOperator(img_shape, sigma=sig)
 
 sens_img = xp.zeros(img_shape, dtype="float32")
 
@@ -184,6 +198,8 @@ for i in range(num_modules):
             proj = parallelproj.ListmodePETProjector(
                 start_coords, end_coords, img_shape, voxel_size
             )
+            proj.tof_parameters = tof_params
+
             # TODO: add TOF parameters
 
             # get the module pair efficiencies - asumming that we only use 1 energy bin
@@ -197,7 +213,17 @@ for i in range(num_modules):
             end_el_eff = xp.tile(det_el_efficiencies[j], (len(start_det_el)))
 
             # TODO loop over TOF!
-            sens_img += proj.adjoint(start_el_eff * end_el_eff * module_pair_eff)
+            for tofbin in xp.arange(-(num_tofbins // 2), num_tofbins // 2 + 1):
+                # print(tofbin)
+                proj.event_tofbins = xp.full(
+                    start_coords.shape[0], tofbin, dtype="int32"
+                )
+                sens_img += proj.adjoint(start_el_eff * end_el_eff * module_pair_eff)
+
+# for some reason we have to divide the sens image by the number of TOF bins
+# right now unclear why that is
+sens_img /= num_tofbins
+sens_img = res_model.adjoint(sens_img)
 
 # %%
 # read all coincidence events
