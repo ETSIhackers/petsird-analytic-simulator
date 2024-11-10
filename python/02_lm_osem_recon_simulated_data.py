@@ -1,12 +1,5 @@
-#  Copyright (C) 2024 University College London
-#
-#  SPDX-License-Identifier: Apache-2.0
-
-# basic plotting of the scanner geometry
-# preliminary code!
-
 import array_api_compat.numpy as xp
-import numpy.typing as npt
+import matplotlib.pyplot as plt
 import petsird
 import parallelproj
 
@@ -15,72 +8,16 @@ from petsird_helpers import (
     get_detection_efficiency,
 )
 
+from utils import (
+    parse_float_tuple,
+    parse_int_tuple,
+    mult_transforms,
+    transform_BoxShape,
+    draw_BoxShape,
+)
+
 from pathlib import Path
 import argparse
-
-
-def transform_to_mat44(
-    transform: petsird.RigidTransformation,
-) -> npt.NDArray[xp.float32]:
-    return xp.vstack([transform.matrix, [0, 0, 0, 1]])
-
-
-def mat44_to_transform(mat: npt.NDArray[xp.float32]) -> petsird.RigidTransformation:
-    return petsird.RigidTransformation(matrix=mat[0:3, :])
-
-
-def coordinate_to_homogeneous(coord: petsird.Coordinate) -> npt.NDArray[xp.float32]:
-    return xp.hstack([coord.c, 1])
-
-
-def homogeneous_to_coordinate(
-    hom_coord: npt.NDArray[xp.float32],
-) -> petsird.Coordinate:
-    return petsird.Coordinate(c=hom_coord[0:3])
-
-
-def mult_transforms(
-    transforms: list[petsird.RigidTransformation],
-) -> petsird.RigidTransformation:
-    """multiply rigid transformations"""
-    mat = xp.array(
-        ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)),
-        dtype="float32",
-    )
-
-    for t in reversed(transforms):
-        mat = xp.matmul(transform_to_mat44(t), mat)
-    return mat44_to_transform(mat)
-
-
-def mult_transforms_coord(
-    transforms: list[petsird.RigidTransformation], coord: petsird.Coordinate
-) -> petsird.Coordinate:
-    """apply list of transformations to coordinate"""
-    # TODO better to multiply with coordinates in sequence, as first multiplying the matrices
-    hom = xp.matmul(
-        transform_to_mat44(mult_transforms(transforms)),
-        coordinate_to_homogeneous(coord),
-    )
-    return homogeneous_to_coordinate(hom)
-
-
-def transform_BoxShape(
-    transform: petsird.RigidTransformation, box_shape: petsird.BoxShape
-) -> petsird.BoxShape:
-
-    return petsird.BoxShape(
-        corners=[mult_transforms_coord([transform], c) for c in box_shape.corners]
-    )
-
-
-def parse_int_tuple(arg):
-    return tuple(map(int, arg.split(",")))
-
-
-def parse_float_tuple(arg):
-    return tuple(map(float, arg.split(",")))
-
 
 # %%
 
@@ -137,6 +74,9 @@ det_element_center_list = []
 # read the LOR endpoint coordinates for each detecting element in each crystal
 # we assume that the LOR endpoint corresponds to the center of the BoxShape
 
+fig_scanner = plt.figure(figsize=(8, 8), tight_layout=True)
+ax_scanner = fig_scanner.add_subplot(111, projection="3d")
+
 for rep_module in header.scanner.scanner_geometry.replicated_modules:
     det_el = rep_module.object.detecting_elements
 
@@ -165,8 +105,21 @@ for rep_module in header.scanner.scanner_geometry.replicated_modules:
                 det_element_centers[i_el, ...] = transformed_boxshape_vertices.mean(
                     axis=0
                 )
+
+                # visualize the detecting elements
+                draw_BoxShape(ax_scanner, transformed_boxshape)
+                if i_el == 0 or i_el == len(rep_volume.transforms) - 1:
+                    ax_scanner.text(
+                        float(transformed_boxshape_vertices[0][0]),
+                        float(transformed_boxshape_vertices[0][1]),
+                        float(transformed_boxshape_vertices[0][2]),
+                        f"{i_el:02}/{i_mod:02}",
+                        fontsize=7,
+                    )
+
             det_element_center_list.append(det_element_centers)
 
+# %%
 # create a list of the element detection efficiencies per module
 # this is a simple re-ordering of the detection efficiencies array which
 # makes the access easier
@@ -281,6 +234,14 @@ for i_time_block, time_block in enumerate(reader.read_time_blocks()):
             # get the signed event TOF bin (0 is the central bin)
             tof_bin.append(event.tof_idx - num_tof_bins // 2)
 
+            # visualize the first 5 events in the time block
+            if i_time_block == 0 and i_event < 5:
+                ax_scanner.plot(
+                    [event_start_coord[0], event_end_coord[0]],
+                    [event_start_coord[1], event_end_coord[1]],
+                    [event_start_coord[2], event_end_coord[2]],
+                )
+
             event_counter += 1
 
 reader.close()
@@ -290,6 +251,21 @@ xend = xp.asarray(xend, device=dev)
 effs = xp.asarray(effs, device=dev)
 tof_bin = xp.asarray(tof_bin, device=dev)
 
+# %%
+# set the x, y, z limits of the scanner plot
+xmin = xp.asarray([x.min(axis=0) for x in det_element_center_list]).min(axis=0)
+xmax = xp.asarray([x.max(axis=0) for x in det_element_center_list]).max(axis=0)
+r = (xmax - xmin).max()
+
+ax_scanner.set_xlabel("x0")
+ax_scanner.set_ylabel("x1")
+ax_scanner.set_zlabel("x2")
+ax_scanner.set_xlim(xmin.min() - 0.05 * r, xmax.max() + 0.05 * r)
+ax_scanner.set_ylim(xmin.min() - 0.05 * r, xmax.max() + 0.05 * r)
+ax_scanner.set_zlim(xmin.min() - 0.05 * r, xmax.max() + 0.05 * r)
+
+fig_scanner.savefig(output_dir / "scanner_geometry.png")
+fig_scanner.show()
 
 # %%
 # run a LM OSEM recon
