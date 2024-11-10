@@ -640,7 +640,7 @@ if num_true_counts > 0:
     # write petsird data
 
     if not skip_writing:
-        print("Writing LM file")
+        print(f"Writing LM file to {str(output_dir / fname)}")
         with petsird.BinaryPETSIRDWriter(str(output_dir / fname)) as writer:
             writer.write_header(header)
             for i_t in range(1):
