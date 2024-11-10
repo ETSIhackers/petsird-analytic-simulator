@@ -1,4 +1,4 @@
-name: petsird-v0.2-parallelproj
+name: petsird-analytic-simulator
 channels:
   - conda-forge
   - defaults
@@ -12,4 +12,4 @@ dependencies:
   - pymirc>=0.29
   - pip
   - pip:
-     - petsird==0.2 
+      - petsird~=0.2.1
