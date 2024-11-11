@@ -36,7 +36,7 @@ uniform or non-uniform efficiencies ...) via command line options.
 These option can be listed via
 
 ```
-python 01_analytic_petsird_lm_simulator.py
+python 01_analytic_petsird_lm_simulator.py -h
 ```
 
 **Note:** The "reference" MLEM using histogrammed data is only run if a
