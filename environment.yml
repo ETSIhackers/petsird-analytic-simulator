@@ -1,4 +1,4 @@
-name: petsird-analytic-simulator
+name: petsird-analytic-simulator-072
 channels:
   - conda-forge
   - defaults
@@ -10,4 +10,4 @@ dependencies:
   - matplotlib~=3.8.0
   - parallelproj>=1.10.0
   - pymirc>=0.29
-  - petsird~=0.2.1
+  - petsird~=0.7.2
