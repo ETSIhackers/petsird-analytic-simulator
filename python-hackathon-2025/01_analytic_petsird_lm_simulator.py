@@ -4,8 +4,7 @@ however, we simulate the effect of crystal efficiencies and LOR symmetry group e
 """
 
 # %%
-import array_api_compat.numpy as xp
-import array_api_compat.numpy as np
+import numpy as np
 import argparse
 from array_api_compat import size
 from itertools import combinations
@@ -114,8 +113,7 @@ with open(output_dir / "sim_parameters.json", "w", encoding="UTF-8") as f:
 
 # %%
 # "fixed" input parameters
-dev = "cpu"
-xp.random.seed(args.seed)
+np.random.seed(args.seed)
 
 # %%
 # input parameters related to the scanner geometry
@@ -133,19 +131,19 @@ num_blocks = 12
 # %%
 # Setup of a modularized parallelproj PET scanner geometry
 
-modules = []
+modules: list[parallelproj.BlockPETScannerModule] = []
 
 # setup an affine transformation matrix to translate the block modules from the
 # center to the radius of the scanner
-aff_mat_trans = xp.eye(4, dtype="float32", device=dev)
+aff_mat_trans = np.eye(4, dtype="float32")
 aff_mat_trans[1, -1] = scanner_radius
 
 module_transforms = []
 
-for i, phi in enumerate(xp.linspace(0, 2 * xp.pi, num_blocks, endpoint=False)):
+for i, phi in enumerate(np.linspace(0, 2 * np.pi, num_blocks, endpoint=False)):
     # setup an affine transformation matrix to rotate the block modules around the center
     # (of the "2" axis)
-    aff_mat_rot = xp.asarray(
+    aff_mat_rot = np.asarray(
         [
             [math.cos(phi), -math.sin(phi), 0, 0],
             [math.sin(phi), math.cos(phi), 0, 0],
@@ -153,15 +151,14 @@ for i, phi in enumerate(xp.linspace(0, 2 * xp.pi, num_blocks, endpoint=False)):
             [0, 0, 0, 1],
         ],
         dtype="float32",
-        device=dev,
     )
 
     module_transforms.append(aff_mat_rot @ aff_mat_trans)
 
     modules.append(
         parallelproj.BlockPETScannerModule(
-            xp,
-            dev,
+            np,
+            "cpu",
             block_shape,
             block_spacing,
             affine_transformation_matrix=module_transforms[i],
@@ -170,7 +167,7 @@ for i, phi in enumerate(xp.linspace(0, 2 * xp.pi, num_blocks, endpoint=False)):
 
 # create the scanner geometry from a list of identical block modules at
 # different locations in space
-scanner = parallelproj.ModularizedPETScannerGeometry(modules)
+scanner = parallelproj.ModularizedPETScannerGeometry(tuple(modules))
 
 # %%
 # Setup of a parllelproj LOR descriptor that connectes LOR endpoints in modules
@@ -185,18 +182,18 @@ block_pairs = [
 
 lor_desc = parallelproj.EqualBlockPETLORDescriptor(
     scanner,
-    xp.asarray(block_pairs, device=dev),
+    np.asarray(block_pairs),
 )
 
 # %%
 # setup of the ground truth image used for the data simulation
 
-img = xp.zeros(img_shape, dtype=xp.float32, device=dev)
+img = np.zeros(img_shape, dtype=np.float32)
 
 if phantom == "uniform_cylinder":
-    tmp = xp.linspace(-1, 1, img_shape[0])
-    X0, X1 = xp.meshgrid(tmp, tmp, indexing="ij")
-    disk = xp.astype(xp.sqrt(X0**2 + X1**2) < 0.7, "float32")
+    tmp = np.linspace(-1, 1, img_shape[0])
+    X0, X1 = np.meshgrid(tmp, tmp, indexing="ij")
+    disk = np.astype(np.sqrt(X0**2 + X1**2) < 0.7, "float32")
     for i in range(img_shape[2]):
         img[..., i] = disk
 elif phantom == "squares":
@@ -216,7 +213,7 @@ tof_bin_width = 0.8 * sig_tof
 # calculate the number of TOF bins
 # we set it to twice the image diagonal divided by the tof bin width
 # and make sure it is an odd number
-num_tof_bins = int(2 * xp.sqrt(2) * img_shape[0] * voxel_size[0] / tof_bin_width)
+num_tof_bins = int(2 * np.sqrt(2) * img_shape[0] * voxel_size[0] / tof_bin_width)
 if num_tof_bins % 2 == 0:
     num_tof_bins += 1
 
@@ -229,35 +226,35 @@ proj.tof_parameters = parallelproj.TOFParameters(
 )
 
 # check if the projector passes the adjointness test
-assert proj.adjointness_test(xp, dev)
+assert proj.adjointness_test(np, "cpu")
 
 
 # %%
 # setup a simple image space resolution model
 
-sig = fwhm_mm / (2.35 * xp.asarray(voxel_size, device=dev))
+sig = fwhm_mm / (2.35 * np.asarray(voxel_size))
 res_model = parallelproj.GaussianFilterOperator(img_shape, sigma=sig)
 
 # %%
 # setup the sensitivity sinogram consisting of the crystal efficiencies factors
 # and the LOR symmetry group efficiencies
 
-tmp = xp.arange(proj.lor_descriptor.num_lorendpoints_per_block)
-start_el, end_el = xp.meshgrid(tmp, tmp, indexing="ij")
-start_el_arr = xp.reshape(start_el, (size(start_el),))
-end_el_arr = xp.reshape(end_el, (size(end_el),))
+tmp = np.arange(proj.lor_descriptor.num_lorendpoints_per_block)
+start_el, end_el = np.meshgrid(tmp, tmp, indexing="ij")
+start_el_arr = np.reshape(start_el, (size(start_el),))
+end_el_arr = np.reshape(end_el, (size(end_el),))
 
-nontof_sens_histo = xp.ones(proj.out_shape[:-1], dtype="float32", device=dev)
+nontof_sens_histo = np.ones(proj.out_shape[:-1], dtype="float32")
 
 if uniform_crystal_eff:
     # crystal efficiencies are all 1
-    det_el_efficiencies = xp.ones(
-        scanner.num_modules, lor_desc.num_lorendpoints_per_block, dtype="float32"
+    det_el_efficiencies = np.ones(
+        (scanner.num_modules, lor_desc.num_lorendpoints_per_block), dtype="float32"
     )
 else:
     # simulate random crystal eff. uniformly distributed between 0.2 - 2.2
-    det_el_efficiencies = 0.2 + 2 * xp.astype(
-        xp.random.rand(scanner.num_modules, lor_desc.num_lorendpoints_per_block),
+    det_el_efficiencies = 0.2 + 2 * np.astype(
+        np.random.rand(scanner.num_modules, lor_desc.num_lorendpoints_per_block),
         "float32",
     )
     # multiply the det el eff. of the first module by 3 to introduce more variation
@@ -298,8 +295,8 @@ img_fwd_tof = fwd_op(img)
 # %%
 # calculate the sensitivity image
 
-sens_img = fwd_op.adjoint(xp.ones(fwd_op.out_shape, dtype=xp.float32, device=dev))
-xp.save(output_dir / "reference_sensitivity_image.npy", sens_img)
+sens_img = fwd_op.adjoint(np.ones(fwd_op.out_shape, dtype=np.float32))
+np.save(output_dir / "reference_sensitivity_image.npy", sens_img)
 
 # %%
 # add poisson noise on the forward projection
@@ -307,27 +304,27 @@ if num_true_counts > 0:
     scale_fac = num_true_counts / img_fwd_tof.sum()
     img *= scale_fac
     img_fwd_tof *= scale_fac
-    emission_data = xp.random.poisson(img_fwd_tof)
+    emission_data = np.random.poisson(img_fwd_tof)
 else:
     emission_data = img_fwd_tof
 
 # save the ground truth image
-xp.save(output_dir / "ground_truth_image.npy", img)
+np.save(output_dir / "ground_truth_image.npy", img)
 
 # %%
 if num_epochs_mlem > 0:
-    recon = xp.ones(img_shape, dtype=xp.float32, device=dev)
+    recon = np.ones(img_shape, dtype=np.float32)
 
     for i in range(num_epochs_mlem):
         print(f"{(i+1):03}/{num_epochs_mlem:03}", end="\r")
 
-        exp = xp.clip(fwd_op(recon), 1e-6, None)
+        exp = np.clip(fwd_op(recon), 1e-6, None)
         grad = fwd_op.adjoint((exp - emission_data) / exp)
         step = recon / sens_img
         recon -= step * grad
 
     print("")
-    xp.save(
+    np.save(
         output_dir / f"reference_histogram_mlem_{num_epochs_mlem}_epochs.npy", recon
     )
 
@@ -336,22 +333,22 @@ if num_epochs_mlem > 0:
 
 if num_true_counts > 0:
     num_events = emission_data.sum()
-    event_start_block = xp.zeros(num_events, dtype="uint32", device=dev)
-    event_start_el = xp.zeros(num_events, dtype="uint32", device=dev)
-    event_end_block = xp.zeros(num_events, dtype="uint32", device=dev)
-    event_end_el = xp.zeros(num_events, dtype="uint32", device=dev)
-    event_tof_bin = xp.zeros(num_events, dtype="int32", device=dev)
+    event_start_block = np.zeros(num_events, dtype="uint32")
+    event_start_el = np.zeros(num_events, dtype="uint32")
+    event_end_block = np.zeros(num_events, dtype="uint32")
+    event_end_el = np.zeros(num_events, dtype="uint32")
+    event_tof_bin = np.zeros(num_events, dtype="int32")
 
     event_counter = 0
 
     for ibp, block_pair in enumerate(proj.lor_descriptor.all_block_pairs):
         for it, tof_bin in enumerate(
-            xp.arange(proj.tof_parameters.num_tofbins)
+            np.arange(proj.tof_parameters.num_tofbins)
             - proj.tof_parameters.num_tofbins // 2
         ):
             ss = emission_data[ibp, :, it]
             num_slice_events = ss.sum()
-            inds = xp.repeat(xp.arange(ss.shape[0]), ss)
+            inds = np.repeat(np.arange(ss.shape[0]), ss)
 
             # event start block
             event_start_block[event_counter : (event_counter + num_slice_events)] = (
@@ -359,14 +356,14 @@ if num_true_counts > 0:
             )
             # event start element in block
             event_start_el[event_counter : (event_counter + num_slice_events)] = (
-                xp.take(start_el_arr, inds)
+                np.take(start_el_arr, inds)
             )
             # event end module
             event_end_block[event_counter : (event_counter + num_slice_events)] = (
                 block_pair[1]
             )
             # event end element in block
-            event_end_el[event_counter : (event_counter + num_slice_events)] = xp.take(
+            event_end_el[event_counter : (event_counter + num_slice_events)] = np.take(
                 end_el_arr, inds
             )
             # event TOF bin - starting at 0
@@ -375,8 +372,8 @@ if num_true_counts > 0:
             event_counter += num_slice_events
 
     # shuffle lm_event_table along 0 axis
-    inds = xp.arange(num_events)
-    xp.random.shuffle(inds)
+    inds = np.arange(num_events)
+    np.random.shuffle(inds)
 
     event_start_block = event_start_block[inds]
     event_start_el = event_start_el[inds]
@@ -387,7 +384,7 @@ if num_true_counts > 0:
     del inds
 
     # create the unsigned tof bin (the index to the tof bin edges) that we need to write
-    unsigned_event_tof_bin = xp.asarray(
+    unsigned_event_tof_bin = np.asarray(
         event_tof_bin + proj.tof_parameters.num_tofbins // 2, dtype="uint32"
     )
 
@@ -431,8 +428,8 @@ if not skip_plots:
     fig_geom.show()
 
     fig2, ax2 = plt.subplots(1, 4, figsize=(12, 3), tight_layout=True)
-    vmin = float(xp.min(sens_img))
-    vmax = float(xp.max(sens_img))
+    vmin = float(np.min(sens_img))
+    vmax = float(np.max(sens_img))
     for i, sl in enumerate(
         [img_shape[2] // 4, img_shape[2] // 2, 3 * img_shape[2] // 4]
     ):
@@ -460,7 +457,7 @@ if not skip_plots:
 if check_backprojection and (num_true_counts > 0):
     histo_back = proj.adjoint(emission_data)
 
-    xp.save(output_dir / "histogram_backprojection_tof.npy", histo_back)
+    np.save(output_dir / "histogram_backprojection_tof.npy", histo_back)
 
     lm_back = parallelproj.joseph3d_back_tof_lm(
         xstart=scanner.get_lor_endpoints(event_start_block, event_start_el),
@@ -468,14 +465,14 @@ if check_backprojection and (num_true_counts > 0):
         img_shape=img_shape,
         img_origin=proj.img_origin,
         voxsize=proj.voxel_size,
-        img_fwd=xp.ones(num_events, dtype=xp.float32, device=dev),
+        img_fwd=np.ones(num_events, dtype=np.float32),
         tofbin_width=proj.tof_parameters.tofbin_width,
-        sigma_tof=xp.asarray([proj.tof_parameters.sigma_tof]),
-        tofcenter_offset=xp.asarray([proj.tof_parameters.tofcenter_offset]),
+        sigma_tof=np.asarray([proj.tof_parameters.sigma_tof]),
+        tofcenter_offset=np.asarray([proj.tof_parameters.tofcenter_offset]),
         nsigmas=proj.tof_parameters.num_sigmas,
         tofbin=event_tof_bin,
     )
-    xp.save(output_dir / "lm_backprojection_tof.npy", lm_back)
+    np.save(output_dir / "lm_backprojection_tof.npy", lm_back)
 
     lm_back_non_tof = parallelproj.joseph3d_back(
         xstart=scanner.get_lor_endpoints(event_start_block, event_start_el),
@@ -483,9 +480,9 @@ if check_backprojection and (num_true_counts > 0):
         img_shape=img_shape,
         img_origin=proj.img_origin,
         voxsize=proj.voxel_size,
-        img_fwd=xp.ones(num_events, dtype=xp.float32, device=dev),
+        img_fwd=np.ones(num_events, dtype=np.float32),
     )
-    xp.save(output_dir / "lm_backprojection_non_tof.npy", lm_back_non_tof)
+    np.save(output_dir / "lm_backprojection_non_tof.npy", lm_back_non_tof)
 
 ################################################################################
 ################################################################################
@@ -505,7 +502,7 @@ import petsird
 #   ReplicatedBoxSolidVolume(list[RigidTransformation], BoxSolidVolume)
 
 crystal_centers = parallelproj.BlockPETScannerModule(
-    xp, dev, block_shape, block_spacing
+    np, "cpu", block_shape, block_spacing
 ).lor_endpoints
 
 # crystal widths in all dimensions
@@ -532,7 +529,7 @@ crystal = petsird.BoxSolidVolume(shape=crystal_shape, material_id=1)
 rep_volume = petsird.ReplicatedBoxSolidVolume(object=crystal)
 
 for i_c, crystal_center in enumerate(crystal_centers):
-    translation_matrix = xp.eye(4, dtype="float32")[:-1, :]
+    translation_matrix = np.eye(4, dtype="float32")[:-1, :]
     for j in range(3):
         translation_matrix[j, -1] = crystal_center[j]
     transform = petsird.RigidTransformation(matrix=translation_matrix)
