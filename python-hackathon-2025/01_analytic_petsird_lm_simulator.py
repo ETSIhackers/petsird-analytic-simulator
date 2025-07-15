@@ -1,12 +1,6 @@
 """analytic simulation of petsird v0.7.2 listmode data for a block PET scanner
 we only simulate true events and ignore the effect of attenuation
 however, we simulate the effect of crystal efficiencies and LOR symmetry group efficiencies
-
-TODO:
-1. update scanner setup using 0.7.2 definitions (based on generator example)
-2. check how to encode efficiencies if there are more than 1 energy bins
-   (right now we have 1 "non-tof LOR" eff. for every detector element pair)
-3. update coincidence event creation
 """
 
 # %%
@@ -608,9 +602,7 @@ for sgid in range(num_SGIDs):
 
 # only correct for scanner with one module type
 det_effs = petsird.DetectionEfficiencies(
-    detection_bin_efficiencies=[
-        xp.reshape(det_el_efficiencies, (size(det_el_efficiencies), 1))
-    ],
+    detection_bin_efficiencies=[det_el_efficiencies.ravel()],
     module_pair_sgidlut=[[module_pair_sgid_lut]],
     module_pair_efficiencies_vectors=[[module_pair_efficiencies_vector]],
 )
@@ -623,14 +615,18 @@ det_effs = petsird.DetectionEfficiencies(
 # setup ScannerInformation and Header
 
 # TOF bin edges (in mm)
-tofBinEdges = xp.linspace(
-    -proj.tof_parameters.num_tofbins * proj.tof_parameters.tofbin_width / 2,
-    proj.tof_parameters.num_tofbins * proj.tof_parameters.tofbin_width / 2,
-    proj.tof_parameters.num_tofbins + 1,
-    dtype="float32",
+tofBinEdges = petsird.BinEdges(
+    edges=np.linspace(
+        -proj.tof_parameters.num_tofbins * proj.tof_parameters.tofbin_width / 2,
+        proj.tof_parameters.num_tofbins * proj.tof_parameters.tofbin_width / 2,
+        proj.tof_parameters.num_tofbins + 1,
+        dtype="float32",
+    )
 )
 
-energyBinEdges = xp.linspace(430, 650, num_energy_bins + 1, dtype="float32")
+energyBinEdges = petsird.BinEdges(
+    edges=np.linspace(430, 650, num_energy_bins + 1, dtype="float32")
+)
 
 # num_total_elements = proj.lor_descriptor.scanner.num_lor_endpoints
 
@@ -670,41 +666,46 @@ header = petsird.Header(
     scanner=petsird_scanner,
 )
 
+
+################################################################################
+################################################################################
+################################################################################
+
 # %%
-#    # create petsird coincidence events - all in one timeblock without energy information
-#
-#    num_el_per_block = proj.lor_descriptor.num_lorendpoints_per_block
-#
-#    det_ID_start = event_start_block * num_el_per_block + event_start_el
-#    det_ID_end = event_end_block * num_el_per_block + event_end_el
-#
-#    # %%
-#    # write petsird data
-#
-#    if not skip_writing:
-#        print(f"Writing LM file to {str(output_dir / fname)}")
-#        with petsird.BinaryPETSIRDWriter(str(output_dir / fname)) as writer:
-#            writer.write_header(header)
-#            for i_t in range(1):
-#                start = i_t * header.scanner.event_time_block_duration
-#
-#                time_block_prompt_events = [
-#                    petsird.CoincidenceEvent(
-#                        detector_ids=[det_ID_start[i], det_ID_end[i]],
-#                        tof_idx=unsigned_event_tof_bin[i],
-#                        energy_indices=[0, 0],
-#                    )
-#                    for i in range(num_events)
-#                ]
-#
-#                # Normally we'd write multiple blocks, but here we have just one, so let's write a tuple with just one element
-#                writer.write_time_blocks(
-#                    (
-#                        petsird.TimeBlock.EventTimeBlock(
-#                            petsird.EventTimeBlock(
-#                                start=start, prompt_events=time_block_prompt_events
-#                            )
-#                        ),
-#                    )
-#                )
-#
+# create petsird coincidence events - all in one timeblock without energy information
+
+num_el_per_block = proj.lor_descriptor.num_lorendpoints_per_block
+
+det_ID_start = event_start_block * num_el_per_block + event_start_el
+det_ID_end = event_end_block * num_el_per_block + event_end_el
+
+# %%
+# write petsird data
+
+if not skip_writing:
+    print(f"Writing LM file to {str(output_dir / fname)}")
+    with petsird.BinaryPETSIRDWriter(str(output_dir / fname)) as writer:
+        writer.write_header(header)
+        for i_t in range(1):
+
+            time_block_prompt_events = [
+                petsird.CoincidenceEvent(
+                    detection_bins=[det_ID_start[i], det_ID_end[i]],
+                    tof_idx=unsigned_event_tof_bin[i],
+                )
+                for i in range(num_events)
+            ]
+
+            # Normally we'd write multiple blocks, but here we have just one, so let's write a tuple with just one element
+            writer.write_time_blocks(
+                (
+                    petsird.TimeBlock.EventTimeBlock(
+                        petsird.EventTimeBlock(
+                            prompt_events=[[time_block_prompt_events]],
+                            time_interval=petsird.TimeInterval(
+                                start=i_t * 1000, stop=(i_t + 1) * 1000
+                            ),
+                        )
+                    ),
+                )
+            )
