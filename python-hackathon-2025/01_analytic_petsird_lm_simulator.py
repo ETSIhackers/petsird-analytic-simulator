@@ -109,6 +109,8 @@ uniform_sg_eff = args.uniform_sg_eff
 img_shape = args.img_shape
 voxel_size = args.voxel_size
 
+num_energy_bins: int = 1
+
 if not output_dir.exists():
     output_dir.mkdir(parents=True)
 
@@ -497,10 +499,16 @@ if check_backprojection and (num_true_counts > 0):
 ################################################################################
 ################################################################################
 
+import petsird
+
 # %%
 # create ScannerGeometry
 
-import petsird
+# The top down hiearchy of the scanner geometry is as follows:
+#   ScannerGeometry(list[ReplicatedDetectorModule])
+#   ReplicatedDetectorModule(list[RigidTransformation], DetectorModule)
+#   DetectorModule(ReplicatedBoxSolidVolume)
+#   ReplicatedBoxSolidVolume(list[RigidTransformation], BoxSolidVolume)
 
 crystal_centers = parallelproj.BlockPETScannerModule(
     xp, dev, block_shape, block_spacing
@@ -551,96 +559,118 @@ for i in range(num_blocks):
 
 scanner_geometry = petsird.ScannerGeometry(replicated_modules=[rep_module])
 
+################################################################################
+################################################################################
+################################################################################
 
-## %%
-## create the petsird header
-#
-# if num_true_counts > 0:
-#    subject = petsird.Subject(id="42")
-#    institution = petsird.Institution(
-#        name="Ministry of Silly Walks",
-#        address="42 Silly Walks Street, Silly Walks City",
-#    )
-#
-#    # create non geometry related scanner information
-#
-#    num_energy_bins = 1
-#
-#    # TOF bin edges (in mm)
-#    tofBinEdges = xp.linspace(
-#        -proj.tof_parameters.num_tofbins * proj.tof_parameters.tofbin_width / 2,
-#        proj.tof_parameters.num_tofbins * proj.tof_parameters.tofbin_width / 2,
-#        proj.tof_parameters.num_tofbins + 1,
-#        dtype="float32",
-#    )
-#
-#    energyBinEdges = xp.linspace(430, 650, num_energy_bins + 1, dtype="float32")
-#
-#    num_total_elements = proj.lor_descriptor.scanner.num_lor_endpoints
-#
-#    # setup the symmetry group ID LUT
-#    # we only create one symmetry group ID (1) and set the group ID to -1 for block
-#    # block pairs that are not in coincidence
-#
-#    module_pair_sgid_lut = xp.full((num_blocks, num_blocks), -1, dtype="int32")
-#
-#    for bp in proj.lor_descriptor.all_block_pairs:
-#        # generate a random sgd
-#        sgid = sgid_from_module_pair(bp[0], bp[1], num_blocks)
-#        module_pair_sgid_lut[bp[0], bp[1]] = sgid
-#
-#    num_SGIDs = module_pair_sgid_lut.max() + 1
-#
-#    num_el_per_module = proj.lor_descriptor.scanner.num_lor_endpoints_per_module[0]
-#
-#    module_pair_efficiencies_shape = (
-#        num_el_per_module,
-#        num_energy_bins,
-#        num_el_per_module,
-#        num_energy_bins,
-#    )
-#
-#    module_pair_efficiencies_vector = []
-#
-#    for sgid in range(num_SGIDs):
-#        eff = module_pair_eff_from_sgd(sgid, uniform=uniform_sg_eff)
-#        vals = xp.full(module_pair_efficiencies_shape, eff, dtype="float32", device=dev)
-#
-#        module_pair_efficiencies_vector.append(
-#            petsird.ModulePairEfficiencies(values=vals, sgid=sgid)
-#        )
-#
-#    det_effs = petsird.DetectionEfficiencies(
-#        det_el_efficiencies=xp.reshape(
-#            det_el_efficiencies, (size(det_el_efficiencies), 1)
-#        ),
-#        module_pair_sgidlut=module_pair_sgid_lut,
-#        module_pair_efficiencies_vector=module_pair_efficiencies_vector,
-#    )
-#
-#    # setup crystal box object
-#
+# %%
+# setup of detection efficiencies
 
-#    # need energy bin info before being able to construct the detection efficiencies
-#    # so we will construct a scanner without the efficiencies first
-#    petsird_scanner = petsird.ScannerInformation(
-#        model_name="PETSIRD_TEST",
-#        scanner_geometry=scanner_geometry,
-#        tof_bin_edges=tofBinEdges,
-#        tof_resolution=2.35 * proj.tof_parameters.sigma_tof,  # FWHM in mm
-#        energy_bin_edges=energyBinEdges,
-#        energy_resolution_at_511=0.11,  # as fraction of 511
-#        event_time_block_duration=1,  # ms
-#    )
-#
-#    petsird_scanner.detection_efficiencies = det_effs
-#
-#    header = petsird.Header(
-#        exam=petsird.ExamInformation(subject=subject, institution=institution),
-#        scanner=petsird_scanner,
-#    )
-#
-#    # %%
+# The top down hierarchy of the detection efficiencies is as follows:
+# petsird.DetectionEfficiencies(detection_bin_efficiencies = list[numpy.ndarray], -> one 2D table per module type
+#                               module_pair_sgidlut = list[list[numpy.ndarray]] -> one 2D table per module type combination
+#                               module_pair_efficiencies_vectors = list[list[list[ModulePairEfficiencies]]]) -> list of modulepair efficiency vectors per module type combination
+
+# the following only works for a scanner with one module type
+# if there are more module types, we need a list of DetectionEfficiencies
+# and list of list of module_pair_sgidlut and list of list of list of ModulePairEfficiencies
+assert scanner_geometry.number_of_replicated_modules() == 1
+
+# setup the symmetry group ID LUT
+# we only create one symmetry group ID (1) and set the group ID to -1 for block
+# block pairs that are not in coincidence
+
+module_pair_sgid_lut = np.full((num_blocks, num_blocks), -1, dtype="int32")
+
+for bp in proj.lor_descriptor.all_block_pairs:
+    # generate a random sgd
+    sgid = sgid_from_module_pair(bp[0], bp[1], num_blocks)
+    module_pair_sgid_lut[bp[0], bp[1]] = sgid
+
+num_SGIDs = module_pair_sgid_lut.max() + 1
+
+num_el_per_module = proj.lor_descriptor.scanner.num_lor_endpoints_per_module[0]
+
+module_pair_efficiencies_shape = (
+    num_el_per_module * num_energy_bins,
+    num_el_per_module * num_energy_bins,
+)
+
+module_pair_efficiencies_vector = []
+
+for sgid in range(num_SGIDs):
+    eff = module_pair_eff_from_sgd(sgid, uniform=uniform_sg_eff)
+    vals = np.full(module_pair_efficiencies_shape, eff, dtype="float32")
+
+    module_pair_efficiencies_vector.append(
+        petsird.ModulePairEfficiencies(values=vals, sgid=sgid)
+    )
+
+# only correct for scanner with one module type
+det_effs = petsird.DetectionEfficiencies(
+    detection_bin_efficiencies=[
+        xp.reshape(det_el_efficiencies, (size(det_el_efficiencies), 1))
+    ],
+    module_pair_sgidlut=[[module_pair_sgid_lut]],
+    module_pair_efficiencies_vectors=[[module_pair_efficiencies_vector]],
+)
+
+################################################################################
+################################################################################
+################################################################################
+
+# %%
+# setup ScannerInformation and Header
+
+# TOF bin edges (in mm)
+tofBinEdges = xp.linspace(
+    -proj.tof_parameters.num_tofbins * proj.tof_parameters.tofbin_width / 2,
+    proj.tof_parameters.num_tofbins * proj.tof_parameters.tofbin_width / 2,
+    proj.tof_parameters.num_tofbins + 1,
+    dtype="float32",
+)
+
+energyBinEdges = xp.linspace(430, 650, num_energy_bins + 1, dtype="float32")
+
+# num_total_elements = proj.lor_descriptor.scanner.num_lor_endpoints
+
+# need energy bin info before being able to construct the detection efficiencies
+# so we will construct a scanner without the efficiencies first
+petsird_scanner = petsird.ScannerInformation(
+    model_name="PETSIRD_TEST",
+    scanner_geometry=scanner_geometry,
+    tof_bin_edges=[[tofBinEdges]],  # list of list for all module type combinations
+    tof_resolution=[
+        [2.35 * proj.tof_parameters.sigma_tof]
+    ],  # FWHM in mm, list of list for all module type combinations
+    event_energy_bin_edges=[energyBinEdges],  # list for all module types
+    energy_resolution_at_511=[0.11],  # as fraction of 511, list for all module types
+    detection_efficiencies=det_effs,
+)
+
+petsird_scanner.coincidence_policy = petsird.CoincidencePolicy.REJECT_MULTIPLES
+petsird_scanner.delayed_coincidences_are_stored = False
+petsird_scanner.triple_events_are_stored = False
+
+################################################################################
+################################################################################
+################################################################################
+
+# %%
+# create the petsird header
+
+subject = petsird.Subject(id="42")
+institution = petsird.Institution(
+    name="Ministry of Silly Walks",
+    address="42 Silly Walks Street, Silly Walks City",
+)
+
+header = petsird.Header(
+    exam=petsird.ExamInformation(subject=subject, institution=institution),
+    scanner=petsird_scanner,
+)
+
+# %%
 #    # create petsird coincidence events - all in one timeblock without energy information
 #
 #    num_el_per_block = proj.lor_descriptor.num_lorendpoints_per_block
