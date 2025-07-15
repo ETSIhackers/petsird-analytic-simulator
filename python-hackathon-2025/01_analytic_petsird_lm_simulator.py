@@ -11,6 +11,7 @@ TODO:
 
 # %%
 import array_api_compat.numpy as xp
+import array_api_compat.numpy as np
 import argparse
 from array_api_compat import size
 from itertools import combinations
@@ -496,6 +497,61 @@ if check_backprojection and (num_true_counts > 0):
 ################################################################################
 ################################################################################
 
+# %%
+# create ScannerGeometry
+
+import petsird
+
+crystal_centers = parallelproj.BlockPETScannerModule(
+    xp, dev, block_shape, block_spacing
+).lor_endpoints
+
+# crystal widths in all dimensions
+cw0 = block_spacing[0]
+cw1 = block_spacing[1]
+cw2 = block_spacing[2]
+
+crystal_shape = petsird.BoxShape(
+    corners=[
+        petsird.Coordinate(c=np.array((-cw0 / 2, -cw1 / 2, -cw2 / 2), dtype="float32")),
+        petsird.Coordinate(c=np.array((-cw0 / 2, -cw1 / 2, cw2 / 2), dtype="float32")),
+        petsird.Coordinate(c=np.array((-cw0 / 2, cw1 / 2, cw2 / 2), dtype="float32")),
+        petsird.Coordinate(c=np.array((-cw0 / 2, cw1 / 2, -cw2 / 2), dtype="float32")),
+        petsird.Coordinate(c=np.array((cw0 / 2, -cw1 / 2, -cw2 / 2), dtype="float32")),
+        petsird.Coordinate(c=np.array((cw0 / 2, -cw1 / 2, cw2 / 2), dtype="float32")),
+        petsird.Coordinate(c=np.array((cw0 / 2, cw1 / 2, cw2 / 2), dtype="float32")),
+        petsird.Coordinate(c=np.array((cw0 / 2, cw1 / 2, -cw2 / 2), dtype="float32")),
+    ]
+)
+crystal = petsird.BoxSolidVolume(shape=crystal_shape, material_id=1)
+
+# setup the petsird geometry of a module / block
+
+rep_volume = petsird.ReplicatedBoxSolidVolume(object=crystal)
+
+for i_c, crystal_center in enumerate(crystal_centers):
+    translation_matrix = xp.eye(4, dtype="float32")[:-1, :]
+    for j in range(3):
+        translation_matrix[j, -1] = crystal_center[j]
+    transform = petsird.RigidTransformation(matrix=translation_matrix)
+
+    rep_volume.transforms.append(transform)
+
+detector_module = petsird.DetectorModule(detecting_elements=rep_volume)
+
+# setup the PETSIRD scanner geometry
+rep_module = petsird.ReplicatedDetectorModule(object=detector_module)
+
+for i in range(num_blocks):
+    transform = petsird.RigidTransformation(matrix=module_transforms[i][:-1, :])
+
+    rep_module.transforms.append(
+        petsird.RigidTransformation(matrix=module_transforms[i][:-1, :])
+    )
+
+scanner_geometry = petsird.ScannerGeometry(replicated_modules=[rep_module])
+
+
 ## %%
 ## create the petsird header
 #
@@ -564,75 +620,7 @@ if check_backprojection and (num_true_counts > 0):
 #
 #    # setup crystal box object
 #
-#    crystal_centers = parallelproj.BlockPETScannerModule(
-#        xp, dev, block_shape, block_spacing
-#    ).lor_endpoints
-#
-#    # crystal widths in all dimensions
-#    cw0 = block_spacing[0]
-#    cw1 = block_spacing[1]
-#    cw2 = block_spacing[2]
-#
-#    crystal_shape = petsird.BoxShape(
-#        corners=[
-#            petsird.Coordinate(
-#                c=xp.asarray((-cw0 / 2, -cw1 / 2, -cw2 / 2), dtype="float32")
-#            ),
-#            petsird.Coordinate(
-#                c=xp.asarray((-cw0 / 2, -cw1 / 2, cw2 / 2), dtype="float32")
-#            ),
-#            petsird.Coordinate(
-#                c=xp.asarray((-cw0 / 2, cw1 / 2, cw2 / 2), dtype="float32")
-#            ),
-#            petsird.Coordinate(
-#                c=xp.asarray((-cw0 / 2, cw1 / 2, -cw2 / 2), dtype="float32")
-#            ),
-#            petsird.Coordinate(
-#                c=xp.asarray((cw0 / 2, -cw1 / 2, -cw2 / 2), dtype="float32")
-#            ),
-#            petsird.Coordinate(
-#                c=xp.asarray((cw0 / 2, -cw1 / 2, cw2 / 2), dtype="float32")
-#            ),
-#            petsird.Coordinate(
-#                c=xp.asarray((cw0 / 2, cw1 / 2, cw2 / 2), dtype="float32")
-#            ),
-#            petsird.Coordinate(
-#                c=xp.asarray((cw0 / 2, cw1 / 2, -cw2 / 2), dtype="float32")
-#            ),
-#        ]
-#    )
-#    crystal = petsird.BoxSolidVolume(shape=crystal_shape, material_id=1)
-#
-#    # setup the petsird geometry of a module / block
-#
-#    rep_volume = petsird.ReplicatedBoxSolidVolume(object=crystal)
-#
-#    for i_c, crystal_center in enumerate(crystal_centers):
-#        translation_matrix = xp.eye(4, dtype="float32")[:-1, :]
-#        for j in range(3):
-#            translation_matrix[j, -1] = crystal_center[j]
-#        transform = petsird.RigidTransformation(matrix=translation_matrix)
-#
-#        rep_volume.transforms.append(transform)
-#        rep_volume.ids.append(i_c)
-#
-#    detector_module = petsird.DetectorModule(
-#        detecting_elements=[rep_volume], detecting_element_ids=[0]
-#    )
-#
-#    # setup the PETSIRD scanner geometry
-#    rep_module = petsird.ReplicatedDetectorModule(object=detector_module)
-#
-#    for i in range(num_blocks):
-#        transform = petsird.RigidTransformation(matrix=module_transforms[i][:-1, :])
-#
-#        rep_module.ids.append(i)
-#        rep_module.transforms.append(
-#            petsird.RigidTransformation(matrix=module_transforms[i][:-1, :])
-#        )
-#
-#    scanner_geometry = petsird.ScannerGeometry(replicated_modules=[rep_module], ids=[0])
-#
+
 #    # need energy bin info before being able to construct the detection efficiencies
 #    # so we will construct a scanner without the efficiencies first
 #    petsird_scanner = petsird.ScannerInformation(
