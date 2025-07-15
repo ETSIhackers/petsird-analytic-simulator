@@ -16,7 +16,7 @@ import json
 
 from pathlib import Path
 
-# import petsird
+import petsird
 
 
 # %%
@@ -61,8 +61,8 @@ def parse_float_tuple(arg):
 # parse the command line for the input parameters below
 parser = argparse.ArgumentParser()
 
-parser.add_argument("--fname", type=str, default="simulated_lm_file.bin")
-parser.add_argument("--output_dir", type=str, default="my_lm_sim")
+parser.add_argument("--fname", type=str, default="simulated_petsird_lm_file.bin")
+parser.add_argument("--output_dir", type=str, default=None)
 # HACK TO make things faster by default
 parser.add_argument("--num_true_counts", type=int, default=int(4e5))
 # parser.add_argument("--num_true_counts", type=int, default=int(4e6))
@@ -80,8 +80,8 @@ parser.add_argument("--voxel_size", type=parse_float_tuple, default=(1.0, 1.0, 1
 parser.add_argument(
     "--phantom",
     type=str,
-    default="squares",
-    choices=["uniform_cylinder", "squares"],
+    default="points",
+    choices=["uniform_cylinder", "squares", "points"],
 )
 
 args = parser.parse_args()
@@ -96,11 +96,15 @@ fwhm_mm = args.fwhm_mm
 tof_fwhm_mm = args.tof_fwhm_mm
 seed = args.seed
 phantom = args.phantom
-output_dir = Path(args.output_dir)
 uniform_crystal_eff = args.uniform_crystal_eff
 uniform_sg_eff = args.uniform_sg_eff
 img_shape = args.img_shape
 voxel_size = args.voxel_size
+
+if args.output_dir is None:
+    output_dir = Path(f"sim_{phantom}_{num_true_counts}_{seed}")
+else:
+    output_dir = Path(args.output_dir)
 
 num_energy_bins: int = 1
 
@@ -201,6 +205,15 @@ elif phantom == "squares":
     img[24:-40, 36:-28, 4:-2] = 9
     img[76:78, 68:72, :-2] = 18
     img[14:20, 35:75, 5:-3] = 0
+elif phantom == "points":
+    img[img_shape[0] // 2, img_shape[1] // 2, img_shape[2] // 2] = 8
+    img[img_shape[0] // 2, img_shape[1] // 6, img_shape[2] // 2] = 4
+    img[img_shape[0] // 4, img_shape[1] // 2, img_shape[2] // 2] = 6
+
+    img[img_shape[0] // 2, img_shape[1] // 2, img_shape[2] // 6] = 8
+    img[img_shape[0] // 2, img_shape[1] // 6, img_shape[2] // 6] = 4
+    img[img_shape[0] // 4, img_shape[1] // 2, img_shape[2] // 6] = 6
+
 else:
     raise ValueError("Invalid phantom {phantom}")
 
@@ -489,8 +502,6 @@ if check_backprojection and (num_true_counts > 0):
 ################################################################################
 ################################################################################
 ################################################################################
-
-import petsird
 
 # %%
 # create ScannerGeometry
