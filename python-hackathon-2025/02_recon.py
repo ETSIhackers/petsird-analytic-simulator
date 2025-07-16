@@ -93,34 +93,150 @@ def get_all_detector_centers(
 
 fname = "sim_points_400000_0/simulated_petsird_lm_file.bin"
 
+img_shape = (100, 100, 11)  # shape of the image to be reconstructed
+voxel_size = (1.0, 1.0, 1.0)
+
+# %%
+
 reader = petsird.BinaryPETSIRDReader(fname)
 header: petsird.Header = reader.read_header()
 scanner_info: petsird.ScannerInformation = header.scanner
 scanner_geom: petsird.ScannerGeometry = scanner_info.scanner_geometry
 
+num_replicated_modules = scanner_geom.number_of_replicated_modules()
+print(f"Scanner with {num_replicated_modules} types of replicated modules.")
+
 # Create a new figure
 fig = plt.figure()
 ax = fig.add_subplot(111, projection="3d")
+ax = None
 
 # get all detector centers
 all_detector_centers = get_all_detector_centers(scanner_geom, ax=ax)
 
+################################################################################
+################################################################################
+################################################################################
+# %%
+# read detection element / module pair efficiencies
+
+# get the dection bin efficiencies for all module types
+# index via: det_bin_effs = all_detection_bin_effs[rep_mod_type]
+# which returns a 1D array of shape (num_detection_bins,) = (num_det_els_in_module * num_energy_bins,)
+all_detection_bin_effs: list[petsird.DetectionBinEfficiencies] | None = (
+    scanner_info.detection_efficiencies.detection_bin_efficiencies
+)
+
+# get the symmetry group ID LUTs for all module types
+# index via: 2D_SGID_LUT = all_module_pair_sgidlut[rep_mod_type 1][rep_mod_type 2]
+# which returns a 2D array of shape (num_modules, num_modules)
+all_module_pair_sgidluts: list[list[petsird.ModulePairSGIDLUT]] | None = (
+    scanner_info.detection_efficiencies.module_pair_sgidlut
+)
+
+# get all module pair efficiencies vectors
+# index via: mod_pair_effs = module_pair_efficiencies_vectors[rep_mod_type 1][rep_mod_type 2][sgid]
+# which returns a 2D array of shape (num_det_els, num_det_els)
+all_module_pair_efficiency_vectors: (
+    list[list[list[petsird.ModulePairEfficiencies]]] | None
+) = scanner_info.detection_efficiencies.module_pair_efficiencies_vectors
+
+# %%
+
+print("Generating sensitivity image")
+
+for mod_type_1 in range(num_replicated_modules):
+    for mod_type_2 in range(num_replicated_modules):
+
+        num_modules_1 = len(scanner_geom.replicated_modules[mod_type_1].transforms)
+        num_modules_2 = len(scanner_geom.replicated_modules[mod_type_2].transforms)
+
+        print(
+            f"Module type {mod_type_1} with {num_modules_1} modules vs. {mod_type_2} and {num_modules_2} modules"
+        )
+
+        sgid_lut = all_module_pair_sgidluts[mod_type_1][mod_type_2]
+
+        # sigma TOF (mm) for module type combination
+        sigma_tof = scanner_info.tof_resolution[mod_type_1][mod_type_2] / 2.35
+        tof_bin_edges = scanner_info.tof_bin_edges[mod_type_1][mod_type_2].edges
+
+        # raise an error if tof_bin_edges are non equidistant (up to 0.1%)
+        if not np.allclose(
+            np.diff(tof_bin_edges), tof_bin_edges[1] - tof_bin_edges[0], rtol=0.001
+        ):
+            raise ValueError(
+                f"TOF bin edges for module types {mod_type_1} and {mod_type_2} are not equidistant."
+            )
+
+        num_tofbins = tof_bin_edges.size - 1
+        tofbin_width = float(tof_bin_edges[1] - tof_bin_edges[0])
+
+        energy_bin_edges_1 = scanner_info.event_energy_bin_edges[mod_type_1].edges
+        energy_bin_edges_2 = scanner_info.event_energy_bin_edges[mod_type_2].edges
+
+        num_energy_bins_1 = energy_bin_edges_1.size - 1
+        num_energy_bins_2 = energy_bin_edges_2.size - 1
+
+        det_bin_effs_1 = all_detection_bin_effs[mod_type_1].reshape(
+            num_modules_1, -1, num_energy_bins_1
+        )
+        det_bin_effs_2 = all_detection_bin_effs[mod_type_2].reshape(
+            num_modules_2, -1, num_energy_bins_2
+        )
+
+        for i_mod_1 in range(num_modules_1):
+            for i_mod_2 in range(num_modules_2):
+
+                sgid = all_module_pair_sgidluts[mod_type_1][mod_type_2][
+                    i_mod_1, i_mod_2
+                ]
+
+                # if the symmetry group ID (sgid) is non-negative, the module pair is in coincidence
+                if sgid >= 0:
+                    print(
+                        f"Module pair ({mod_type_1}, {i_mod_1}) vs. ({mod_type_2}, {i_mod_2}) with SGID {sgid}"
+                    )
+                    start_coords = all_detector_centers[mod_type_1][i_mod_1, :, :]
+                    end_coords = all_detector_centers[mod_type_2][i_mod_2, :, :]
+
+                    # setup a LM projector that we use for the sensitivity image calculation
+                    proj = parallelproj.ListmodePETProjector(
+                        start_coords, end_coords, img_shape, voxel_size
+                    )
+
+                    proj.tof_parameters = parallelproj.TOFParameters(
+                        num_tofbins=num_tofbins,
+                        tofbin_width=tofbin_width,
+                        sigma_tof=sigma_tof,
+                    )
+
+                    module_pair_efficiencies = all_module_pair_efficiency_vectors[
+                        mod_type_1
+                    ][mod_type_2][sgid].values
+
+################################################################################
+################################################################################
+################################################################################
+# %%
 # set axis limits
 
-min_coords = all_detector_centers[0].reshape(-1, 3).min(0)
-max_coords = all_detector_centers[0].reshape(-1, 3).max(0)
+if not ax is None:
+    min_coords = all_detector_centers[0].reshape(-1, 3).min(0)
+    max_coords = all_detector_centers[0].reshape(-1, 3).max(0)
 
-ax.set_xlim3d([min_coords.min(), max_coords.max()])
-ax.set_ylim3d([min_coords.min(), max_coords.max()])
-ax.set_zlim3d([min_coords.min(), max_coords.max()])
+    ax.set_xlim3d([min_coords.min(), max_coords.max()])
+    ax.set_ylim3d([min_coords.min(), max_coords.max()])
+    ax.set_zlim3d([min_coords.min(), max_coords.max()])
 
-for i_d, detector_centers in enumerate(all_detector_centers):
-    ax.scatter(
-        detector_centers[:, :, 0].ravel(),
-        detector_centers[:, :, 1].ravel(),
-        detector_centers[:, :, 2].ravel(),
-        s=1,
-        c=plt.cm.tab10(i_d),
-    )
+    for detector_centers in all_detector_centers:
+        ax.scatter(
+            detector_centers[:, :, 0].ravel(),
+            detector_centers[:, :, 1].ravel(),
+            detector_centers[:, :, 2].ravel(),
+            s=0.5,
+            c="k",
+            alpha=0.3,
+        )
 
-fig.show()
+    fig.show()
