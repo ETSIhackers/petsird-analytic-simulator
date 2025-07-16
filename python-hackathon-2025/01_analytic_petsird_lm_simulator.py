@@ -405,15 +405,6 @@ if num_true_counts > 0:
         event_tof_bin + proj.tof_parameters.num_tofbins // 2, dtype="uint32"
     )
 
-    # print the first 10 events
-    for i in range(10):
-        print(
-            f"event {i:02}:  "
-            f"start block/el {event_start_block[i]:02}/{event_start_el[i]:02}   "
-            f"end block/el {event_end_block[i]:02}/{event_end_el[i]:02}   "
-            f"signed/(unsigned) tof bin {event_tof_bin[i]:02}/({unsigned_event_tof_bin[i]:02})"
-        )
-
 # %%
 # Visualize the projector geometry and and the first 3 coincidences
 # Visualize the TOF profile of one LOR of the noise free data and the sensitivity image
@@ -712,6 +703,13 @@ if not skip_writing:
     with petsird.BinaryPETSIRDWriter(str(output_dir / fname)) as writer:
         writer.write_header(header)
         for i_t, data_chunk in enumerate(chunked_data):
+
+            print(f"Writing time block {i_t + 1}/{len(chunked_data)}")
+            print(
+                "First 5 events (start / stop detection element, unsigned tofbin number):"
+            )
+            print(data_chunk[:5, :])
+            print()
 
             time_block_prompt_events = [
                 petsird.CoincidenceEvent(
