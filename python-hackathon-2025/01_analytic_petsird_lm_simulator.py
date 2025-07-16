@@ -83,6 +83,8 @@ parser.add_argument(
     default="points",
     choices=["uniform_cylinder", "squares", "points"],
 )
+parser.add_argument("--num_time_blocks", type=int, default=3)
+parser.add_argument("--event_block_duration", type=int, default=100)
 
 args = parser.parse_args()
 
@@ -100,6 +102,8 @@ uniform_crystal_eff = args.uniform_crystal_eff
 uniform_sg_eff = args.uniform_sg_eff
 img_shape = args.img_shape
 voxel_size = args.voxel_size
+num_time_blocks: int = args.num_time_blocks
+event_block_duration: int = args.event_block_duration
 
 if args.output_dir is None:
     output_dir = Path(f"sim_{phantom}_{num_true_counts}_{seed}")
@@ -684,8 +688,21 @@ header = petsird.Header(
 
 num_el_per_block = proj.lor_descriptor.num_lorendpoints_per_block
 
-det_ID_start = event_start_block * num_el_per_block + event_start_el
-det_ID_end = event_end_block * num_el_per_block + event_end_el
+# split the data into chuncks such that we loop over chunks (time blocks)
+# every chunk is an array of shape (num_events_per_chunk, 3)
+# the first column is the start detector ID, the second column is the end detector ID,
+# and the third column is the unsigned TOF bin index
+
+chunked_data = np.array_split(
+    np.array(
+        [
+            event_start_block * num_el_per_block + event_start_el,
+            event_end_block * num_el_per_block + event_end_el,
+            unsigned_event_tof_bin,
+        ]
+    ).T,
+    num_time_blocks,
+)
 
 # %%
 # write petsird data
@@ -694,14 +711,14 @@ if not skip_writing:
     print(f"Writing LM file to {str(output_dir / fname)}")
     with petsird.BinaryPETSIRDWriter(str(output_dir / fname)) as writer:
         writer.write_header(header)
-        for i_t in range(1):
+        for i_t, data_chunk in enumerate(chunked_data):
 
             time_block_prompt_events = [
                 petsird.CoincidenceEvent(
-                    detection_bins=[det_ID_start[i], det_ID_end[i]],
-                    tof_idx=unsigned_event_tof_bin[i],
+                    detection_bins=[x[0], x[1]],
+                    tof_idx=x[2],
                 )
-                for i in range(num_events)
+                for x in data_chunk
             ]
 
             # Normally we'd write multiple blocks, but here we have just one, so let's write a tuple with just one element
@@ -711,7 +728,8 @@ if not skip_writing:
                         petsird.EventTimeBlock(
                             prompt_events=[[time_block_prompt_events]],
                             time_interval=petsird.TimeInterval(
-                                start=i_t * 1000, stop=(i_t + 1) * 1000
+                                start=i_t * event_block_duration,
+                                stop=(i_t + 1) * event_block_duration,
                             ),
                         )
                     ),
