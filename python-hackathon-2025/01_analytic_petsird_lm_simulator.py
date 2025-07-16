@@ -4,6 +4,16 @@ however, we simulate the effect of crystal efficiencies and LOR symmetry group e
 """
 
 # %%
+from importlib.metadata import version
+
+# raise an error if petsird version is not at least 0.7.2
+petsird_version = tuple(map(int, version("petsird").split(".")))
+if petsird_version < (0, 7, 2):
+    raise ImportError(
+        f"petsird version {petsird_version} is not supported, please install petsird >= 0.7.2"
+    )
+
+
 import numpy as np
 import argparse
 from array_api_compat import size
