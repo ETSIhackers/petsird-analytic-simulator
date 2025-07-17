@@ -10,13 +10,9 @@ if petsird_version < (0, 7, 2):
 
 import numpy as np
 import argparse
-from array_api_compat import size
-from itertools import combinations
 
 import parallelproj
 import matplotlib.pyplot as plt
-import math
-import json
 
 from pathlib import Path
 
