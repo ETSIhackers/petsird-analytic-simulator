@@ -100,7 +100,7 @@ fname = "sim_points_400000_0/simulated_petsird_lm_file.bin"
 img_shape = (100, 100, 11)  # shape of the image to be reconstructed
 voxel_size = (1.0, 1.0, 1.0)
 fwhm_mm = 1.5
-
+store_energy_bins = True
 # %%
 
 reader = petsird.BinaryPETSIRDReader(fname)
@@ -114,7 +114,6 @@ print(f"Scanner with {num_replicated_modules} types of replicated modules.")
 # Create a new figure
 fig = plt.figure()
 ax = fig.add_subplot(111, projection="3d")
-ax = None
 
 # get all detector centers
 all_detector_centers = get_all_detector_centers(scanner_geom, ax=ax)
@@ -198,6 +197,7 @@ for mod_type_1 in range(num_replicated_modules):
         # sigma TOF (mm) for module type combination
         sigma_tof = scanner_info.tof_resolution[mod_type_1][mod_type_2] / 2.35
         tof_bin_edges = scanner_info.tof_bin_edges[mod_type_1][mod_type_2].edges
+        num_tofbins = tof_bin_edges.size - 1
 
         # raise an error if tof_bin_edges are non equidistant (up to 0.1%)
         if not np.allclose(
@@ -207,7 +207,6 @@ for mod_type_1 in range(num_replicated_modules):
                 f"TOF bin edges for module types {mod_type_1} and {mod_type_2} are not equidistant."
             )
 
-        num_tofbins = tof_bin_edges.size - 1
         tofbin_width = float(tof_bin_edges[1] - tof_bin_edges[0])
 
         for i_mod_1 in range(num_modules_1):
@@ -318,10 +317,19 @@ sens_img = res_model.adjoint(sens_img)
 
 # %%
 # read the prompt events of all time blocks for all combinations of module types
+
+print("\nReading prompt events from time blocks ...")
+
 i_t = 0
 
-# list of dictionaries, each dictionary contains the prompt detection bins for a time block for all module type combinations
-prompt_detection_bins: list[dict[tuple[int, int], np.ndarray]] = []
+# list of dictionaries, each dictionary contains the prompt detection bins for a time block for all module type and energy bin combinations
+all_prompt_detection_bins: list[dict[tuple[int, int], np.ndarray]] = []
+
+coords0 = []
+coords1 = []
+signed_tof_bins = []
+energy_idx0 = []
+energy_idx1 = []
 
 for time_block in reader.read_time_blocks():
     if isinstance(time_block, petsird.TimeBlock.EventTimeBlock):
@@ -336,39 +344,48 @@ for time_block in reader.read_time_blocks():
         for mtype0 in range(num_replicated_modules):
             for mtype1 in range(num_replicated_modules):
                 mtype_pair = petsird.TypeOfModulePair((mtype0, mtype1))
+                tof_bin_edges = scanner_info.tof_bin_edges[mod_type_1][mod_type_2].edges
+                num_tofbins = tof_bin_edges.size - 1
 
-                # count events
-                prompt_events = time_block.value.prompt_events[mtype0][mtype1]
+                for event in time_block.value.prompt_events[mtype0][mtype1]:
+                    expanded_det_bin0 = expand_detection_bin(
+                        scanner_info, mtype0, event.detection_bins[0]
+                    )
+                    expanded_det_bin1 = expand_detection_bin(
+                        scanner_info, mtype1, event.detection_bins[1]
+                    )
 
-                time_block_prompt_detection_bins[mtype0, mtype1] = np.array(
-                    [x.detection_bins + [x.tof_idx] for x in prompt_events]
-                )
+                    coords0.append(
+                        all_detector_centers[mtype0][
+                            expanded_det_bin0.module_index,
+                            expanded_det_bin0.element_index,
+                        ]
+                    )
+                    coords1.append(
+                        all_detector_centers[mtype1][
+                            expanded_det_bin1.module_index,
+                            expanded_det_bin1.element_index,
+                        ]
+                    )
+                    signed_tof_bins.append(event.tof_idx - num_tofbins // 2)
 
-        prompt_detection_bins.append(time_block_prompt_detection_bins)
+                    if store_energy_bins:
+                        energy_idx0.append(expanded_det_bin0.energy_index)
+                        energy_idx1.append(expanded_det_bin1.energy_index)
 
+        # all_prompt_detection_bins.append(time_block_prompt_detection_bins)
         i_t += 1
 
-        # for event in prompt_events:
-        #    expanded_det_bin0 = expand_detection_bin(
-        #        scanner_info, mtype0, event.detection_bins[0]
-        #    )
-        #    expanded_det_bin1 = expand_detection_bin(
-        #        scanner_info, mtype1, event.detection_bins[1]
-        #    )
+# convert lists to numpy arrays
+coords0 = np.array(coords0, dtype="float32")
+coords1 = np.array(coords1, dtype="float32")
+signed_tof_bins = np.array(signed_tof_bins, dtype="int16")
 
-        #    eff = get_detection_efficiency(scanner_info, mtype_pair, event)
+if store_energy_bins:
+    energy_idx0 = np.array(energy_idx0, dtype="uint16")
+    energy_idx1 = np.array(energy_idx1, dtype="uint16")
 
 # %%
-# extract the prompt detection bins for the module type combination (0,0)
-
-# 2D arary of shape (num_events, 3), first col: unexpanded start detection bin,
-# second col: unexpanded stop detection bin, third col: unsigned TOF bin number
-prompt_detection_bins00: np.ndarray = np.vstack(
-    [x[0, 0] for x in prompt_detection_bins]
-)
-
-# delete complete prompt detection bins, since we will only reconstruct the 0-0 prompt events
-del prompt_detection_bins
 
 ################################################################################
 ################################################################################
@@ -394,4 +411,10 @@ if not ax is None:
             alpha=0.3,
         )
 
+    for i in range(5):
+        ax.plot(
+            [coords0[i, 0], coords1[i, 0]],
+            [coords0[i, 1], coords1[i, 1]],
+            [coords0[i, 2], coords1[i, 2]],
+        )
     fig.show()
