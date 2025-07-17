@@ -21,6 +21,10 @@ import json
 from pathlib import Path
 
 import petsird
+from petsird.helpers import (
+    expand_detection_bin,
+    get_detection_efficiency,
+)
 
 import petsird.helpers.geometry
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
@@ -259,11 +263,6 @@ for mod_type_1 in range(num_replicated_modules):
                         num_energy_bins_2,
                     )
 
-                    ## needed this the indexing below to get the values to be back-projected
-                    ## assumes one energy bin
-                    # assert num_energy_bins_1 == 1
-                    # assert num_energy_bins_2 == 1
-
                     for i_e_1 in range(num_energy_bins_1):
                         for i_e_2 in range(num_energy_bins_2):
                             print(f"    Energy bin pair ({i_e_1}, {i_e_2})")
@@ -312,6 +311,64 @@ for mod_type_1 in range(num_replicated_modules):
 sig = fwhm_mm / (2.35 * np.asarray(voxel_size))
 res_model = parallelproj.GaussianFilterOperator(img_shape, sigma=sig)
 sens_img = res_model.adjoint(sens_img)
+
+################################################################################
+################################################################################
+################################################################################
+
+# %%
+# read the prompt events of all time blocks for all combinations of module types
+i_t = 0
+
+# list of dictionaries, each dictionary contains the prompt detection bins for a time block for all module type combinations
+prompt_detection_bins: list[dict[tuple[int, int], np.ndarray]] = []
+
+for time_block in reader.read_time_blocks():
+    if isinstance(time_block, petsird.TimeBlock.EventTimeBlock):
+        start_time = time_block.value.time_interval.start
+        stop_time = time_block.value.time_interval.stop
+        print(
+            f"Processing time block {i_t} with time interval {start_time} ... {stop_time}"
+        )
+
+        time_block_prompt_detection_bins = dict()
+
+        for mtype0 in range(num_replicated_modules):
+            for mtype1 in range(num_replicated_modules):
+                mtype_pair = petsird.TypeOfModulePair((mtype0, mtype1))
+
+                # count events
+                prompt_events = time_block.value.prompt_events[mtype0][mtype1]
+
+                time_block_prompt_detection_bins[mtype0, mtype1] = np.array(
+                    [x.detection_bins + [x.tof_idx] for x in prompt_events]
+                )
+
+        prompt_detection_bins.append(time_block_prompt_detection_bins)
+
+        i_t += 1
+
+        # for event in prompt_events:
+        #    expanded_det_bin0 = expand_detection_bin(
+        #        scanner_info, mtype0, event.detection_bins[0]
+        #    )
+        #    expanded_det_bin1 = expand_detection_bin(
+        #        scanner_info, mtype1, event.detection_bins[1]
+        #    )
+
+        #    eff = get_detection_efficiency(scanner_info, mtype_pair, event)
+
+# %%
+# extract the prompt detection bins for the module type combination (0,0)
+
+# 2D arary of shape (num_events, 3), first col: unexpanded start detection bin,
+# second col: unexpanded stop detection bin, third col: unsigned TOF bin number
+prompt_detection_bins00: np.ndarray = np.vstack(
+    [x[0, 0] for x in prompt_detection_bins]
+)
+
+# delete complete prompt detection bins, since we will only reconstruct the 0-0 prompt events
+del prompt_detection_bins
 
 ################################################################################
 ################################################################################
