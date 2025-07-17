@@ -224,9 +224,6 @@ for mod_type_1 in range(num_replicated_modules):
                     # 2D array containg the 3 coordinates of all detecting elements the end module
                     end_det_coords = all_detector_centers[mod_type_2][i_mod_2, :, :]
 
-                    # assert num_energy_bins_1 == 1
-                    # assert num_energy_bins_2 == 1
-
                     # 2D array of start coordinates of all LORs connecting all detecting elements
                     # of the start module with all detecting elements of the end module
                     start_coords = np.repeat(
@@ -275,6 +272,9 @@ for mod_type_1 in range(num_replicated_modules):
                             )
 
                             # (non-TOF) sensitivity values to be back-projected
+                            ##########
+                            # in case of modeled attenuation, multiply them as well
+                            ##########
                             to_be_back_projected = (
                                 start_effs * end_effs * module_pair_efficiencies.ravel()
                             )
@@ -288,6 +288,9 @@ for mod_type_1 in range(num_replicated_modules):
                                 )
                                 proj.tof = True
                                 sens_img += proj.adjoint(to_be_back_projected)
+
+                    # clean up the projector (stores many coordinates ...)
+                    del proj
 
 # apply adjoint of image-based resolution model
 sig = fwhm_mm / (2.35 * np.asarray(voxel_size))
