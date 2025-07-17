@@ -95,6 +95,7 @@ fname = "sim_points_400000_0/simulated_petsird_lm_file.bin"
 
 img_shape = (100, 100, 11)  # shape of the image to be reconstructed
 voxel_size = (1.0, 1.0, 1.0)
+fwhm_mm = 1.5
 
 # %%
 
@@ -160,8 +161,10 @@ if all_module_pair_efficiency_vectors is None:
     )
 
 # %%
+# generate the sensitivity image
 
 print("Generating sensitivity image")
+sens_img = np.zeros(img_shape, dtype="float32")
 
 for mod_type_1 in range(num_replicated_modules):
     num_modules_1 = len(scanner_geom.replicated_modules[mod_type_1].transforms)
@@ -213,10 +216,26 @@ for mod_type_1 in range(num_replicated_modules):
                 # if the symmetry group ID (sgid) is non-negative, the module pair is in coincidence
                 if sgid >= 0:
                     print(
-                        f"Module pair ({mod_type_1}, {i_mod_1}) vs. ({mod_type_2}, {i_mod_2}) with SGID {sgid}"
+                        f"  Module pair ({mod_type_1}, {i_mod_1}) vs. ({mod_type_2}, {i_mod_2}) with SGID {sgid}"
                     )
-                    start_coords = all_detector_centers[mod_type_1][i_mod_1, :, :]
-                    end_coords = all_detector_centers[mod_type_2][i_mod_2, :, :]
+
+                    # 2D array containg the 3 coordinates of all detecting elements the start module
+                    start_det_coords = all_detector_centers[mod_type_1][i_mod_1, :, :]
+                    # 2D array containg the 3 coordinates of all detecting elements the end module
+                    end_det_coords = all_detector_centers[mod_type_2][i_mod_2, :, :]
+
+                    # assert num_energy_bins_1 == 1
+                    # assert num_energy_bins_2 == 1
+
+                    # 2D array of start coordinates of all LORs connecting all detecting elements
+                    # of the start module with all detecting elements of the end module
+                    start_coords = np.repeat(
+                        start_det_coords, start_det_coords.shape[0], axis=0
+                    )
+
+                    # 2D array of end coordinates of all LORs connecting all detecting elements
+                    # of the start module with all detecting elements of the end module
+                    end_coords = np.tile(end_det_coords, (end_det_coords.shape[0], 1))
 
                     # setup a LM projector that we use for the sensitivity image calculation
                     proj = parallelproj.ListmodePETProjector(
@@ -229,9 +248,51 @@ for mod_type_1 in range(num_replicated_modules):
                         sigma_tof=sigma_tof,
                     )
 
+                    # 2D array of shape (num_det_els_start, num_det_els_end)
                     module_pair_efficiencies = all_module_pair_efficiency_vectors[
                         mod_type_1
                     ][mod_type_2][sgid].values
+
+                    for i_e_1 in range(num_energy_bins_1):
+                        for i_e_2 in range(num_energy_bins_2):
+                            print(f"    Energy bin pair ({i_e_1}, {i_e_2})")
+
+                            # get the detection bin efficiencies for the start module
+                            # 1D array of shape (num_det_els,)
+                            start_det_bin_effs = det_bin_effs_1[i_mod_1, :, i_e_1]
+                            # get the detection bin efficiencies for the end module
+                            # 1D array of shape (num_det_els,)
+                            end_det_bin_effs = det_bin_effs_2[i_mod_2, :, i_e_2]
+
+                            # start and end detection bin efficiencies for all LORs connecting
+                            # all detecting elements of the start module with all detecting elements of the end module
+                            # 1D array of shape (num_det_els_start * num_det_els_end,)
+                            start_effs = np.repeat(
+                                start_det_bin_effs, end_det_bin_effs.shape[0], axis=0
+                            )
+                            end_effs = np.tile(
+                                end_det_bin_effs, start_det_bin_effs.shape[0]
+                            )
+
+                            # (non-TOF) sensitivity values to be back-projected
+                            to_be_back_projected = (
+                                start_effs * end_effs * module_pair_efficiencies.ravel()
+                            )
+
+                            for signed_tofbin in np.arange(
+                                -(num_tofbins // 2), num_tofbins // 2 + 1
+                            ):
+                                # print("tofbin", signed_tofbin)
+                                proj.event_tofbins = np.full(
+                                    start_coords.shape[0], signed_tofbin, dtype="int32"
+                                )
+                                proj.tof = True
+                                sens_img += proj.adjoint(to_be_back_projected)
+
+# apply adjoint of image-based resolution model
+sig = fwhm_mm / (2.35 * np.asarray(voxel_size))
+res_model = parallelproj.GaussianFilterOperator(img_shape, sigma=sig)
+sens_img = res_model.adjoint(sens_img)
 
 ################################################################################
 ################################################################################
