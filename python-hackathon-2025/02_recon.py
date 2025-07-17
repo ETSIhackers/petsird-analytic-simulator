@@ -87,12 +87,300 @@ def get_all_detector_centers(
     return all_det_el_centers
 
 
+def backproject_efficiencies(
+    scanner_info: petsird.ScannerInformation,
+    all_detector_centers: list[np.ndarray],
+    img_shape: tuple,
+) -> np.ndarray:
+    # read detection element / module pair efficiencies
+
+    # get the dection bin efficiencies for all module types
+    # index via: det_bin_effs = all_detection_bin_effs[rep_mod_type]
+    # which returns a 1D array of shape (num_detection_bins,) = (num_det_els_in_module * num_energy_bins,)
+    all_detection_bin_effs: list[petsird.DetectionBinEfficiencies] | None = (
+        scanner_info.detection_efficiencies.detection_bin_efficiencies
+    )
+
+    # get the symmetry group ID LUTs for all module types
+    # index via: 2D_SGID_LUT = all_module_pair_sgidlut[rep_mod_type 1][rep_mod_type 2]
+    # which returns a 2D array of shape (num_modules, num_modules)
+    all_module_pair_sgidluts: list[list[petsird.ModulePairSGIDLUT]] | None = (
+        scanner_info.detection_efficiencies.module_pair_sgidlut
+    )
+
+    # get all module pair efficiencies vectors
+    # index via: mod_pair_effs = module_pair_efficiencies_vectors[rep_mod_type 1][rep_mod_type 2][sgid]
+    # which returns a 2D array of shape (num_det_els, num_det_els)
+    all_module_pair_efficiency_vectors: (
+        list[list[list[petsird.ModulePairEfficiencies]]] | None
+    ) = scanner_info.detection_efficiencies.module_pair_efficiencies_vectors
+
+    if all_detection_bin_effs is None:
+        raise ValueError(
+            "No detection bin efficiencies found in scanner information. "
+            "Please check the scanner geometry and detection efficiencies."
+        )
+
+    if all_module_pair_sgidluts is None:
+        raise ValueError(
+            "No module pair SGID LUTs found in scanner information. "
+            "Please check the scanner geometry and detection efficiencies."
+        )
+
+    if all_module_pair_efficiency_vectors is None:
+        raise ValueError(
+            "No module pair efficiencies vectors found in scanner information. "
+            "Please check the scanner geometry and detection efficiencies."
+        )
+
+    # %%
+    # generate the sensitivity image
+
+    print("Generating sensitivity image")
+    sens_img = np.zeros(img_shape, dtype="float32")
+
+    for mod_type_1 in range(num_replicated_modules):
+        num_modules_1 = len(scanner_geom.replicated_modules[mod_type_1].transforms)
+
+        energy_bin_edges_1 = scanner_info.event_energy_bin_edges[mod_type_1].edges
+        num_energy_bins_1 = energy_bin_edges_1.size - 1
+
+        det_bin_effs_1 = all_detection_bin_effs[mod_type_1].reshape(
+            num_modules_1, -1, num_energy_bins_1
+        )
+
+        for mod_type_2 in range(num_replicated_modules):
+            num_modules_2 = len(scanner_geom.replicated_modules[mod_type_2].transforms)
+
+            energy_bin_edges_2 = scanner_info.event_energy_bin_edges[mod_type_2].edges
+            num_energy_bins_2 = energy_bin_edges_2.size - 1
+            det_bin_effs_2 = all_detection_bin_effs[mod_type_2].reshape(
+                num_modules_2, -1, num_energy_bins_2
+            )
+
+            print(
+                f"Module type {mod_type_1} with {num_modules_1} modules vs. {mod_type_2} and {num_modules_2} modules"
+            )
+
+            # sgid_lut = all_module_pair_sgidluts[mod_type_1][mod_type_2]
+
+            # sigma TOF (mm) for module type combination
+            sigma_tof = scanner_info.tof_resolution[mod_type_1][mod_type_2] / 2.35
+            tof_bin_edges = scanner_info.tof_bin_edges[mod_type_1][mod_type_2].edges
+            num_tofbins = tof_bin_edges.size - 1
+            tofbin_width = float(tof_bin_edges[1] - tof_bin_edges[0])
+
+            # raise an error if tof_bin_edges are non equidistant (up to 0.1%)
+            if not np.allclose(
+                np.diff(tof_bin_edges), tof_bin_edges[1] - tof_bin_edges[0], rtol=0.001
+            ):
+                raise ValueError(
+                    f"TOF bin edges for module types {mod_type_1} and {mod_type_2} are not equidistant."
+                )
+
+            for i_mod_1 in range(num_modules_1):
+                for i_mod_2 in range(num_modules_2):
+
+                    sgid = all_module_pair_sgidluts[mod_type_1][mod_type_2][
+                        i_mod_1, i_mod_2
+                    ]
+
+                    # if the symmetry group ID (sgid) is non-negative, the module pair is in coincidence
+                    if sgid >= 0:
+                        print(
+                            f"  Module pair ({mod_type_1}, {i_mod_1}) vs. ({mod_type_2}, {i_mod_2}) with SGID {sgid}"
+                        )
+
+                        # 2D array containg the 3 coordinates of all detecting elements the start module
+                        start_det_coords = all_detector_centers[mod_type_1][
+                            i_mod_1, :, :
+                        ]
+                        # 2D array containg the 3 coordinates of all detecting elements the end module
+                        end_det_coords = all_detector_centers[mod_type_2][i_mod_2, :, :]
+
+                        # 2D array of start coordinates of all LORs connecting all detecting elements
+                        # of the start module with all detecting elements of the end module
+                        start_coords = np.repeat(
+                            start_det_coords, start_det_coords.shape[0], axis=0
+                        )
+
+                        # 2D array of end coordinates of all LORs connecting all detecting elements
+                        # of the start module with all detecting elements of the end module
+                        end_coords = np.tile(
+                            end_det_coords, (end_det_coords.shape[0], 1)
+                        )
+
+                        # setup a LM projector that we use for the sensitivity image calculation
+                        proj = parallelproj.ListmodePETProjector(
+                            start_coords, end_coords, img_shape, voxel_size
+                        )
+
+                        proj.tof_parameters = parallelproj.TOFParameters(
+                            num_tofbins=num_tofbins,
+                            tofbin_width=tofbin_width,
+                            sigma_tof=sigma_tof,
+                        )
+
+                        # 2D array of shape (num_detection_bins, num_detection_bins) =
+                        # (num_det_els * num_energy_bins, num_det_els * num_energy_bins)
+                        module_pair_efficiencies = all_module_pair_efficiency_vectors[
+                            mod_type_1
+                        ][mod_type_2][sgid].values
+
+                        module_pair_efficiencies = module_pair_efficiencies.reshape(
+                            module_pair_efficiencies.shape[0] // num_energy_bins_1,
+                            num_energy_bins_1,
+                            module_pair_efficiencies.shape[0] // num_energy_bins_2,
+                            num_energy_bins_2,
+                        )
+
+                        for i_e_1 in range(num_energy_bins_1):
+                            for i_e_2 in range(num_energy_bins_2):
+                                print(f"    Energy bin pair ({i_e_1}, {i_e_2})")
+
+                                # get the detection bin efficiencies for the start module
+                                # 1D array of shape (num_det_els,)
+                                start_det_bin_effs = det_bin_effs_1[i_mod_1, :, i_e_1]
+                                # get the detection bin efficiencies for the end module
+                                # 1D array of shape (num_det_els,)
+                                end_det_bin_effs = det_bin_effs_2[i_mod_2, :, i_e_2]
+
+                                # start and end detection bin efficiencies for all LORs connecting
+                                # all detecting elements of the start module with all detecting elements of the end module
+                                # 1D array of shape (num_det_els_start * num_det_els_end,)
+                                start_effs = np.repeat(
+                                    start_det_bin_effs,
+                                    end_det_bin_effs.shape[0],
+                                    axis=0,
+                                )
+                                end_effs = np.tile(
+                                    end_det_bin_effs, start_det_bin_effs.shape[0]
+                                )
+
+                                # (non-TOF) sensitivity values to be back-projected
+                                ##########
+                                # in case of modeled attenuation, multiply them as well
+                                ##########
+                                to_be_back_projected = (
+                                    start_effs
+                                    * end_effs
+                                    * module_pair_efficiencies[
+                                        :, i_e_1, :, i_e_2
+                                    ].ravel()
+                                )
+
+                                for signed_tofbin in np.arange(
+                                    -(num_tofbins // 2), num_tofbins // 2 + 1
+                                ):
+                                    # print("tofbin", signed_tofbin)
+                                    proj.event_tofbins = np.full(
+                                        start_coords.shape[0],
+                                        signed_tofbin,
+                                        dtype="int32",
+                                    )
+                                    proj.tof = True
+                                    sens_img += proj.adjoint(to_be_back_projected)
+
+                        # clean up the projector (stores many coordinates ...)
+                        del proj
+
+    return sens_img
+
+
+def read_listmode_prompt_events(
+    reader: petsird.BinaryPETSIRDReader,
+    header: petsird.Header,
+    all_detector_centers: list[np.ndarray],
+    store_energy_bins: bool = True,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+
+    scanner_info: petsird.ScannerInformation = header.scanner
+    scanner_geom: petsird.ScannerGeometry = scanner_info.scanner_geometry
+    num_replicated_modules = scanner_geom.number_of_replicated_modules()
+
+    print("\nReading prompt events from time blocks ...")
+
+    i_t = 0
+
+    ## list of dictionaries, each dictionary contains the prompt detection bins for a time block for all module type and energy bin combinations
+    # all_prompt_detection_bins: list[dict[tuple[int, int], np.ndarray]] = []
+
+    coords0 = []
+    coords1 = []
+    effs = []
+    signed_tof_bins = []
+    energy_idx0 = []
+    energy_idx1 = []
+
+    for time_block in reader.read_time_blocks():
+        if isinstance(time_block, petsird.TimeBlock.EventTimeBlock):
+            start_time = time_block.value.time_interval.start
+            stop_time = time_block.value.time_interval.stop
+            print(
+                f"Processing time block {i_t} with time interval {start_time} ... {stop_time}"
+            )
+
+            # time_block_prompt_detection_bins = dict()
+
+            for mtype0 in range(num_replicated_modules):
+                for mtype1 in range(num_replicated_modules):
+                    tof_bin_edges = scanner_info.tof_bin_edges[mtype0][mtype1].edges
+                    num_tofbins = tof_bin_edges.size - 1
+
+                    for event in time_block.value.prompt_events[mtype0][mtype1]:
+                        expanded_det_bin0 = expand_detection_bin(
+                            scanner_info, mtype0, event.detection_bins[0]
+                        )
+                        expanded_det_bin1 = expand_detection_bin(
+                            scanner_info, mtype1, event.detection_bins[1]
+                        )
+
+                        coords0.append(
+                            all_detector_centers[mtype0][
+                                expanded_det_bin0.module_index,
+                                expanded_det_bin0.element_index,
+                            ]
+                        )
+                        coords1.append(
+                            all_detector_centers[mtype1][
+                                expanded_det_bin1.module_index,
+                                expanded_det_bin1.element_index,
+                            ]
+                        )
+                        signed_tof_bins.append(event.tof_idx - num_tofbins // 2)
+
+                        effs.append(
+                            get_detection_efficiency(
+                                scanner_info,
+                                petsird.TypeOfModulePair((mtype0, mtype1)),
+                                event,
+                            )
+                        )
+
+                        if store_energy_bins:
+                            energy_idx0.append(expanded_det_bin0.energy_index)
+                            energy_idx1.append(expanded_det_bin1.energy_index)
+
+            # all_prompt_detection_bins.append(time_block_prompt_detection_bins)
+            i_t += 1
+
+    # convert lists to numpy arrays
+    coords0 = np.array(coords0, dtype="float32")
+    coords1 = np.array(coords1, dtype="float32")
+    signed_tof_bins = np.array(signed_tof_bins, dtype="int16")
+    effs = np.array(effs, dtype="float32")
+    energy_idx0 = np.array(energy_idx0, dtype="uint16")
+    energy_idx1 = np.array(energy_idx1, dtype="uint16")
+
+    return coords0, coords1, signed_tof_bins, effs, energy_idx0, energy_idx1
+
+
 ################################################################################
 ################################################################################
 ################################################################################
 
 # fname = "sim_points_400000_0/simulated_petsird_lm_file.bin"
-fname = "sim_uniform_cylinder_10000000_0/simulated_petsird_lm_file.bin"
+fname = "sim_uniform_cylinder_1000000_0/simulated_petsird_lm_file.bin"
 
 img_shape = (100, 100, 11)  # shape of the image to be reconstructed
 voxel_size = (1.0, 1.0, 1.0)
@@ -110,6 +398,10 @@ scanner_geom: petsird.ScannerGeometry = scanner_info.scanner_geometry
 num_replicated_modules = scanner_geom.number_of_replicated_modules()
 print(f"Scanner with {num_replicated_modules} types of replicated modules.")
 
+################################################################################
+################################################################################
+################################################################################
+
 # Create a new figure
 fig = plt.figure()
 ax = fig.add_subplot(111, projection="3d")
@@ -120,190 +412,8 @@ all_detector_centers = get_all_detector_centers(scanner_geom, ax=ax)
 ################################################################################
 ################################################################################
 ################################################################################
-# %%
-# read detection element / module pair efficiencies
 
-# get the dection bin efficiencies for all module types
-# index via: det_bin_effs = all_detection_bin_effs[rep_mod_type]
-# which returns a 1D array of shape (num_detection_bins,) = (num_det_els_in_module * num_energy_bins,)
-all_detection_bin_effs: list[petsird.DetectionBinEfficiencies] | None = (
-    scanner_info.detection_efficiencies.detection_bin_efficiencies
-)
-
-# get the symmetry group ID LUTs for all module types
-# index via: 2D_SGID_LUT = all_module_pair_sgidlut[rep_mod_type 1][rep_mod_type 2]
-# which returns a 2D array of shape (num_modules, num_modules)
-all_module_pair_sgidluts: list[list[petsird.ModulePairSGIDLUT]] | None = (
-    scanner_info.detection_efficiencies.module_pair_sgidlut
-)
-
-# get all module pair efficiencies vectors
-# index via: mod_pair_effs = module_pair_efficiencies_vectors[rep_mod_type 1][rep_mod_type 2][sgid]
-# which returns a 2D array of shape (num_det_els, num_det_els)
-all_module_pair_efficiency_vectors: (
-    list[list[list[petsird.ModulePairEfficiencies]]] | None
-) = scanner_info.detection_efficiencies.module_pair_efficiencies_vectors
-
-if all_detection_bin_effs is None:
-    raise ValueError(
-        "No detection bin efficiencies found in scanner information. "
-        "Please check the scanner geometry and detection efficiencies."
-    )
-
-if all_module_pair_sgidluts is None:
-    raise ValueError(
-        "No module pair SGID LUTs found in scanner information. "
-        "Please check the scanner geometry and detection efficiencies."
-    )
-
-if all_module_pair_efficiency_vectors is None:
-    raise ValueError(
-        "No module pair efficiencies vectors found in scanner information. "
-        "Please check the scanner geometry and detection efficiencies."
-    )
-
-# %%
-# generate the sensitivity image
-
-print("Generating sensitivity image")
-sens_img = np.zeros(img_shape, dtype="float32")
-
-for mod_type_1 in range(num_replicated_modules):
-    num_modules_1 = len(scanner_geom.replicated_modules[mod_type_1].transforms)
-
-    energy_bin_edges_1 = scanner_info.event_energy_bin_edges[mod_type_1].edges
-    num_energy_bins_1 = energy_bin_edges_1.size - 1
-
-    det_bin_effs_1 = all_detection_bin_effs[mod_type_1].reshape(
-        num_modules_1, -1, num_energy_bins_1
-    )
-
-    for mod_type_2 in range(num_replicated_modules):
-        num_modules_2 = len(scanner_geom.replicated_modules[mod_type_2].transforms)
-
-        energy_bin_edges_2 = scanner_info.event_energy_bin_edges[mod_type_2].edges
-        num_energy_bins_2 = energy_bin_edges_2.size - 1
-        det_bin_effs_2 = all_detection_bin_effs[mod_type_2].reshape(
-            num_modules_2, -1, num_energy_bins_2
-        )
-
-        print(
-            f"Module type {mod_type_1} with {num_modules_1} modules vs. {mod_type_2} and {num_modules_2} modules"
-        )
-
-        sgid_lut = all_module_pair_sgidluts[mod_type_1][mod_type_2]
-
-        # sigma TOF (mm) for module type combination
-        sigma_tof = scanner_info.tof_resolution[mod_type_1][mod_type_2] / 2.35
-        tof_bin_edges = scanner_info.tof_bin_edges[mod_type_1][mod_type_2].edges
-        num_tofbins = tof_bin_edges.size - 1
-
-        # raise an error if tof_bin_edges are non equidistant (up to 0.1%)
-        if not np.allclose(
-            np.diff(tof_bin_edges), tof_bin_edges[1] - tof_bin_edges[0], rtol=0.001
-        ):
-            raise ValueError(
-                f"TOF bin edges for module types {mod_type_1} and {mod_type_2} are not equidistant."
-            )
-
-        tofbin_width = float(tof_bin_edges[1] - tof_bin_edges[0])
-
-        for i_mod_1 in range(num_modules_1):
-            for i_mod_2 in range(num_modules_2):
-
-                sgid = all_module_pair_sgidluts[mod_type_1][mod_type_2][
-                    i_mod_1, i_mod_2
-                ]
-
-                # if the symmetry group ID (sgid) is non-negative, the module pair is in coincidence
-                if sgid >= 0:
-                    print(
-                        f"  Module pair ({mod_type_1}, {i_mod_1}) vs. ({mod_type_2}, {i_mod_2}) with SGID {sgid}"
-                    )
-
-                    # 2D array containg the 3 coordinates of all detecting elements the start module
-                    start_det_coords = all_detector_centers[mod_type_1][i_mod_1, :, :]
-                    # 2D array containg the 3 coordinates of all detecting elements the end module
-                    end_det_coords = all_detector_centers[mod_type_2][i_mod_2, :, :]
-
-                    # 2D array of start coordinates of all LORs connecting all detecting elements
-                    # of the start module with all detecting elements of the end module
-                    start_coords = np.repeat(
-                        start_det_coords, start_det_coords.shape[0], axis=0
-                    )
-
-                    # 2D array of end coordinates of all LORs connecting all detecting elements
-                    # of the start module with all detecting elements of the end module
-                    end_coords = np.tile(end_det_coords, (end_det_coords.shape[0], 1))
-
-                    # setup a LM projector that we use for the sensitivity image calculation
-                    proj = parallelproj.ListmodePETProjector(
-                        start_coords, end_coords, img_shape, voxel_size
-                    )
-
-                    proj.tof_parameters = parallelproj.TOFParameters(
-                        num_tofbins=num_tofbins,
-                        tofbin_width=tofbin_width,
-                        sigma_tof=sigma_tof,
-                    )
-
-                    # 2D array of shape (num_detection_bins, num_detection_bins) =
-                    # (num_det_els * num_energy_bins, num_det_els * num_energy_bins)
-                    module_pair_efficiencies = all_module_pair_efficiency_vectors[
-                        mod_type_1
-                    ][mod_type_2][sgid].values
-
-                    ### TODO: verify order of detection energy bins in module_pair_efficiencies
-                    module_pair_efficiencies = module_pair_efficiencies.reshape(
-                        module_pair_efficiencies.shape[0] // num_energy_bins_1,
-                        num_energy_bins_1,
-                        module_pair_efficiencies.shape[0] // num_energy_bins_2,
-                        num_energy_bins_2,
-                    )
-
-                    for i_e_1 in range(num_energy_bins_1):
-                        for i_e_2 in range(num_energy_bins_2):
-                            print(f"    Energy bin pair ({i_e_1}, {i_e_2})")
-
-                            # get the detection bin efficiencies for the start module
-                            # 1D array of shape (num_det_els,)
-                            start_det_bin_effs = det_bin_effs_1[i_mod_1, :, i_e_1]
-                            # get the detection bin efficiencies for the end module
-                            # 1D array of shape (num_det_els,)
-                            end_det_bin_effs = det_bin_effs_2[i_mod_2, :, i_e_2]
-
-                            # start and end detection bin efficiencies for all LORs connecting
-                            # all detecting elements of the start module with all detecting elements of the end module
-                            # 1D array of shape (num_det_els_start * num_det_els_end,)
-                            start_effs = np.repeat(
-                                start_det_bin_effs, end_det_bin_effs.shape[0], axis=0
-                            )
-                            end_effs = np.tile(
-                                end_det_bin_effs, start_det_bin_effs.shape[0]
-                            )
-
-                            # (non-TOF) sensitivity values to be back-projected
-                            ##########
-                            # in case of modeled attenuation, multiply them as well
-                            ##########
-                            to_be_back_projected = (
-                                start_effs
-                                * end_effs
-                                * module_pair_efficiencies[:, i_e_1, :, i_e_2].ravel()
-                            )
-
-                            for signed_tofbin in np.arange(
-                                -(num_tofbins // 2), num_tofbins // 2 + 1
-                            ):
-                                # print("tofbin", signed_tofbin)
-                                proj.event_tofbins = np.full(
-                                    start_coords.shape[0], signed_tofbin, dtype="int32"
-                                )
-                                proj.tof = True
-                                sens_img += proj.adjoint(to_be_back_projected)
-
-                    # clean up the projector (stores many coordinates ...)
-                    del proj
+sens_img = backproject_efficiencies(scanner_info, all_detector_centers, img_shape)
 
 # apply adjoint of image-based resolution model
 sig = fwhm_mm / (2.35 * np.asarray(voxel_size))
@@ -317,94 +427,31 @@ sens_img = res_model.adjoint(sens_img)
 # %%
 # read the prompt events of all time blocks for all combinations of module types
 
-print("\nReading prompt events from time blocks ...")
-
-i_t = 0
-
-# list of dictionaries, each dictionary contains the prompt detection bins for a time block for all module type and energy bin combinations
-all_prompt_detection_bins: list[dict[tuple[int, int], np.ndarray]] = []
-
-coords0 = []
-coords1 = []
-effs = []
-signed_tof_bins = []
-energy_idx0 = []
-energy_idx1 = []
-
-for time_block in reader.read_time_blocks():
-    if isinstance(time_block, petsird.TimeBlock.EventTimeBlock):
-        start_time = time_block.value.time_interval.start
-        stop_time = time_block.value.time_interval.stop
-        print(
-            f"Processing time block {i_t} with time interval {start_time} ... {stop_time}"
-        )
-
-        time_block_prompt_detection_bins = dict()
-
-        for mtype0 in range(num_replicated_modules):
-            for mtype1 in range(num_replicated_modules):
-                tof_bin_edges = scanner_info.tof_bin_edges[mod_type_1][mod_type_2].edges
-                num_tofbins = tof_bin_edges.size - 1
-
-                for event in time_block.value.prompt_events[mtype0][mtype1]:
-                    expanded_det_bin0 = expand_detection_bin(
-                        scanner_info, mtype0, event.detection_bins[0]
-                    )
-                    expanded_det_bin1 = expand_detection_bin(
-                        scanner_info, mtype1, event.detection_bins[1]
-                    )
-
-                    coords0.append(
-                        all_detector_centers[mtype0][
-                            expanded_det_bin0.module_index,
-                            expanded_det_bin0.element_index,
-                        ]
-                    )
-                    coords1.append(
-                        all_detector_centers[mtype1][
-                            expanded_det_bin1.module_index,
-                            expanded_det_bin1.element_index,
-                        ]
-                    )
-                    signed_tof_bins.append(event.tof_idx - num_tofbins // 2)
-
-                    effs.append(
-                        get_detection_efficiency(
-                            scanner_info,
-                            petsird.TypeOfModulePair((mtype0, mtype1)),
-                            event,
-                        )
-                    )
-
-                    if store_energy_bins:
-                        energy_idx0.append(expanded_det_bin0.energy_index)
-                        energy_idx1.append(expanded_det_bin1.energy_index)
-
-        # all_prompt_detection_bins.append(time_block_prompt_detection_bins)
-        i_t += 1
-
-# convert lists to numpy arrays
-coords0 = np.array(coords0, dtype="float32")
-coords1 = np.array(coords1, dtype="float32")
-signed_tof_bins = np.array(signed_tof_bins, dtype="int16")
-
-if store_energy_bins:
-    energy_idx0 = np.array(energy_idx0, dtype="uint16")
-    energy_idx1 = np.array(energy_idx1, dtype="uint16")
+coords0, coords1, signed_tof_bins, effs, energy_idx0, energy_idx1 = (
+    read_listmode_prompt_events(
+        reader, header, all_detector_centers, store_energy_bins=True
+    )
+)
 
 ################################################################################
 ################################################################################
 ################################################################################
 # %%
-recon = np.ones(img_shape, dtype="float32")
 
 #### HACK assumes same TOF parameters for all module type pairs
+sigma_tof = scanner_info.tof_resolution[0][0] / 2.35
+tof_bin_edges = scanner_info.tof_bin_edges[0][0].edges
+num_tofbins = tof_bin_edges.size - 1
+tofbin_width = float(tof_bin_edges[1] - tof_bin_edges[0])
+
 tof_params = parallelproj.TOFParameters(
     num_tofbins=num_tofbins, tofbin_width=tofbin_width, sigma_tof=sigma_tof
 )
 
 lm_subset_projs = []
 subset_slices = [slice(i, None, num_subsets) for i in range(num_subsets)]
+
+recon = np.ones(img_shape, dtype="float32")
 
 for i_subset, sl in enumerate(subset_slices):
     lm_subset_projs.append(
