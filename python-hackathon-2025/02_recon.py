@@ -245,10 +245,24 @@ for mod_type_1 in range(num_replicated_modules):
                         sigma_tof=sigma_tof,
                     )
 
-                    # 2D array of shape (num_det_els_start, num_det_els_end)
+                    # 2D array of shape (num_detection_bins, num_detection_bins) =
+                    # (num_det_els * num_energy_bins, num_det_els * num_energy_bins)
                     module_pair_efficiencies = all_module_pair_efficiency_vectors[
                         mod_type_1
                     ][mod_type_2][sgid].values
+
+                    ### TODO: verify order of detection energy bins in module_pair_efficiencies
+                    module_pair_efficiencies = module_pair_efficiencies.reshape(
+                        module_pair_efficiencies.shape[0] // num_energy_bins_1,
+                        num_energy_bins_1,
+                        module_pair_efficiencies.shape[0] // num_energy_bins_2,
+                        num_energy_bins_2,
+                    )
+
+                    ## needed this the indexing below to get the values to be back-projected
+                    ## assumes one energy bin
+                    # assert num_energy_bins_1 == 1
+                    # assert num_energy_bins_2 == 1
 
                     for i_e_1 in range(num_energy_bins_1):
                         for i_e_2 in range(num_energy_bins_2):
@@ -276,7 +290,9 @@ for mod_type_1 in range(num_replicated_modules):
                             # in case of modeled attenuation, multiply them as well
                             ##########
                             to_be_back_projected = (
-                                start_effs * end_effs * module_pair_efficiencies.ravel()
+                                start_effs
+                                * end_effs
+                                * module_pair_efficiencies[:, i_e_1, :, i_e_2].ravel()
                             )
 
                             for signed_tofbin in np.arange(
