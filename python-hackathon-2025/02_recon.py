@@ -36,8 +36,8 @@ def draw_BoxShape(ax, box: petsird.BoxShape) -> None:
         [vertices[j] for j in [1, 2, 6, 5]],
         [vertices[j] for j in [4, 7, 3, 0]],
     ]
-    box = Poly3DCollection(edges, alpha=0.1, linewidths=0.25, edgecolors="r")
-    ax.add_collection3d(box)
+    box_poly = Poly3DCollection(edges, alpha=0.1, linewidths=0.25, edgecolors="r")
+    ax.add_collection3d(box_poly)
 
 
 def get_all_detector_centers(
@@ -141,15 +141,46 @@ all_module_pair_efficiency_vectors: (
     list[list[list[petsird.ModulePairEfficiencies]]] | None
 ) = scanner_info.detection_efficiencies.module_pair_efficiencies_vectors
 
+if all_detection_bin_effs is None:
+    raise ValueError(
+        "No detection bin efficiencies found in scanner information. "
+        "Please check the scanner geometry and detection efficiencies."
+    )
+
+if all_module_pair_sgidluts is None:
+    raise ValueError(
+        "No module pair SGID LUTs found in scanner information. "
+        "Please check the scanner geometry and detection efficiencies."
+    )
+
+if all_module_pair_efficiency_vectors is None:
+    raise ValueError(
+        "No module pair efficiencies vectors found in scanner information. "
+        "Please check the scanner geometry and detection efficiencies."
+    )
+
 # %%
 
 print("Generating sensitivity image")
 
 for mod_type_1 in range(num_replicated_modules):
-    for mod_type_2 in range(num_replicated_modules):
+    num_modules_1 = len(scanner_geom.replicated_modules[mod_type_1].transforms)
 
-        num_modules_1 = len(scanner_geom.replicated_modules[mod_type_1].transforms)
+    energy_bin_edges_1 = scanner_info.event_energy_bin_edges[mod_type_1].edges
+    num_energy_bins_1 = energy_bin_edges_1.size - 1
+
+    det_bin_effs_1 = all_detection_bin_effs[mod_type_1].reshape(
+        num_modules_1, -1, num_energy_bins_1
+    )
+
+    for mod_type_2 in range(num_replicated_modules):
         num_modules_2 = len(scanner_geom.replicated_modules[mod_type_2].transforms)
+
+        energy_bin_edges_2 = scanner_info.event_energy_bin_edges[mod_type_2].edges
+        num_energy_bins_2 = energy_bin_edges_2.size - 1
+        det_bin_effs_2 = all_detection_bin_effs[mod_type_2].reshape(
+            num_modules_2, -1, num_energy_bins_2
+        )
 
         print(
             f"Module type {mod_type_1} with {num_modules_1} modules vs. {mod_type_2} and {num_modules_2} modules"
@@ -171,19 +202,6 @@ for mod_type_1 in range(num_replicated_modules):
 
         num_tofbins = tof_bin_edges.size - 1
         tofbin_width = float(tof_bin_edges[1] - tof_bin_edges[0])
-
-        energy_bin_edges_1 = scanner_info.event_energy_bin_edges[mod_type_1].edges
-        energy_bin_edges_2 = scanner_info.event_energy_bin_edges[mod_type_2].edges
-
-        num_energy_bins_1 = energy_bin_edges_1.size - 1
-        num_energy_bins_2 = energy_bin_edges_2.size - 1
-
-        det_bin_effs_1 = all_detection_bin_effs[mod_type_1].reshape(
-            num_modules_1, -1, num_energy_bins_1
-        )
-        det_bin_effs_2 = all_detection_bin_effs[mod_type_2].reshape(
-            num_modules_2, -1, num_energy_bins_2
-        )
 
         for i_mod_1 in range(num_modules_1):
             for i_mod_2 in range(num_modules_2):
