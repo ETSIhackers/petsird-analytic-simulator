@@ -95,12 +95,15 @@ def get_all_detector_centers(
 ################################################################################
 ################################################################################
 
-fname = "sim_points_400000_0/simulated_petsird_lm_file.bin"
+# fname = "sim_points_400000_0/simulated_petsird_lm_file.bin"
+fname = "sim_uniform_cylinder_10000000_0/simulated_petsird_lm_file.bin"
 
 img_shape = (100, 100, 11)  # shape of the image to be reconstructed
 voxel_size = (1.0, 1.0, 1.0)
 fwhm_mm = 1.5
 store_energy_bins = True
+num_epochs = 5
+num_subsets = 20
 # %%
 
 reader = petsird.BinaryPETSIRDReader(fname)
@@ -327,6 +330,7 @@ all_prompt_detection_bins: list[dict[tuple[int, int], np.ndarray]] = []
 
 coords0 = []
 coords1 = []
+effs = []
 signed_tof_bins = []
 energy_idx0 = []
 energy_idx1 = []
@@ -343,7 +347,6 @@ for time_block in reader.read_time_blocks():
 
         for mtype0 in range(num_replicated_modules):
             for mtype1 in range(num_replicated_modules):
-                mtype_pair = petsird.TypeOfModulePair((mtype0, mtype1))
                 tof_bin_edges = scanner_info.tof_bin_edges[mod_type_1][mod_type_2].edges
                 num_tofbins = tof_bin_edges.size - 1
 
@@ -369,6 +372,14 @@ for time_block in reader.read_time_blocks():
                     )
                     signed_tof_bins.append(event.tof_idx - num_tofbins // 2)
 
+                    effs.append(
+                        get_detection_efficiency(
+                            scanner_info,
+                            petsird.TypeOfModulePair((mtype0, mtype1)),
+                            event,
+                        )
+                    )
+
                     if store_energy_bins:
                         energy_idx0.append(expanded_det_bin0.energy_index)
                         energy_idx1.append(expanded_det_bin1.energy_index)
@@ -385,7 +396,46 @@ if store_energy_bins:
     energy_idx0 = np.array(energy_idx0, dtype="uint16")
     energy_idx1 = np.array(energy_idx1, dtype="uint16")
 
+################################################################################
+################################################################################
+################################################################################
 # %%
+recon = np.ones(img_shape, dtype="float32")
+
+#### HACK assumes same TOF parameters for all module type pairs
+tof_params = parallelproj.TOFParameters(
+    num_tofbins=num_tofbins, tofbin_width=tofbin_width, sigma_tof=sigma_tof
+)
+
+lm_subset_projs = []
+subset_slices = [slice(i, None, num_subsets) for i in range(num_subsets)]
+
+for i_subset, sl in enumerate(subset_slices):
+    lm_subset_projs.append(
+        parallelproj.ListmodePETProjector(
+            coords0[sl, :].copy(), coords1[sl, :].copy(), img_shape, voxel_size
+        )
+    )
+    ### HACK assumes same TOF parameters for all module type pairs
+    lm_subset_projs[i_subset].tof_parameters = tof_params
+    lm_subset_projs[i_subset].event_tofbins = signed_tof_bins[sl].copy()
+    lm_subset_projs[i_subset].tof = True
+
+for i_epoch in range(num_epochs):
+    for i_subset, sl in enumerate(subset_slices):
+        print(
+            f"it {(i_epoch +1):03} / {num_epochs:03}, ss {(i_subset+1):03} / {num_subsets:03}",
+            end="\r",
+        )
+        lm_exp = effs[sl] * lm_subset_projs[i_subset](res_model(recon))
+        tmp = num_subsets * res_model(
+            lm_subset_projs[i_subset].adjoint(effs[sl] / lm_exp)
+        )
+        recon *= tmp / sens_img
+
+opath = Path(fname).parent / f"lm_osem_{num_epochs}_{num_subsets}.npy"
+np.save(opath, recon)
+print(f"LM OSEM recon saved to {opath}")
 
 ################################################################################
 ################################################################################
