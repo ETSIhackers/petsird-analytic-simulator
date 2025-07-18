@@ -4,6 +4,13 @@ from pathlib import Path
 import parallelproj
 import petsird
 
+try:
+    import cupy as xp
+except ModuleNotFoundError:
+    import numpy as xp
+
+print(f"Using {xp.__name__} for parallelproj reconstructions")
+
 from utils import (
     get_all_detector_centers,
     read_listmode_prompt_events,
@@ -11,6 +18,7 @@ from utils import (
 )
 
 
+# %%
 ################################################################################
 ################################################################################
 ################################################################################
@@ -25,8 +33,9 @@ store_energy_bins = True
 num_epochs = 5
 num_subsets = 20
 
+# %%
 ################################################################################
-################################################################################
+#### READ PETSIRD HEADER #######################################################
 ################################################################################
 
 reader = petsird.BinaryPETSIRDReader(fname)
@@ -37,8 +46,9 @@ scanner_geom: petsird.ScannerGeometry = scanner_info.scanner_geometry
 num_replicated_modules = scanner_geom.number_of_replicated_modules()
 print(f"Scanner with {num_replicated_modules} types of replicated modules.")
 
+# %%
 ################################################################################
-################################################################################
+### READ DETECTOR CENTERS AND VISUALIZE ########################################
 ################################################################################
 
 # Create a new figure
@@ -48,11 +58,14 @@ ax = fig.add_subplot(111, projection="3d")
 # get all detector centers
 all_detector_centers = get_all_detector_centers(scanner_geom, ax=ax)
 
+# %%
 ################################################################################
-################################################################################
+### CALCULATE THE SENSITIVTY IMAGE #############################################
 ################################################################################
 
-sens_img = backproject_efficiencies(
+print("Calculating sensitivity image ...")
+
+sens_img: np.ndarray = backproject_efficiencies(
     scanner_info, all_detector_centers, img_shape, voxel_size
 )
 
@@ -61,12 +74,12 @@ sig = fwhm_mm / (2.35 * np.asarray(voxel_size))
 res_model = parallelproj.GaussianFilterOperator(img_shape, sigma=sig)
 sens_img = res_model.adjoint(sens_img)
 
+# %%
 ################################################################################
-################################################################################
+### READ THE LM PROMPT EVENTS AND CONVERT TO COODINATES ########################
 ################################################################################
 
-# %%
-# read the prompt events of all time blocks for all combinations of module types
+print("Reading prompt events from listmode file ...")
 
 coords0, coords1, signed_tof_bins, effs, energy_idx0, energy_idx1 = (
     read_listmode_prompt_events(
@@ -74,12 +87,10 @@ coords0, coords1, signed_tof_bins, effs, energy_idx0, energy_idx1 = (
     )
 )
 
-################################################################################
-################################################################################
-################################################################################
 # %%
-# set axis limits
-
+################################################################################
+### VISUALIZE GEOMETRY AND FIRST 5 EVENTS ######################################
+################################################################################
 if not ax is None:
     min_coords = all_detector_centers[0].reshape(-1, 3).min(0)
     max_coords = all_detector_centers[0].reshape(-1, 3).max(0)
@@ -106,10 +117,12 @@ if not ax is None:
         )
     fig.show()
 
-################################################################################
-################################################################################
-################################################################################
 # %%
+################################################################################
+### PARALLELRPOJ LM OSEM RECONSTUCTION #########################################
+################################################################################
+
+print("Starting parallelproj LM OSEM reconstruction ...")
 
 #### HACK assumes same TOF parameters for all module type pairs
 sigma_tof = scanner_info.tof_resolution[0][0] / 2.35
@@ -124,17 +137,23 @@ tof_params = parallelproj.TOFParameters(
 lm_subset_projs = []
 subset_slices = [slice(i, None, num_subsets) for i in range(num_subsets)]
 
-recon = np.ones(img_shape, dtype="float32")
+# init recon, sens and eff arrays and covert to xp (numpy or cupy) arrays
+recon = xp.ones(img_shape, dtype="float32")
+sens_img = xp.asarray(sens_img, dtype="float32")
+effs = xp.asarray(effs, dtype="float32")
 
 for i_subset, sl in enumerate(subset_slices):
     lm_subset_projs.append(
         parallelproj.ListmodePETProjector(
-            coords0[sl, :].copy(), coords1[sl, :].copy(), img_shape, voxel_size
+            xp.asarray(coords0[sl, :]).copy(), 
+            xp.asarray(coords1[sl, :]).copy(), 
+            img_shape, 
+            voxel_size
         )
     )
     ### HACK assumes same TOF parameters for all module type pairs
     lm_subset_projs[i_subset].tof_parameters = tof_params
-    lm_subset_projs[i_subset].event_tofbins = signed_tof_bins[sl].copy()
+    lm_subset_projs[i_subset].event_tofbins = xp.asarray(signed_tof_bins[sl]).copy()
     lm_subset_projs[i_subset].tof = True
 
 for i_epoch in range(num_epochs):
@@ -150,5 +169,10 @@ for i_epoch in range(num_epochs):
         recon *= tmp / sens_img
 
 opath = Path(fname).parent / f"lm_osem_{num_epochs}_{num_subsets}.npy"
-np.save(opath, recon)
+xp.save(opath, recon)
 print(f"LM OSEM recon saved to {opath}")
+
+# %%
+# SHOW RECON
+import pymirc.viewer as pv
+vi = pv.ThreeAxisViewer(parallelproj.to_numpy_array(recon))

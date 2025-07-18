@@ -88,6 +88,7 @@ def backproject_efficiencies(
     all_detector_centers: list[np.ndarray],
     img_shape: tuple[int, int, int],
     voxel_size: tuple[float, float, float],
+    verbose: bool = False,
 ) -> np.ndarray:
 
     scanner_geom: petsird.ScannerGeometry = scanner_info.scanner_geometry
@@ -137,7 +138,8 @@ def backproject_efficiencies(
     # %%
     # generate the sensitivity image
 
-    print("Generating sensitivity image")
+    if verbose:
+        print("Generating sensitivity image")
     sens_img = np.zeros(img_shape, dtype="float32")
 
     for mod_type_1 in range(num_replicated_modules):
@@ -159,9 +161,10 @@ def backproject_efficiencies(
                 num_modules_2, -1, num_energy_bins_2
             )
 
-            print(
-                f"Module type {mod_type_1} with {num_modules_1} modules vs. {mod_type_2} and {num_modules_2} modules"
-            )
+            if verbose:
+                print(
+                    f"Module type {mod_type_1} with {num_modules_1} modules vs. {mod_type_2} and {num_modules_2} modules"
+                )
 
             # sgid_lut = all_module_pair_sgidluts[mod_type_1][mod_type_2]
 
@@ -188,9 +191,10 @@ def backproject_efficiencies(
 
                     # if the symmetry group ID (sgid) is non-negative, the module pair is in coincidence
                     if sgid >= 0:
-                        print(
-                            f"  Module pair ({mod_type_1}, {i_mod_1}) vs. ({mod_type_2}, {i_mod_2}) with SGID {sgid}"
-                        )
+                        if verbose:
+                            print(
+                                f"  Module pair ({mod_type_1}, {i_mod_1}) vs. ({mod_type_2}, {i_mod_2}) with SGID {sgid}"
+                            )
 
                         # 2D array containg the 3 coordinates of all detecting elements the start module
                         start_det_coords = all_detector_centers[mod_type_1][
@@ -237,7 +241,8 @@ def backproject_efficiencies(
 
                         for i_e_1 in range(num_energy_bins_1):
                             for i_e_2 in range(num_energy_bins_2):
-                                print(f"    Energy bin pair ({i_e_1}, {i_e_2})")
+                                if verbose:
+                                    print(f"    Energy bin pair ({i_e_1}, {i_e_2})")
 
                                 # get the detection bin efficiencies for the start module
                                 # 1D array of shape (num_det_els,)
@@ -293,13 +298,15 @@ def read_listmode_prompt_events(
     header: petsird.Header,
     all_detector_centers: list[np.ndarray],
     store_energy_bins: bool = True,
+    verbose: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
 
     scanner_info: petsird.ScannerInformation = header.scanner
     scanner_geom: petsird.ScannerGeometry = scanner_info.scanner_geometry
     num_replicated_modules = scanner_geom.number_of_replicated_modules()
 
-    print("\nReading prompt events from time blocks ...")
+    if verbose:
+        print("\nReading prompt events from time blocks ...")
 
     i_t = 0
 
@@ -317,9 +324,10 @@ def read_listmode_prompt_events(
         if isinstance(time_block, petsird.TimeBlock.EventTimeBlock):
             start_time = time_block.value.time_interval.start
             stop_time = time_block.value.time_interval.stop
-            print(
-                f"Processing time block {i_t} with time interval {start_time} ... {stop_time}"
-            )
+            if verbose:
+                print(
+                    f"Processing time block {i_t} with time interval {start_time} ... {stop_time}"
+                )
 
             # time_block_prompt_detection_bins = dict()
 
