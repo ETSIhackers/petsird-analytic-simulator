@@ -1,4 +1,2 @@
-*.bin
-*.npy
-tmp
 my_lm_sim/*
+sim_*/*
