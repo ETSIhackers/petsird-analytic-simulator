@@ -8,6 +8,7 @@ try:
     import cupy as xp
 except ModuleNotFoundError:
     import numpy as xp
+import argparse
 
 print(f"Using {xp.__name__} for parallelproj reconstructions")
 
@@ -20,18 +21,27 @@ from utils import (
 
 # %%
 ################################################################################
-################################################################################
+#### PARSE THE COMMAND LINE ####################################################
 ################################################################################
 
-# fname = "sim_points_400000_0/simulated_petsird_lm_file.bin"
-fname = "data/sim_points_400000_0/simulated_petsird_lm_file.bin"
+parser = argparse.ArgumentParser(description="PETSIRD analytic simulator reconstruction")
+parser.add_argument("fname", type=str, help="Path to the PETSIRD listmode file")
+parser.add_argument("--img_shape", type=int, nargs=3, default=[100, 100, 11], help="Shape of the image to be reconstructed")
+parser.add_argument("--voxel_size", type=float, nargs=3, default=[1.0, 1.0, 1.0], help="Voxel size in mm")
+parser.add_argument("--fwhm_mm", type=float, default=1.5, help="FWHM in mm for Gaussian filter for resolution model")
+parser.add_argument("--store_energy_bins", action="store_true", help="Whether to store energy bins")
+parser.add_argument("--num_epochs", type=int, default=5, help="Number of OSEM epochs")
+parser.add_argument("--num_subsets", type=int, default=20, help="Number of OSEM subsets")
 
-img_shape = (100, 100, 11)  # shape of the image to be reconstructed
-voxel_size = (1.0, 1.0, 1.0)
-fwhm_mm = 1.5
-store_energy_bins = True
-num_epochs = 5
-num_subsets = 20
+args = parser.parse_args()
+
+fname = args.fname
+img_shape = tuple(args.img_shape)
+voxel_size = tuple(args.voxel_size)
+fwhm_mm = args.fwhm_mm
+store_energy_bins = args.store_energy_bins
+num_epochs = args.num_epochs
+num_subsets = args.num_subsets
 
 # %%
 ################################################################################
