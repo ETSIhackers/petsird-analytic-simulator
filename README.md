@@ -4,7 +4,7 @@
 
 ```
 conda env create -f environment.yml
-conda activate petsird-analytic-simulator-072
+conda activate petsird-analytic-simulator
 cd python-hackathon-2025
 ```
 
