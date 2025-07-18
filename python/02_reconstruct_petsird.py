@@ -4,6 +4,8 @@ from pathlib import Path
 import parallelproj
 import petsird
 
+# for the parallelproj recon we can use cupy as array backend if available
+# otherwise we fall back to numpy
 try:
     import cupy as xp
 except ModuleNotFoundError:
