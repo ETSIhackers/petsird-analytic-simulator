@@ -26,14 +26,53 @@ from utils import (
 #### PARSE THE COMMAND LINE ####################################################
 ################################################################################
 
-parser = argparse.ArgumentParser(description="PETSIRD analytic simulator reconstruction")
+parser = argparse.ArgumentParser(
+    description="PETSIRD analytic simulator reconstruction"
+)
 parser.add_argument("fname", type=str, help="Path to the PETSIRD listmode file")
-parser.add_argument("--img_shape", type=int, nargs=3, default=[100, 100, 11], help="Shape of the image to be reconstructed")
-parser.add_argument("--voxel_size", type=float, nargs=3, default=[1.0, 1.0, 1.0], help="Voxel size in mm")
-parser.add_argument("--fwhm_mm", type=float, default=1.5, help="FWHM in mm for Gaussian filter for resolution model")
-parser.add_argument("--store_energy_bins", action="store_true", help="Whether to store energy bins")
+parser.add_argument(
+    "--img_shape",
+    type=int,
+    nargs=3,
+    default=[100, 100, 11],
+    help="Shape of the image to be reconstructed",
+)
+parser.add_argument(
+    "--voxel_size",
+    type=float,
+    nargs=3,
+    default=[1.0, 1.0, 1.0],
+    help="Voxel size in mm",
+)
+parser.add_argument(
+    "--fwhm_mm",
+    type=float,
+    default=1.5,
+    help="FWHM in mm for Gaussian filter for resolution model",
+)
+parser.add_argument(
+    "--store_energy_bins", action="store_true", help="Whether to store energy bins"
+)
 parser.add_argument("--num_epochs", type=int, default=5, help="Number of OSEM epochs")
-parser.add_argument("--num_subsets", type=int, default=20, help="Number of OSEM subsets")
+parser.add_argument(
+    "--num_subsets", type=int, default=20, help="Number of OSEM subsets"
+)
+parser.add_argument(
+    "--verbose", action="store_true", help="Whether to print verbose output"
+)
+parser.add_argument(
+    "--unity_sens_img",
+    action="store_true",
+    help="Whether to skip sensitivity image calculation and use unity image",
+)
+parser.add_argument(
+    "--unity_effs",
+    action="store_true",
+    help="Whether to use unity efficiencies for LORs",
+)
+parser.add_argument(
+    "--non-tof", action="store_true", help="Whether to disable TOF in recon"
+)
 
 args = parser.parse_args()
 
@@ -44,6 +83,10 @@ fwhm_mm = args.fwhm_mm
 store_energy_bins = args.store_energy_bins
 num_epochs = args.num_epochs
 num_subsets = args.num_subsets
+verbose = args.verbose
+unity_sens_img = args.unity_sens_img
+unity_effs = args.unity_effs
+tof = not args.non_tof
 
 # %%
 ################################################################################
@@ -68,23 +111,35 @@ fig = plt.figure()
 ax = fig.add_subplot(111, projection="3d")
 
 # get all detector centers
+print("Calculating all detector centers ...")
 all_detector_centers = get_all_detector_centers(scanner_geom, ax=ax)
+
+# calculate the scanner iso center to set the image origin that we need for the projectors
+scanner_iso_center = xp.asarray(all_detector_centers[0].reshape(-1, 3).mean(0))
+
+img_origin = scanner_iso_center - 0.5 * (xp.asarray(img_shape) - 1) * xp.asarray(
+    voxel_size
+)
 
 # %%
 ################################################################################
 ### CALCULATE THE SENSITIVTY IMAGE #############################################
 ################################################################################
 
-print("Calculating sensitivity image ...")
-
-sens_img: np.ndarray = backproject_efficiencies(
-    scanner_info, all_detector_centers, img_shape, voxel_size
-)
-
-# apply adjoint of image-based resolution model
 sig = fwhm_mm / (2.35 * np.asarray(voxel_size))
 res_model = parallelproj.GaussianFilterOperator(img_shape, sigma=sig)
-sens_img = res_model.adjoint(sens_img)
+
+if unity_sens_img:
+    print("Using ones as sensitivity image ...")
+    sens_img = np.ones(img_shape, dtype="float32")
+else:
+    print("Calculating sensitivity image ...")
+    sens_img: np.ndarray = backproject_efficiencies(
+        scanner_info, all_detector_centers, img_shape, voxel_size, verbose=verbose
+    )
+
+    # apply adjoint of image-based resolution model
+    sens_img = res_model.adjoint(sens_img)
 
 # %%
 ################################################################################
@@ -95,9 +150,16 @@ print("Reading prompt events from listmode file ...")
 
 coords0, coords1, signed_tof_bins, effs, energy_idx0, energy_idx1 = (
     read_listmode_prompt_events(
-        reader, header, all_detector_centers, store_energy_bins=True
+        reader,
+        header,
+        all_detector_centers,
+        store_energy_bins=True,
+        verbose=verbose,
+        unity_effs=unity_effs,
     )
 )
+
+print(signed_tof_bins.min(), signed_tof_bins.max())
 
 # %%
 ################################################################################
@@ -131,10 +193,18 @@ if not ax is None:
 
 # %%
 ################################################################################
-### PARALLELRPOJ LM OSEM RECONSTUCTION #########################################
+### PARALLELRPOJ BACKPROJECTIONS ###############################################
 ################################################################################
 
-print("Starting parallelproj LM OSEM reconstruction ...")
+proj = parallelproj.ListmodePETProjector(
+    xp.asarray(coords0).copy(),
+    xp.asarray(coords1).copy(),
+    img_shape,
+    voxel_size,
+    img_origin=img_origin,
+)
+
+non_tof_backproj = proj.adjoint(xp.ones(coords0.shape[0], dtype="float32"))
 
 #### HACK assumes same TOF parameters for all module type pairs
 sigma_tof = scanner_info.tof_resolution[0][0] / 2.35
@@ -145,6 +215,21 @@ tofbin_width = float(tof_bin_edges[1] - tof_bin_edges[0])
 tof_params = parallelproj.TOFParameters(
     num_tofbins=num_tofbins, tofbin_width=tofbin_width, sigma_tof=sigma_tof
 )
+
+proj.tof_parameters = tof_params
+proj.event_tofbins = xp.asarray(signed_tof_bins).copy()
+proj.tof = True
+
+tof_backproj = proj.adjoint(xp.ones(coords0.shape[0], dtype="float32"))
+
+del proj
+# %%
+################################################################################
+### PARALLELRPOJ LM OSEM RECONSTRUCTION ########################################
+################################################################################
+
+print("Starting parallelproj LM OSEM reconstruction ...")
+
 
 lm_subset_projs = []
 subset_slices = [slice(i, None, num_subsets) for i in range(num_subsets)]
@@ -157,16 +242,19 @@ effs = xp.asarray(effs, dtype="float32")
 for i_subset, sl in enumerate(subset_slices):
     lm_subset_projs.append(
         parallelproj.ListmodePETProjector(
-            xp.asarray(coords0[sl, :]).copy(), 
-            xp.asarray(coords1[sl, :]).copy(), 
-            img_shape, 
-            voxel_size
+            xp.asarray(coords0[sl, :]).copy(),
+            xp.asarray(coords1[sl, :]).copy(),
+            img_shape,
+            voxel_size,
+            img_origin=img_origin,
         )
     )
-    ### HACK assumes same TOF parameters for all module type pairs
-    lm_subset_projs[i_subset].tof_parameters = tof_params
-    lm_subset_projs[i_subset].event_tofbins = xp.asarray(signed_tof_bins[sl]).copy()
-    lm_subset_projs[i_subset].tof = True
+
+    #### HACK assumes same TOF parameters for all module type pairs
+    if tof:
+        lm_subset_projs[i_subset].tof_parameters = tof_params
+        lm_subset_projs[i_subset].event_tofbins = xp.asarray(signed_tof_bins[sl]).copy()
+        lm_subset_projs[i_subset].tof = True
 
 for i_epoch in range(num_epochs):
     for i_subset, sl in enumerate(subset_slices):
@@ -187,4 +275,5 @@ print(f"LM OSEM recon saved to {opath}")
 # %%
 # SHOW RECON
 import pymirc.viewer as pv
+
 vi = pv.ThreeAxisViewer(parallelproj.to_numpy_array(recon))

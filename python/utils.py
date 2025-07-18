@@ -1,4 +1,5 @@
 from importlib.metadata import version
+import warnings
 
 # raise an error if petsird version is not at least 0.7.2
 petsird_version = tuple(map(int, version("petsird").split(".")))
@@ -117,22 +118,68 @@ def backproject_efficiencies(
         list[list[list[petsird.ModulePairEfficiencies]]] | None
     ) = scanner_info.detection_efficiencies.module_pair_efficiencies_vectors
 
+    # number of modules for every module type
+    all_num_modules: list[int] = [
+        len(x.transforms) for x in scanner_geom.replicated_modules
+    ]
+    # number of detecting elements for every module type
+    all_num_det_els: list[int] = [
+        x.object.detecting_elements.number_of_objects()
+        for x in scanner_geom.replicated_modules
+    ]
+
     if all_detection_bin_effs is None:
-        raise ValueError(
-            "No detection bin efficiencies found in scanner information. "
-            "Please check the scanner geometry and detection efficiencies."
+        all_detection_bin_effs = [
+            np.ones(x * y, dtype="float32")
+            for (x, y) in zip(all_num_modules, all_num_det_els)
+        ]
+        warnings.warn(
+            "No detection bin efficiencies found in scanner information - assuming all detection efficiencies are 1.0.",
         )
 
     if all_module_pair_sgidluts is None:
-        raise ValueError(
-            "No module pair SGID LUTs found in scanner information. "
-            "Please check the scanner geometry and detection efficiencies."
+        # no SGID LUTs are giving, assume that all modules pairs are in SGID 0
+
+        all_module_pair_sgidluts = []
+        for num_mod1 in all_num_modules:
+            tmp_list = []
+            for num_mod2 in all_num_modules:
+                lut = np.full((num_mod1, num_mod2), -1, dtype="int")
+                for i in range(num_mod1):
+                    for j in range(i + 1, num_mod2):
+                        lut[i, j] = 0
+
+                tmp_list.append(lut)
+            all_module_pair_sgidluts.append(tmp_list)
+
+        warnings.warn(
+            "No module pair SGID LUTs found in scanner information. Asumming all module pairs are in SGID 0.",
+            UserWarning,
         )
 
     if all_module_pair_efficiency_vectors is None:
-        raise ValueError(
-            "No module pair efficiencies vectors found in scanner information. "
-            "Please check the scanner geometry and detection efficiencies."
+
+        all_module_pair_efficiency_vectors = []
+        for num_det_els1 in all_num_det_els:
+            tmp_list = []
+            for num_det_els2 in all_num_det_els:
+                # create a dummy efficiency vector with all ones
+                # the shape is (num_det_els1, num_energy_bins, num_det_els2, num_energy_bins)
+                # where num_energy_bins is the number of energy bins for the respective module type
+                tmp_list.append(
+                    [
+                        petsird.ModulePairEfficiencies(
+                            values=np.ones(
+                                (num_det_els1, num_det_els2), dtype="float32"
+                            )
+                        )
+                    ]
+                )
+            all_module_pair_efficiency_vectors.append(tmp_list)
+
+        warnings.warn(
+            "No module pair efficiencies vectors found in scanner information. Assuming all ones.",
+            UserWarning,
         )
 
     # %%
@@ -165,8 +212,6 @@ def backproject_efficiencies(
                 print(
                     f"Module type {mod_type_1} with {num_modules_1} modules vs. {mod_type_2} and {num_modules_2} modules"
                 )
-
-            # sgid_lut = all_module_pair_sgidluts[mod_type_1][mod_type_2]
 
             # sigma TOF (mm) for module type combination
             sigma_tof = scanner_info.tof_resolution[mod_type_1][mod_type_2] / 2.35
@@ -298,6 +343,7 @@ def read_listmode_prompt_events(
     header: petsird.Header,
     all_detector_centers: list[np.ndarray],
     store_energy_bins: bool = True,
+    unity_effs: bool = False,
     verbose: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
 
@@ -356,19 +402,23 @@ def read_listmode_prompt_events(
                                 expanded_det_bin1.element_index,
                             ]
                         )
+
                         signed_tof_bins.append(event.tof_idx - num_tofbins // 2)
 
-                        effs.append(
-                            get_detection_efficiency(
-                                scanner_info,
-                                petsird.TypeOfModulePair((mtype0, mtype1)),
-                                event,
+                        if unity_effs:
+                            effs.append(1.0)
+                        else:
+                            effs.append(
+                                get_detection_efficiency(
+                                    scanner_info,
+                                    petsird.TypeOfModulePair((mtype0, mtype1)),
+                                    event,
+                                )
                             )
-                        )
 
-                        if store_energy_bins:
-                            energy_idx0.append(expanded_det_bin0.energy_index)
-                            energy_idx1.append(expanded_det_bin1.energy_index)
+                            if store_energy_bins:
+                                energy_idx0.append(expanded_det_bin0.energy_index)
+                                energy_idx1.append(expanded_det_bin1.energy_index)
 
             # all_prompt_detection_bins.append(time_block_prompt_detection_bins)
             i_t += 1
