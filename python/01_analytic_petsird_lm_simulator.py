@@ -116,7 +116,7 @@ num_time_blocks: int = args.num_time_blocks
 event_block_duration: int = args.event_block_duration
 
 if args.output_dir is None:
-    output_dir = Path(f"sim_{phantom}_{num_true_counts}_{seed}")
+    output_dir = Path("data") / f"sim_{phantom}_{num_true_counts}_{seed}"
 else:
     output_dir = Path(args.output_dir)
 

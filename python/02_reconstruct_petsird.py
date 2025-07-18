@@ -16,7 +16,7 @@ from utils import (
 ################################################################################
 
 # fname = "sim_points_400000_0/simulated_petsird_lm_file.bin"
-fname = "sim_points_400000_0/simulated_petsird_lm_file.bin"
+fname = "data/sim_points_400000_0/simulated_petsird_lm_file.bin"
 
 img_shape = (100, 100, 11)  # shape of the image to be reconstructed
 voxel_size = (1.0, 1.0, 1.0)
