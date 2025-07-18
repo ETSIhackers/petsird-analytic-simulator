@@ -80,13 +80,13 @@ parser.add_argument("--skip_plots", action="store_true")
 parser.add_argument("--check_backprojection", default=False, action="store_true")
 parser.add_argument("--num_epochs_mlem", type=int, default=0)
 parser.add_argument("--skip_writing", default=False, action="store_true")
-parser.add_argument("--fwhm_mm", type=float, default=1.5)
-parser.add_argument("--tof_fwhm_mm", type=float, default=30.0)
+parser.add_argument("--fwhm_mm", type=float, default=2.5)
+parser.add_argument("--tof_fwhm_mm", type=float, default=20.0)
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--uniform_crystal_eff", action="store_true")
 parser.add_argument("--uniform_sg_eff", action="store_true")
-parser.add_argument("--img_shape", type=parse_int_tuple, default=(100, 100, 11))
-parser.add_argument("--voxel_size", type=parse_float_tuple, default=(1.0, 1.0, 1.0))
+parser.add_argument("--img_shape", type=parse_int_tuple, default=(55, 55, 19))
+parser.add_argument("--voxel_size", type=parse_float_tuple, default=(2.0, 2.0, 2.0))
 parser.add_argument(
     "--phantom",
     type=str,
@@ -137,7 +137,7 @@ np.random.seed(args.seed)
 # input parameters related to the scanner geometry
 
 # number of LOR endpoints per block module in all 3 directions
-block_shape = (10, 2, 3)
+block_shape = (10, 2, 9)
 # spacing between LOR endpoints in a block module in all three directions (mm)
 block_spacing = (4.5, 10.0, 4.5)
 # radius of the scanner - distance from the center to the block modules (mm)
@@ -212,7 +212,7 @@ if phantom == "uniform_cylinder":
     tmp = np.linspace(-1, 1, img_shape[0])
     X0, X1 = np.meshgrid(tmp, tmp, indexing="ij")
     disk = np.astype(np.sqrt(X0**2 + X1**2) < 0.7, "float32")
-    for i in range(img_shape[2]):
+    for i in range(2, img_shape[2] - 2):
         img[..., i] = disk
 elif phantom == "squares":
     img[2:-12, 32:-20, 2:-1] = 3
@@ -240,7 +240,7 @@ tof_bin_width = 0.8 * sig_tof
 # calculate the number of TOF bins
 # we set it to twice the image diagonal divided by the tof bin width
 # and make sure it is an odd number
-num_tof_bins = int(2 * np.sqrt(2) * img_shape[0] * voxel_size[0] / tof_bin_width)
+num_tof_bins = int(np.sqrt(2) * img_shape[0] * voxel_size[0] / tof_bin_width)
 if num_tof_bins % 2 == 0:
     num_tof_bins += 1
 

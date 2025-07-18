@@ -345,6 +345,7 @@ def read_listmode_prompt_events(
     store_energy_bins: bool = True,
     unity_effs: bool = False,
     verbose: bool = False,
+    flip_tofbin_sign: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
 
     scanner_info: petsird.ScannerInformation = header.scanner
@@ -403,7 +404,10 @@ def read_listmode_prompt_events(
                             ]
                         )
 
-                        signed_tof_bins.append(event.tof_idx - num_tofbins // 2)
+                        if flip_tofbin_sign:
+                            signed_tof_bins.append(-(event.tof_idx - num_tofbins // 2))
+                        else:
+                            signed_tof_bins.append(event.tof_idx - num_tofbins // 2)
 
                         if unity_effs:
                             effs.append(1.0)

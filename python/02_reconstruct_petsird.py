@@ -34,20 +34,20 @@ parser.add_argument(
     "--img_shape",
     type=int,
     nargs=3,
-    default=[100, 100, 11],
+    default=[55, 55, 19],
     help="Shape of the image to be reconstructed",
 )
 parser.add_argument(
     "--voxel_size",
     type=float,
     nargs=3,
-    default=[1.0, 1.0, 1.0],
+    default=[2.0, 2.0, 2.0],
     help="Voxel size in mm",
 )
 parser.add_argument(
     "--fwhm_mm",
     type=float,
-    default=1.5,
+    default=2.5,
     help="FWHM in mm for Gaussian filter for resolution model",
 )
 parser.add_argument(
