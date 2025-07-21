@@ -164,17 +164,25 @@ else:
     # apply adjoint of image-based resolution model
     sens_img = res_model.adjoint(sens_img)
 
+# %%
+################################################################################
+### CHECK WHETHER THE CALC SENS IMAGE MATCHES THE REF. SENSE IMAGE #############
+################################################################################
+
 ref_sens_img_path = Path(fname).parent / "reference_sensitivity_image.npy"
 
 if ref_sens_img_path.exists():
+    print(f"loading reference sensitivity image from {ref_sens_img_path}")
     ref_sens_img = np.load(ref_sens_img_path)
     if ref_sens_img.shape == sens_img.shape:
         if np.allclose(sens_img, ref_sens_img):
             print(
                 f"calculated sensitivity image matches reference image {ref_sens_img_path}"
             )
-
-# np.save("zz.npy", sens_img)
+        else:
+            print(
+                f"calculated sensitivity image does NOT match reference image {ref_sens_img_path}"
+            )
 
 # %%
 ################################################################################
@@ -294,4 +302,4 @@ print(f"LM OSEM recon saved to {opath}")
 # SHOW RECON
 import pymirc.viewer as pv
 
-vi = pv.ThreeAxisViewer(parallelproj.to_numpy_array(recon))
+vi = pv.ThreeAxisViewer([parallelproj.to_numpy_array(x) for x in [recon, sens_img]])

@@ -229,109 +229,167 @@ def backproject_efficiencies(
                 )
 
             for i_mod_1 in range(num_modules_1):
-                for i_mod_2 in range(num_modules_2):
 
-                    sgid = all_module_pair_sgidluts[mod_type_1][mod_type_2][
-                        i_mod_1, i_mod_2
-                    ]
+                # get the row of the SGID LUT for the current module type
+                sgids = all_module_pair_sgidluts[0][0][i_mod_1].copy()
+
+                # neglect the lower triangle of the SGID LUT to make sure we
+                # only back-project every module pair once
+                sgids[: (i_mod_1 + 1)] = -1
+
+                num_mods_in_coindence = np.count_nonzero(sgids >= 0)
+
+                if num_mods_in_coindence == 0:
+                    continue
+
+                start_coords = np.zeros(
+                    (
+                        num_mods_in_coindence,
+                        det_bin_effs_1.shape[1] * det_bin_effs_2.shape[1],
+                        3,
+                    ),
+                    dtype="float32",
+                )
+
+                end_coords = np.zeros(
+                    (
+                        num_mods_in_coindence,
+                        det_bin_effs_1.shape[1] * det_bin_effs_2.shape[1],
+                        3,
+                    ),
+                    dtype="float32",
+                )
+
+                to_be_back_projected = np.zeros(
+                    (
+                        num_energy_bins_1,
+                        num_energy_bins_2,
+                        num_mods_in_coindence,
+                        det_bin_effs_1.shape[1] * det_bin_effs_2.shape[1],
+                    ),
+                    dtype="float32",
+                )
+
+                i_coinc = 0
+
+                for i_mod_2, sgid in enumerate(sgids):
+
+                    if sgid < 0:
+                        # skip module pairs that are not in coincidence
+                        continue
 
                     # if the symmetry group ID (sgid) is non-negative, the module pair is in coincidence
-                    if sgid >= 0:
-                        if verbose:
-                            print(
-                                f"  Module pair ({mod_type_1}, {i_mod_1}) vs. ({mod_type_2}, {i_mod_2}) with SGID {sgid}"
+                    if verbose:
+                        print(
+                            f"  Module pair ({mod_type_1}, {i_mod_1}) vs. ({mod_type_2}, {i_mod_2}) with SGID {sgid}"
+                        )
+
+                    # 2D array containg the 3 coordinates of all detecting elements the start module
+                    start_det_coords = all_detector_centers[mod_type_1][i_mod_1, :, :]
+                    # 2D array containg the 3 coordinates of all detecting elements the end module
+                    end_det_coords = all_detector_centers[mod_type_2][i_mod_2, :, :]
+
+                    # 2D array of start coordinates of all LORs connecting all detecting elements
+                    # of the start module with all detecting elements of the end module
+                    start_coords[i_coinc, :, :] = np.repeat(
+                        start_det_coords, start_det_coords.shape[0], axis=0
+                    )
+
+                    # 2D array of end coordinates of all LORs connecting all detecting elements
+                    # of the start module with all detecting elements of the end module
+                    end_coords[i_coinc, :, :] = np.tile(
+                        end_det_coords, (end_det_coords.shape[0], 1)
+                    )
+
+                    # 2D array of shape (num_detection_bins, num_detection_bins) =
+                    # (num_det_els * num_energy_bins, num_det_els * num_energy_bins)
+                    module_pair_efficiencies = all_module_pair_efficiency_vectors[
+                        mod_type_1
+                    ][mod_type_2][sgid].values
+
+                    module_pair_efficiencies = module_pair_efficiencies.reshape(
+                        module_pair_efficiencies.shape[0] // num_energy_bins_1,
+                        num_energy_bins_1,
+                        module_pair_efficiencies.shape[0] // num_energy_bins_2,
+                        num_energy_bins_2,
+                    )
+
+                    for i_e_1 in range(num_energy_bins_1):
+                        for i_e_2 in range(num_energy_bins_2):
+                            if verbose:
+                                print(f"    Energy bin pair ({i_e_1}, {i_e_2})")
+
+                            # get the detection bin efficiencies for the start module
+                            # 1D array of shape (num_det_els,)
+                            start_det_bin_effs = det_bin_effs_1[i_mod_1, :, i_e_1]
+                            # get the detection bin efficiencies for the end module
+                            # 1D array of shape (num_det_els,)
+                            end_det_bin_effs = det_bin_effs_2[i_mod_2, :, i_e_2]
+
+                            # (non-TOF) sensitivity values to be back-projected
+                            ##########
+                            # in case of modeled attenuation, multiply them as well
+                            ##########
+                            to_be_back_projected[i_e_1, i_e_2, i_coinc, :] = (
+                                np.outer(
+                                    start_det_bin_effs,
+                                    end_det_bin_effs,  # multiplied start and end det els. effs for all LORs
+                                ).ravel()
+                                * module_pair_efficiencies[
+                                    :,
+                                    i_e_1,
+                                    :,
+                                    i_e_2,  # module pair effs for current module pair and energy bin pair
+                                ].ravel()
                             )
 
-                        # 2D array containg the 3 coordinates of all detecting elements the start module
-                        start_det_coords = all_detector_centers[mod_type_1][
-                            i_mod_1, :, :
-                        ]
-                        # 2D array containg the 3 coordinates of all detecting elements the end module
-                        end_det_coords = all_detector_centers[mod_type_2][i_mod_2, :, :]
+                    # clean up the projector (stores many coordinates ...)
+                    # del proj
+                    i_coinc += 1
 
-                        # 2D array of start coordinates of all LORs connecting all detecting elements
-                        # of the start module with all detecting elements of the end module
-                        start_coords = np.repeat(
-                            start_det_coords, start_det_coords.shape[0], axis=0
-                        )
+                # setup a LM projector that we use for the sensitivity image calculation
+                start_coords = start_coords.reshape(-1, 3)
+                end_coords = end_coords.reshape(-1, 3)
 
-                        # 2D array of end coordinates of all LORs connecting all detecting elements
-                        # of the start module with all detecting elements of the end module
-                        end_coords = np.tile(
-                            end_det_coords, (end_det_coords.shape[0], 1)
-                        )
+                proj = parallelproj.ListmodePETProjector(
+                    start_coords,
+                    end_coords,
+                    img_shape,
+                    voxel_size,
+                )
 
-                        # setup a LM projector that we use for the sensitivity image calculation
-                        proj = parallelproj.ListmodePETProjector(
-                            start_coords, end_coords, img_shape, voxel_size
-                        )
+                if tof:
+                    proj.tof_parameters = parallelproj.TOFParameters(
+                        num_tofbins=num_tofbins,
+                        tofbin_width=tofbin_width,
+                        sigma_tof=sigma_tof,
+                    )
 
+                if verbose:
+                    print(
+                        f"backprojecting all LORs in that starting at module {i_mod_1}\n"
+                    )
+
+                for i_e_1 in range(num_energy_bins_1):
+                    for i_e_2 in range(num_energy_bins_2):
                         if tof:
-                            proj.tof_parameters = parallelproj.TOFParameters(
-                                num_tofbins=num_tofbins,
-                                tofbin_width=tofbin_width,
-                                sigma_tof=sigma_tof,
-                            )
-
-                        # 2D array of shape (num_detection_bins, num_detection_bins) =
-                        # (num_det_els * num_energy_bins, num_det_els * num_energy_bins)
-                        module_pair_efficiencies = all_module_pair_efficiency_vectors[
-                            mod_type_1
-                        ][mod_type_2][sgid].values
-
-                        module_pair_efficiencies = module_pair_efficiencies.reshape(
-                            module_pair_efficiencies.shape[0] // num_energy_bins_1,
-                            num_energy_bins_1,
-                            module_pair_efficiencies.shape[0] // num_energy_bins_2,
-                            num_energy_bins_2,
-                        )
-
-                        for i_e_1 in range(num_energy_bins_1):
-                            for i_e_2 in range(num_energy_bins_2):
-                                if verbose:
-                                    print(f"    Energy bin pair ({i_e_1}, {i_e_2})")
-
-                                # get the detection bin efficiencies for the start module
-                                # 1D array of shape (num_det_els,)
-                                start_det_bin_effs = det_bin_effs_1[i_mod_1, :, i_e_1]
-                                # get the detection bin efficiencies for the end module
-                                # 1D array of shape (num_det_els,)
-                                end_det_bin_effs = det_bin_effs_2[i_mod_2, :, i_e_2]
-
-                                # (non-TOF) sensitivity values to be back-projected
-                                ##########
-                                # in case of modeled attenuation, multiply them as well
-                                ##########
-                                to_be_back_projected = (
-                                    np.outer(
-                                        start_det_bin_effs,
-                                        end_det_bin_effs,  # multiplied start and end det els. effs for all LORs
-                                    ).ravel()
-                                    * module_pair_efficiencies[
-                                        :,
-                                        i_e_1,
-                                        :,
-                                        i_e_2,  # module pair effs for current module pair and energy bin pair
-                                    ].ravel()
+                            for signed_tofbin in np.arange(
+                                -(num_tofbins // 2), num_tofbins // 2 + 1
+                            ):
+                                proj.event_tofbins = np.full(
+                                    start_coords.shape[0],
+                                    signed_tofbin,
+                                    dtype="int32",
                                 )
-
-                                if tof:
-                                    for signed_tofbin in np.arange(
-                                        -(num_tofbins // 2), num_tofbins // 2 + 1
-                                    ):
-                                        proj.event_tofbins = np.full(
-                                            start_coords.shape[0],
-                                            signed_tofbin,
-                                            dtype="int32",
-                                        )
-                                        proj.tof = True
-                                        sens_img += proj.adjoint(to_be_back_projected)
-                                else:
-                                    proj.tof = False
-                                    sens_img += proj.adjoint(to_be_back_projected)
-
-                        # clean up the projector (stores many coordinates ...)
-                        del proj
+                                proj.tof = True
+                                sens_img += proj.adjoint(
+                                    to_be_back_projected[i_e_1, i_e_2, :, :].ravel()
+                                )
+                        else:
+                            proj.tof = False
+                            sens_img += proj.adjoint(
+                                to_be_back_projected[i_e_1, i_e_2, :, :].ravel()
+                            )
 
     return sens_img
 
@@ -434,3 +492,6 @@ def read_listmode_prompt_events(
     energy_idx1 = np.array(energy_idx1, dtype="uint16")
 
     return coords0, coords1, signed_tof_bins, effs, energy_idx0, energy_idx1
+
+
+# %%
