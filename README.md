@@ -5,10 +5,10 @@
 ```
 conda env create -f environment.yml
 conda activate petsird-analytic-simulator
-cd python
+cd python-hackathon-2025
 ```
 
-## Simulate petsird LM data
+## Simulate petsird LM data (work in progress)
 
 ```
 python 01_analytic_petsird_lm_simulator.py
@@ -43,7 +43,7 @@ python 01_analytic_petsird_lm_simulator.py -h
 value > 0 is given via `--num_epochs_mlem`. Otherwise it is skipped to save
 time.
 
-## Run a listmode OSEM recon on the simulated
+## Run a listmode OSEM recon on the simulated (work in progress)
 
 ```
 python 02_lm_osem_recon_simulated_data.py
