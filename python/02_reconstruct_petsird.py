@@ -34,7 +34,7 @@ parser.add_argument(
     "--img_shape",
     type=int,
     nargs=3,
-    default=[55, 55, 19],
+    default=None,
     help="Shape of the image to be reconstructed",
 )
 parser.add_argument(
@@ -77,7 +77,7 @@ parser.add_argument(
 args = parser.parse_args()
 
 fname = args.fname
-img_shape = tuple(args.img_shape)
+img_shape: list[int] | None = args.img_shape
 voxel_size = tuple(args.voxel_size)
 fwhm_mm = args.fwhm_mm
 store_energy_bins = args.store_energy_bins
@@ -113,12 +113,6 @@ ax = fig.add_subplot(111, projection="3d")
 print("Calculating all detector centers ...")
 all_detector_centers = get_all_detector_centers(scanner_geom, ax=ax)
 
-# calculate the scanner iso center to set the image origin that we need for the projectors
-scanner_iso_center = xp.asarray(all_detector_centers[0].reshape(-1, 3).mean(0))
-
-img_origin = scanner_iso_center - 0.5 * (xp.asarray(img_shape) - 1) * xp.asarray(
-    voxel_size
-)
 
 if not ax is None:
     min_coords = all_detector_centers[0].reshape(-1, 3).min(0)
@@ -138,6 +132,49 @@ if not ax is None:
             alpha=0.3,
         )
     fig.show()
+
+# %%
+################################################################################
+###  DETERMINE IMAGE ORIGIN AND IMAGE SHAPE IF NOT GIVEN #######################
+################################################################################
+
+
+if img_shape is not None:
+    img_shape = tuple(img_shape)
+else:
+    # get the bounding box of the scanner detection elements
+    scanner_bbox = all_detector_centers[0].reshape(-1, 3).max(0) - all_detector_centers[
+        0
+    ].reshape(-1, 3).min(0)
+
+    i_ax = int(
+        np.argmin(
+            np.array(
+                [
+                    np.abs(scanner_bbox[1] - scanner_bbox[2]),
+                    np.abs(scanner_bbox[0] - scanner_bbox[2]),
+                    np.abs(scanner_bbox[0] - scanner_bbox[1]),
+                ]
+            )
+        )
+    )
+
+    img_shape = (0.53 * scanner_bbox / np.array(voxel_size)).astype(int)
+    img_shape[i_ax] = int(scanner_bbox[i_ax] / voxel_size[i_ax])
+    if img_shape[i_ax] % 2 == 0:
+        img_shape[i_ax] += 1  # make sure the image shape is odd
+    img_shape = tuple(img_shape.tolist())
+
+# calculate the scanner iso center to set the image origin that we need for the projectors
+scanner_iso_center = xp.asarray(all_detector_centers[0].reshape(-1, 3).mean(0))
+img_origin = scanner_iso_center - 0.5 * (xp.asarray(img_shape) - 1) * xp.asarray(
+    voxel_size
+)
+
+if verbose:
+    print(f"Image shape: {img_shape}")
+    print(f"Image origin: {img_origin}")
+    print(f"Voxel size: {voxel_size}")
 
 # %%
 ################################################################################
@@ -256,7 +293,6 @@ del proj
 ################################################################################
 
 print("Starting parallelproj LM OSEM reconstruction ...")
-
 
 lm_subset_projs = []
 subset_slices = [slice(i, None, num_subsets) for i in range(num_subsets)]
