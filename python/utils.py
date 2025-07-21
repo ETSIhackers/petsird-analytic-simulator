@@ -89,6 +89,7 @@ def backproject_efficiencies(
     all_detector_centers: list[np.ndarray],
     img_shape: tuple[int, int, int],
     voxel_size: tuple[float, float, float],
+    tof: bool = False,
     verbose: bool = False,
 ) -> np.ndarray:
 
@@ -265,11 +266,12 @@ def backproject_efficiencies(
                             start_coords, end_coords, img_shape, voxel_size
                         )
 
-                        proj.tof_parameters = parallelproj.TOFParameters(
-                            num_tofbins=num_tofbins,
-                            tofbin_width=tofbin_width,
-                            sigma_tof=sigma_tof,
-                        )
+                        if tof:
+                            proj.tof_parameters = parallelproj.TOFParameters(
+                                num_tofbins=num_tofbins,
+                                tofbin_width=tofbin_width,
+                                sigma_tof=sigma_tof,
+                            )
 
                         # 2D array of shape (num_detection_bins, num_detection_bins) =
                         # (num_det_els * num_energy_bins, num_det_els * num_energy_bins)
@@ -320,16 +322,19 @@ def backproject_efficiencies(
                                     ].ravel()
                                 )
 
-                                for signed_tofbin in np.arange(
-                                    -(num_tofbins // 2), num_tofbins // 2 + 1
-                                ):
-                                    # print("tofbin", signed_tofbin)
-                                    proj.event_tofbins = np.full(
-                                        start_coords.shape[0],
-                                        signed_tofbin,
-                                        dtype="int32",
-                                    )
-                                    proj.tof = True
+                                if tof:
+                                    for signed_tofbin in np.arange(
+                                        -(num_tofbins // 2), num_tofbins // 2 + 1
+                                    ):
+                                        proj.event_tofbins = np.full(
+                                            start_coords.shape[0],
+                                            signed_tofbin,
+                                            dtype="int32",
+                                        )
+                                        proj.tof = True
+                                        sens_img += proj.adjoint(to_be_back_projected)
+                                else:
+                                    proj.tof = False
                                     sens_img += proj.adjoint(to_be_back_projected)
 
                         # clean up the projector (stores many coordinates ...)

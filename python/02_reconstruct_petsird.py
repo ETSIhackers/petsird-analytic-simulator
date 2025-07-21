@@ -110,7 +110,6 @@ print(f"Scanner with {num_replicated_modules} types of replicated modules.")
 fig = plt.figure()
 ax = fig.add_subplot(111, projection="3d")
 
-# get all detector centers
 print("Calculating all detector centers ...")
 all_detector_centers = get_all_detector_centers(scanner_geom, ax=ax)
 
@@ -120,6 +119,25 @@ scanner_iso_center = xp.asarray(all_detector_centers[0].reshape(-1, 3).mean(0))
 img_origin = scanner_iso_center - 0.5 * (xp.asarray(img_shape) - 1) * xp.asarray(
     voxel_size
 )
+
+if not ax is None:
+    min_coords = all_detector_centers[0].reshape(-1, 3).min(0)
+    max_coords = all_detector_centers[0].reshape(-1, 3).max(0)
+
+    ax.set_xlim3d([min_coords.min(), max_coords.max()])
+    ax.set_ylim3d([min_coords.min(), max_coords.max()])
+    ax.set_zlim3d([min_coords.min(), max_coords.max()])
+
+    for detector_centers in all_detector_centers:
+        ax.scatter(
+            detector_centers[:, :, 0].ravel(),
+            detector_centers[:, :, 1].ravel(),
+            detector_centers[:, :, 2].ravel(),
+            s=0.5,
+            c="k",
+            alpha=0.3,
+        )
+    fig.show()
 
 # %%
 ################################################################################
@@ -135,11 +153,19 @@ if unity_sens_img:
 else:
     print("Calculating sensitivity image ...")
     sens_img: np.ndarray = backproject_efficiencies(
-        scanner_info, all_detector_centers, img_shape, voxel_size, verbose=verbose
+        scanner_info,
+        all_detector_centers,
+        img_shape,
+        voxel_size,
+        verbose=verbose,
+        tof=tof,
     )
 
     # apply adjoint of image-based resolution model
     sens_img = res_model.adjoint(sens_img)
+
+np.save("zz.npy", sens_img)
+breakpoint()
 
 # %%
 ################################################################################
@@ -166,23 +192,6 @@ print(signed_tof_bins.min(), signed_tof_bins.max())
 ### VISUALIZE GEOMETRY AND FIRST 5 EVENTS ######################################
 ################################################################################
 if not ax is None:
-    min_coords = all_detector_centers[0].reshape(-1, 3).min(0)
-    max_coords = all_detector_centers[0].reshape(-1, 3).max(0)
-
-    ax.set_xlim3d([min_coords.min(), max_coords.max()])
-    ax.set_ylim3d([min_coords.min(), max_coords.max()])
-    ax.set_zlim3d([min_coords.min(), max_coords.max()])
-
-    for detector_centers in all_detector_centers:
-        ax.scatter(
-            detector_centers[:, :, 0].ravel(),
-            detector_centers[:, :, 1].ravel(),
-            detector_centers[:, :, 2].ravel(),
-            s=0.5,
-            c="k",
-            alpha=0.3,
-        )
-
     for i in range(5):
         ax.plot(
             [coords0[i, 0], coords1[i, 0]],
