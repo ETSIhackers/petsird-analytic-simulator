@@ -1,6 +1,7 @@
 **/build/
 **/__pycache__/
 *.npy
+.DS_Store
 
 # Common editor backups
 ~$*

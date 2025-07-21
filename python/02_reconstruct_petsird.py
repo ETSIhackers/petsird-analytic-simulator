@@ -164,8 +164,17 @@ else:
     # apply adjoint of image-based resolution model
     sens_img = res_model.adjoint(sens_img)
 
-np.save("zz.npy", sens_img)
-breakpoint()
+ref_sens_img_path = Path(fname).parent / "reference_sensitivity_image.npy"
+
+if ref_sens_img_path.exists():
+    ref_sens_img = np.load(ref_sens_img_path)
+    if ref_sens_img.shape == sens_img.shape:
+        if np.allclose(sens_img, ref_sens_img):
+            print(
+                f"calculated sensitivity image matches reference image {ref_sens_img_path}"
+            )
+
+# np.save("zz.npy", sens_img)
 
 # %%
 ################################################################################

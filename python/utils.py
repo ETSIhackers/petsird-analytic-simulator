@@ -298,27 +298,20 @@ def backproject_efficiencies(
                                 # 1D array of shape (num_det_els,)
                                 end_det_bin_effs = det_bin_effs_2[i_mod_2, :, i_e_2]
 
-                                # start and end detection bin efficiencies for all LORs connecting
-                                # all detecting elements of the start module with all detecting elements of the end module
-                                # 1D array of shape (num_det_els_start * num_det_els_end,)
-                                start_effs = np.repeat(
-                                    start_det_bin_effs,
-                                    end_det_bin_effs.shape[0],
-                                    axis=0,
-                                )
-                                end_effs = np.tile(
-                                    end_det_bin_effs, start_det_bin_effs.shape[0]
-                                )
-
                                 # (non-TOF) sensitivity values to be back-projected
                                 ##########
                                 # in case of modeled attenuation, multiply them as well
                                 ##########
                                 to_be_back_projected = (
-                                    start_effs
-                                    * end_effs
+                                    np.outer(
+                                        start_det_bin_effs,
+                                        end_det_bin_effs,  # multiplied start and end det els. effs for all LORs
+                                    ).ravel()
                                     * module_pair_efficiencies[
-                                        :, i_e_1, :, i_e_2
+                                        :,
+                                        i_e_1,
+                                        :,
+                                        i_e_2,  # module pair effs for current module pair and energy bin pair
                                     ].ravel()
                                 )
 
