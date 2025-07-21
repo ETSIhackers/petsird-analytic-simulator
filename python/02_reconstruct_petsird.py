@@ -152,13 +152,14 @@ if unity_sens_img:
     sens_img = np.ones(img_shape, dtype="float32")
 else:
     print("Calculating sensitivity image ...")
-    sens_img: np.ndarray = backproject_efficiencies(
+    sens_img: xp.ndarray = backproject_efficiencies(
         scanner_info,
         all_detector_centers,
         img_shape,
         voxel_size,
         verbose=verbose,
         tof=tof,
+        xp=xp,
     )
 
     # apply adjoint of image-based resolution model
@@ -175,7 +176,7 @@ if ref_sens_img_path.exists():
     print(f"loading reference sensitivity image from {ref_sens_img_path}")
     ref_sens_img = np.load(ref_sens_img_path)
     if ref_sens_img.shape == sens_img.shape:
-        if np.allclose(sens_img, ref_sens_img):
+        if np.allclose(np.asarray(sens_img), ref_sens_img):
             print(
                 f"calculated sensitivity image matches reference image {ref_sens_img_path}"
             )
@@ -262,7 +263,6 @@ subset_slices = [slice(i, None, num_subsets) for i in range(num_subsets)]
 
 # init recon, sens and eff arrays and covert to xp (numpy or cupy) arrays
 recon = xp.ones(img_shape, dtype="float32")
-sens_img = xp.asarray(sens_img, dtype="float32")
 effs = xp.asarray(effs, dtype="float32")
 
 for i_subset, sl in enumerate(subset_slices):

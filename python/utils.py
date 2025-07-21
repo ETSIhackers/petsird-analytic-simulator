@@ -1,5 +1,4 @@
 from importlib.metadata import version
-import warnings
 
 # raise an error if petsird version is not at least 0.7.2
 petsird_version = tuple(map(int, version("petsird").split(".")))
@@ -10,17 +9,19 @@ if petsird_version < (0, 7, 2):
 
 
 import numpy as np
+import warnings
 
 import parallelproj
-
 import petsird
+import petsird.helpers.geometry
+
+from types import ModuleType
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
 from petsird.helpers import (
     expand_detection_bin,
     get_detection_efficiency,
 )
-
-import petsird.helpers.geometry
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 
 def draw_BoxShape(ax, box: petsird.BoxShape) -> None:
@@ -91,6 +92,7 @@ def backproject_efficiencies(
     voxel_size: tuple[float, float, float],
     tof: bool = False,
     verbose: bool = False,
+    xp: ModuleType = np,
 ) -> np.ndarray:
 
     scanner_geom: petsird.ScannerGeometry = scanner_info.scanner_geometry
@@ -188,7 +190,7 @@ def backproject_efficiencies(
 
     if verbose:
         print("Generating sensitivity image")
-    sens_img = np.zeros(img_shape, dtype="float32")
+    sens_img = xp.zeros(img_shape, dtype="float32")
 
     for mod_type_1 in range(num_replicated_modules):
         num_modules_1 = len(scanner_geom.replicated_modules[mod_type_1].transforms)
@@ -348,8 +350,8 @@ def backproject_efficiencies(
                     i_coinc += 1
 
                 # setup a LM projector that we use for the sensitivity image calculation
-                start_coords = start_coords.reshape(-1, 3)
-                end_coords = end_coords.reshape(-1, 3)
+                start_coords = xp.asarray(start_coords.reshape(-1, 3))
+                end_coords = xp.asarray(end_coords.reshape(-1, 3))
 
                 proj = parallelproj.ListmodePETProjector(
                     start_coords,
@@ -376,19 +378,23 @@ def backproject_efficiencies(
                             for signed_tofbin in np.arange(
                                 -(num_tofbins // 2), num_tofbins // 2 + 1
                             ):
-                                proj.event_tofbins = np.full(
+                                proj.event_tofbins = xp.full(
                                     start_coords.shape[0],
                                     signed_tofbin,
                                     dtype="int32",
                                 )
                                 proj.tof = True
                                 sens_img += proj.adjoint(
-                                    to_be_back_projected[i_e_1, i_e_2, :, :].ravel()
+                                    xp.asarray(
+                                        to_be_back_projected[i_e_1, i_e_2, :, :].ravel()
+                                    )
                                 )
                         else:
                             proj.tof = False
                             sens_img += proj.adjoint(
-                                to_be_back_projected[i_e_1, i_e_2, :, :].ravel()
+                                xp.asarray(
+                                    to_be_back_projected[i_e_1, i_e_2, :, :].ravel()
+                                )
                             )
 
     return sens_img
