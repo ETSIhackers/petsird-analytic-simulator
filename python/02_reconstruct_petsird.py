@@ -186,21 +186,30 @@ res_model = parallelproj.GaussianFilterOperator(img_shape, sigma=sig)
 
 if unity_sens_img:
     print("Using ones as sensitivity image ...")
-    sens_img = np.ones(img_shape, dtype="float32")
+    sens_img = xp.ones(img_shape, dtype="float32")
 else:
-    print("Calculating sensitivity image ...")
-    sens_img: xp.ndarray = backproject_efficiencies(
-        scanner_info,
-        all_detector_centers,
-        img_shape,
-        voxel_size,
-        verbose=verbose,
-        tof=tof,
-        xp=xp,
-    )
+    sens_img_path = Path(fname).with_suffix(".sens_img.npy")
+
+    if sens_img_path.exists():
+        print(f"Loading sensitivity image from {sens_img_path}")
+        sens_img = xp.load(sens_img_path)
+
+    else:
+        print("Calculating sensitivity image ...")
+        sens_img: xp.ndarray = backproject_efficiencies(
+            scanner_info,
+            all_detector_centers,
+            img_shape,
+            voxel_size,
+            verbose=verbose,
+            tof=tof,
+            xp=xp,
+        )
 
     # apply adjoint of image-based resolution model
     sens_img = res_model.adjoint(sens_img)
+
+    xp.save(sens_img_path, sens_img)
 
 # %%
 ################################################################################
