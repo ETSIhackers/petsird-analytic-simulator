@@ -1,4 +1,11 @@
-# Analytic simulation of petsird v0.2 data using parallelproj
+# Analytic simulation of petsird v0.7.2 data using parallelproj
+
+This tool allows to "quickly" simulate and recostruct PETSIRD TOF listmode data
+using a simplified physics model (true coincidences only) and non-trivial
+detection efficiencies.
+
+One of it's aims is to be able to generate data that can be used to test implementation
+of software supporting the PETSIRD standard for listmode data.
 
 ## Create your conda / mamba environment
 
@@ -19,15 +26,16 @@ files (e.g. a reference sensitivity image) that are all stored in the output
 directory
 
 ```
-tree --charset=ascii my_lm_sim
+tree --charset=ascii data/sim_points_400000_0 
 
-my_lm_sim
-|-- reference_histogram_mlem_50_epochs.npy
+data/sim_points_400000_0
+|-- ground_truth_image.npy
 |-- reference_sensitivity_image.npy
 |-- scanner_geometry.png
 |-- sim_parameters.json
-|-- simulated_lm_file.bin
-`-- tof_profile_and_sensitivity_image.png
+|-- simulated_petsird_lm_file.bin
+|-- tof_profile_and_sensitivity_image.png
+`-- zz.json
 ```
 
 The simulation can be customized in many ways (number of counts to simulate,
@@ -37,6 +45,32 @@ These option can be listed via
 
 ```
 python 01_analytic_petsird_lm_simulator.py -h
+
+[-h] [--fname FNAME] [--output_dir OUTPUT_DIR] [--num_true_counts NUM_TRUE_COUNTS] [--skip_plots]
+[--check_backprojection] [--num_epochs_mlem NUM_EPOCHS_MLEM] [--skip_writing] [--fwhm_mm FWHM_MM]
+[--tof_fwhm_mm TOF_FWHM_MM] [--seed SEED] [--uniform_crystal_eff] [--uniform_sg_eff] [--img_shape IMG_SHAPE]
+[--voxel_size VOXEL_SIZE] [--phantom {uniform_cylinder,squares,points}] [--num_time_blocks NUM_TIME_BLOCKS]
+[--event_block_duration EVENT_BLOCK_DURATION]
+
+options:
+  -h, --help            show this help message and exit
+  --fname FNAME
+  --output_dir OUTPUT_DIR
+  --num_true_counts NUM_TRUE_COUNTS
+  --skip_plots
+  --check_backprojection
+  --num_epochs_mlem NUM_EPOCHS_MLEM
+  --skip_writing
+  --fwhm_mm FWHM_MM
+  --tof_fwhm_mm TOF_FWHM_MM
+  --seed SEED
+  --uniform_crystal_eff
+  --uniform_sg_eff
+  --img_shape IMG_SHAPE
+  --voxel_size VOXEL_SIZE
+  --phantom {uniform_cylinder,squares,points}
+  --num_time_blocks NUM_TIME_BLOCKS
+  --event_block_duration EVENT_BLOCK_DURATION
 ```
 
 **Note:** The "reference" MLEM using histogrammed data is only run if a
