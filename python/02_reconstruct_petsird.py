@@ -73,6 +73,9 @@ parser.add_argument(
 parser.add_argument(
     "--non-tof", action="store_true", help="Whether to disable TOF in recon"
 )
+parser.add_argument(
+    "--attenuation_image", type=str, default=None, help="Path to attenuation image"
+)
 
 args = parser.parse_args()
 
@@ -87,6 +90,7 @@ verbose = args.verbose
 unity_sens_img = args.unity_sens_img
 unity_effs = args.unity_effs
 tof = not args.non_tof
+attenuation_image_fname: str | None = args.attenuation_image
 
 # %%
 ################################################################################
@@ -110,9 +114,17 @@ print(f"Scanner with {num_replicated_modules} types of replicated modules.")
 fig = plt.figure()
 ax = fig.add_subplot(111, projection="3d")
 
-print("Calculating all detector centers ...")
-all_detector_centers = get_all_detector_centers(scanner_geom, ax=ax)
+all_detector_centers_file = Path(fname).with_suffix(".detector_centers.npz")
 
+if not all_detector_centers_file.exists():
+    print("Calculating all detector centers ...")
+    all_detector_centers = get_all_detector_centers(scanner_geom, ax=ax)
+    np.savez_compressed(all_detector_centers_file, *all_detector_centers)
+    print(f"Detector centers saved to {all_detector_centers_file}")
+else:
+    print(f"Loading all detector centers from {all_detector_centers_file}")
+    with np.load(all_detector_centers_file) as data:
+        all_detector_centers = [data[name] for name in data.files]
 
 if not ax is None:
     min_coords = all_detector_centers[0].reshape(-1, 3).min(0)
@@ -163,7 +175,7 @@ else:
     img_shape[i_ax] = int(scanner_bbox[i_ax] / voxel_size[i_ax])
     if img_shape[i_ax] % 2 == 0:
         img_shape[i_ax] += 1  # make sure the image shape is odd
-    img_shape = tuple(img_shape.tolist())
+    img_shape: tuple[int, int, int] = tuple(img_shape.tolist())
 
 # calculate the scanner iso center to set the image origin that we need for the projectors
 scanner_iso_center = xp.asarray(all_detector_centers[0].reshape(-1, 3).mean(0))
@@ -184,6 +196,16 @@ if verbose:
 sig = fwhm_mm / (2.35 * np.asarray(voxel_size))
 res_model = parallelproj.GaussianFilterOperator(img_shape, sigma=sig)
 
+att_img: None | np.ndarray = None
+if attenuation_image_fname is not None:
+    print(f"Loading attenuation image from {attenuation_image_fname}")
+    att_img = np.load(attenuation_image_fname)
+    if att_img.shape != img_shape:
+        raise ValueError(
+            f"Attenuation image shape {att_img.shape} does not match image shape {img_shape}"
+        )
+
+
 if unity_sens_img:
     print("Using ones as sensitivity image ...")
     sens_img = xp.ones(img_shape, dtype="float32")
@@ -196,6 +218,7 @@ else:
 
     else:
         print("Calculating sensitivity image ...")
+
         sens_img: xp.ndarray = backproject_efficiencies(
             scanner_info,
             all_detector_centers,
@@ -204,6 +227,7 @@ else:
             verbose=verbose,
             tof=tof,
             xp=xp,
+            attenuation_image=att_img,
         )
 
     # apply adjoint of image-based resolution model
@@ -236,20 +260,42 @@ if ref_sens_img_path.exists():
 ### READ THE LM PROMPT EVENTS AND CONVERT TO COODINATES ########################
 ################################################################################
 
-print("Reading prompt events from listmode file ...")
+preprocess_file = Path(fname).with_suffix(".preprocessed_events.npz")
 
-coords0, coords1, signed_tof_bins, effs, energy_idx0, energy_idx1 = (
-    read_listmode_prompt_events(
-        reader,
-        header,
-        all_detector_centers,
-        store_energy_bins=True,
-        verbose=verbose,
-        unity_effs=unity_effs,
+if not preprocess_file.exists():
+    print("Reading prompt events from listmode file ...")
+    coords0, coords1, signed_tof_bins, effs, energy_idx0, energy_idx1 = (
+        read_listmode_prompt_events(
+            reader,
+            header,
+            all_detector_centers,
+            store_energy_bins=True,
+            verbose=verbose,
+            unity_effs=unity_effs,
+        )
     )
-)
 
-print(signed_tof_bins.min(), signed_tof_bins.max())
+    print(signed_tof_bins.min(), signed_tof_bins.max())
+
+    # store coords0, coords1, signed_tof_bins, effs, energy_idx0, energy_idx1 into a compressed npz file
+    np.savez_compressed(
+        preprocess_file,
+        coords0=coords0,
+        coords1=coords1,
+        signed_tof_bins=signed_tof_bins,
+        effs=effs,
+        energy_idx0=energy_idx0,
+        energy_idx1=energy_idx1,
+    )
+else:
+    print(f"Loading preprocessed events from {preprocess_file}")
+    with np.load(preprocess_file) as data:
+        coords0 = data["coords0"]
+        coords1 = data["coords1"]
+        signed_tof_bins = data["signed_tof_bins"]
+        effs = data["effs"]
+        energy_idx0 = data["energy_idx0"]
+        energy_idx1 = data["energy_idx1"]
 
 # %%
 ################################################################################
@@ -296,10 +342,32 @@ proj.tof = True
 tof_backproj = proj.adjoint(xp.ones(coords0.shape[0], dtype="float32"))
 
 del proj
+
 # %%
 ################################################################################
-### PARALLELRPOJ LM OSEM RECONSTRUCTION ########################################
+### FILTER OUT EVENTS THAT HAVE 0 EFFICIENCY DUE TO ERRORS IN ENCODING #########
 ################################################################################
+
+if effs.min() == 0:
+    print("Filtering out events with zero efficiency ...")
+    valid_events = effs > 0
+    coords0 = coords0[valid_events]
+    coords1 = coords1[valid_events]
+    signed_tof_bins = signed_tof_bins[valid_events]
+    effs = effs[valid_events]
+
+    if store_energy_bins:
+        energy_idx0 = energy_idx0[valid_events]
+        energy_idx1 = energy_idx1[valid_events]
+
+
+# %%
+################################################################################
+### PARALLELRPOJ LM OSEM RECONSTRUCTION WITHOUT ATTENUATION MODEL ##############
+################################################################################
+
+# NOTE: since we don't model additive contamination, the attenuation only enters
+#       the sensitivity image calculation
 
 print("Starting parallelproj LM OSEM reconstruction ...")
 
@@ -343,8 +411,14 @@ opath = Path(fname).parent / f"lm_osem_{num_epochs}_{num_subsets}.npy"
 xp.save(opath, recon)
 print(f"LM OSEM recon saved to {opath}")
 
+
 # %%
 # SHOW RECON
 import pymirc.viewer as pv
 
-vi = pv.ThreeAxisViewer([parallelproj.to_numpy_array(x) for x in [recon, sens_img]])
+if att_img is None:
+    vi = pv.ThreeAxisViewer([parallelproj.to_numpy_array(x) for x in [recon, sens_img]])
+else:
+    vi = pv.ThreeAxisViewer(
+        [parallelproj.to_numpy_array(x) for x in [recon, att_img, sens_img]]
+    )

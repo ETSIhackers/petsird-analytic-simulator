@@ -93,6 +93,7 @@ def backproject_efficiencies(
     tof: bool = False,
     verbose: bool = False,
     xp: ModuleType = np,
+    attenuation_image: np.ndarray | None = None,
 ) -> np.ndarray:
 
     scanner_geom: petsird.ScannerGeometry = scanner_info.scanner_geometry
@@ -367,13 +368,32 @@ def backproject_efficiencies(
                         sigma_tof=sigma_tof,
                     )
 
-                if verbose:
-                    print(
-                        f"backprojecting all LORs in that starting at module {i_mod_1}\n"
-                    )
+                # forward project the attenuation image here
+                # assume the same attenuation image for energy bin combinations so far
+                if attenuation_image is not None:
+                    # forward project the attenuation image and take neg. exponential
+                    att_vals = xp.exp(-proj(xp.asarray(attenuation_image)))
+                    if verbose:
+                        print(
+                            f"backprojecting all attenuation values for LORs starting at module {i_mod_1}\n"
+                        )
+                else:
+                    att_vals = None
+                    if verbose:
+                        print(f"backprojecting all LORs starting at module {i_mod_1}\n")
 
                 for i_e_1 in range(num_energy_bins_1):
                     for i_e_2 in range(num_energy_bins_2):
+
+                        # setup values to be back-projected
+                        tmp = (
+                            xp.asarray(to_be_back_projected[i_e_1, i_e_2, :, :])
+                            .copy()
+                            .ravel()
+                        )
+                        if att_vals is not None:
+                            tmp *= att_vals
+
                         if tof:
                             for signed_tofbin in np.arange(
                                 -(num_tofbins // 2), num_tofbins // 2 + 1
@@ -384,18 +404,11 @@ def backproject_efficiencies(
                                     dtype="int32",
                                 )
                                 proj.tof = True
-                                sens_img += proj.adjoint(
-                                    xp.asarray(
-                                        to_be_back_projected[i_e_1, i_e_2, :, :].ravel()
-                                    )
-                                )
+
+                                sens_img += proj.adjoint(tmp)
                         else:
                             proj.tof = False
-                            sens_img += proj.adjoint(
-                                xp.asarray(
-                                    to_be_back_projected[i_e_1, i_e_2, :, :].ravel()
-                                )
-                            )
+                            sens_img += proj.adjoint(tmp)
 
     return sens_img
 
