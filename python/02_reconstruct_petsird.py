@@ -325,6 +325,8 @@ proj = parallelproj.ListmodePETProjector(
 
 non_tof_backproj = proj.adjoint(xp.ones(coords0.shape[0], dtype="float32"))
 
+xp.save(Path(fname).with_suffix(".non_tof_backproj.npy"), non_tof_backproj)
+
 #### HACK assumes same TOF parameters for all module type pairs
 sigma_tof = scanner_info.tof_resolution[0][0] / 2.35
 tof_bin_edges = scanner_info.tof_bin_edges[0][0].edges
@@ -340,6 +342,8 @@ proj.event_tofbins = xp.asarray(signed_tof_bins).copy()
 proj.tof = True
 
 tof_backproj = proj.adjoint(xp.ones(coords0.shape[0], dtype="float32"))
+
+xp.save(Path(fname).with_suffix(".tof_backproj.npy"), tof_backproj)
 
 del proj
 
@@ -402,6 +406,7 @@ for i_epoch in range(num_epochs):
             end="\r",
         )
         lm_exp = effs[sl] * lm_subset_projs[i_subset](res_model(recon))
+
         tmp = num_subsets * res_model.adjoint(
             lm_subset_projs[i_subset].adjoint(effs[sl] / lm_exp)
         )
