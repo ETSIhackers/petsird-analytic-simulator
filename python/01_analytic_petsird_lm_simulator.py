@@ -70,17 +70,30 @@ def parse_float_tuple(arg):
 # %%
 # parse the command line for the input parameters below
 parser = argparse.ArgumentParser(
-    description="Analytic simulation of PETSIRD v0.7.2 listmode data for a block PET scanner"
+    description="Analytic simulation of PETSIRD v0.7.2 listmode data for a block PET scanner",
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
 
 # Output configuration group
-output_group = parser.add_argument_group('Output Configuration')
-output_group.add_argument("--fname", type=str, default="simulated_petsird_lm_file.bin", help="name of the output LM file")
-output_group.add_argument("--output_dir", type=str, default=None, help="directory to save output files")
-output_group.add_argument("--skip_writing", default=False, action="store_true", help="skip writing the LM data to a file")
+output_group = parser.add_argument_group("Output Configuration")
+output_group.add_argument(
+    "--fname",
+    type=str,
+    default="simulated_petsird_lm_file.bin",
+    help="name of the output LM file",
+)
+output_group.add_argument(
+    "--output_dir", type=str, default=None, help="directory to save output files"
+)
+output_group.add_argument(
+    "--skip_writing",
+    default=False,
+    action="store_true",
+    help="skip writing the LM data to a file",
+)
 
 # Image and phantom configuration group
-image_group = parser.add_argument_group('Image and Phantom Configuration')
+image_group = parser.add_argument_group("Image and Phantom Configuration")
 image_group.add_argument(
     "--phantom",
     type=str,
@@ -88,37 +101,96 @@ image_group.add_argument(
     choices=["cylinder", "uniform_cylinder", "squares", "points"],
     help="phantom to simulate",
 )
-image_group.add_argument("--img_shape", type=parse_int_tuple, default=(55, 55, 19), help="shape of the image to simulate")
-image_group.add_argument("--voxel_size", type=parse_float_tuple, default=(2.0, 2.0, 2.0), help="voxel size in mm used in the simulation")
+image_group.add_argument(
+    "--img_shape",
+    type=parse_int_tuple,
+    default=(55, 55, 19),
+    help="shape of the image to simulate",
+)
+image_group.add_argument(
+    "--voxel_size",
+    type=parse_float_tuple,
+    default=(2.0, 2.0, 2.0),
+    help="voxel size in mm used in the simulation",
+)
 
 # Physics and resolution parameters group
-physics_group = parser.add_argument_group('Physics / simulation parameters')
-physics_group.add_argument("--fwhm_mm", type=float, default=2.5, help="FWHM of the image space resolution model in mm")
-physics_group.add_argument("--tof_fwhm_mm", type=float, default=20.0, help="FWHM of the TOF resolution model in mm")
-physics_group.add_argument("--num_true_counts", type=int, default=int(4e6), help="number of true coincidences to simulate")
+physics_group = parser.add_argument_group("Physics / simulation parameters")
+physics_group.add_argument(
+    "--fwhm_mm",
+    type=float,
+    default=2.5,
+    help="FWHM of the image space resolution model in mm",
+)
+physics_group.add_argument(
+    "--tof_fwhm_mm",
+    type=float,
+    default=20.0,
+    help="FWHM of the TOF resolution model in mm",
+)
+physics_group.add_argument(
+    "--num_true_counts",
+    type=int,
+    default=int(4e6),
+    help="number of true coincidences to simulate",
+)
 
 # Efficiency parameters group
-efficiency_group = parser.add_argument_group('Detection Efficiency Parameters')
-efficiency_group.add_argument("--uniform_crystal_eff", action="store_true", help="use uniform crystal efficiencies, otherwise use a random distribution")
-efficiency_group.add_argument("--uniform_sg_eff", action="store_true", help="use uniform symmetry group (module pair) efficiencies, otherwise pseudo random pattern is used")
+efficiency_group = parser.add_argument_group("Detection Efficiency Parameters")
+efficiency_group.add_argument(
+    "--uniform_crystal_eff",
+    action="store_true",
+    help="use uniform crystal efficiencies, otherwise use a random distribution",
+)
+efficiency_group.add_argument(
+    "--uniform_sg_eff",
+    action="store_true",
+    help="use uniform symmetry group (module pair) efficiencies, otherwise pseudo random pattern is used",
+)
 
 # Time block configuration group
-time_group = parser.add_argument_group('Time Block Configuration')
-time_group.add_argument("--num_time_blocks", type=int, default=3, help="number of time blocks to split the data into")
-time_group.add_argument("--event_block_duration", type=int, default=100, help="duration of each time block in ms")
+time_group = parser.add_argument_group("Time Block Configuration")
+time_group.add_argument(
+    "--num_time_blocks",
+    type=int,
+    default=3,
+    help="number of time blocks to split the data into",
+)
+time_group.add_argument(
+    "--event_block_duration",
+    type=int,
+    default=100,
+    help="duration of each time block in ms",
+)
 
 # Reconstruction and analysis group
-recon_group = parser.add_argument_group('Reconstruction and Analysis')
-recon_group.add_argument("--num_epochs_mlem", type=int, default=0, help="number of epochs for MLEM reconstruction of histogrammed data, 0 means no MLEM reconstruction")
-recon_group.add_argument("--check_backprojection", default=False, action="store_true", help="check the backprojection of the TOF histogram and LM data")
+recon_group = parser.add_argument_group("Reconstruction and Analysis")
+recon_group.add_argument(
+    "--num_epochs_mlem",
+    type=int,
+    default=0,
+    help="number of epochs for MLEM reconstruction of histogrammed data, 0 means no MLEM reconstruction",
+)
+recon_group.add_argument(
+    "--check_backprojection",
+    default=False,
+    action="store_true",
+    help="check the backprojection of the TOF histogram and LM data",
+)
 
 # Visualization and debugging group
-visual_group = parser.add_argument_group('Visualization and Debugging')
-visual_group.add_argument("--skip_plots", action="store_true", help="skip plotting the scanner geometry and TOF profile")
+visual_group = parser.add_argument_group("Visualization and Debugging")
+visual_group.add_argument(
+    "--skip_plots",
+    action="store_true",
+    help="skip plotting the scanner geometry and TOF profile",
+)
 
 # General options group
-general_group = parser.add_argument_group('General Options')
-general_group.add_argument("--seed", type=int, default=0, help="random seed for reproducibility")
+general_group = parser.add_argument_group("General Options")
+general_group.add_argument(
+    "--seed", type=int, default=0, help="random seed for reproducibility"
+)
 
 args = parser.parse_args()
 

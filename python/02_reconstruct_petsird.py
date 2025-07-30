@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import parallelproj
 import petsird
+import hashlib
 
 # for the parallelproj recon we can use cupy as array backend if available
 # otherwise we fall back to numpy
@@ -21,13 +22,44 @@ from utils import (
 )
 
 
+def get_params_hash(
+    img_shape: tuple[int, int, int],
+    voxel_size: tuple[float, float, float],
+    tof: bool,
+    att_img: np.ndarray | None = None,
+) -> str:
+    """Generate a hash string for all sensitivity image parameters."""
+    # Create a hash based on all parameters that affect sensitivity image calculation
+    hash_obj = hashlib.sha256()
+
+    # Add image shape
+    hash_obj.update(str(img_shape).encode())
+
+    # Add voxel size (convert to string with fixed precision to avoid floating point issues)
+    voxel_size_str = f"{voxel_size[0]:.6f},{voxel_size[1]:.6f},{voxel_size[2]:.6f}"
+    hash_obj.update(voxel_size_str.encode())
+
+    # Add TOF flag
+    hash_obj.update(str(tof).encode())
+
+    # Add attenuation image data if present
+    if att_img is not None:
+        hash_obj.update(att_img.tobytes())
+    else:
+        hash_obj.update(b"no_attenuation")
+
+    # Return first 12 characters to reduce collision probability with more parameters
+    return hash_obj.hexdigest()[:6]
+
+
 # %%
 ################################################################################
 #### PARSE THE COMMAND LINE ####################################################
 ################################################################################
 
 parser = argparse.ArgumentParser(
-    description="PETSIRD analytic simulator reconstruction"
+    description="PETSIRD analytic simulator reconstruction",
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
 parser.add_argument("fname", type=str, help="Path to the PETSIRD listmode file")
 parser.add_argument(
@@ -210,7 +242,10 @@ if unity_sens_img:
     print("Using ones as sensitivity image ...")
     sens_img = xp.ones(img_shape, dtype="float32")
 else:
-    sens_img_path = Path(fname).with_suffix(".sens_img.npy")
+    # Generate hash for all sensitivity parameters
+    params_hash = get_params_hash(img_shape, voxel_size, tof, att_img)
+
+    sens_img_path = Path(fname).with_name(f"{Path(fname).stem}_sens_{params_hash}.npy")
 
     if sens_img_path.exists():
         print(f"Loading sensitivity image from {sens_img_path}")
@@ -235,25 +270,25 @@ else:
 
     xp.save(sens_img_path, sens_img)
 
-# %%
-################################################################################
-### CHECK WHETHER THE CALC SENS IMAGE MATCHES THE REF. SENSE IMAGE #############
-################################################################################
-
-ref_sens_img_path = Path(fname).parent / "reference_sensitivity_image.npy"
-
-if ref_sens_img_path.exists():
-    print(f"loading reference sensitivity image from {ref_sens_img_path}")
-    ref_sens_img = np.load(ref_sens_img_path)
-    if ref_sens_img.shape == sens_img.shape:
-        if np.allclose(np.asarray(sens_img), ref_sens_img):
-            print(
-                f"calculated sensitivity image matches reference image {ref_sens_img_path}"
-            )
-        else:
-            print(
-                f"calculated sensitivity image does NOT match reference image {ref_sens_img_path}"
-            )
+## %%
+#################################################################################
+#### CHECK WHETHER THE CALC SENS IMAGE MATCHES THE REF. SENSE IMAGE #############
+#################################################################################
+#
+# ref_sens_img_path = Path(fname).parent / "reference_sensitivity_image.npy"
+#
+# if ref_sens_img_path.exists():
+#    print(f"loading reference sensitivity image from {ref_sens_img_path}")
+#    ref_sens_img = np.load(ref_sens_img_path)
+#    if ref_sens_img.shape == sens_img.shape:
+#        if np.allclose(np.asarray(sens_img), ref_sens_img):
+#            print(
+#                f"calculated sensitivity image matches reference image {ref_sens_img_path}"
+#            )
+#        else:
+#            print(
+#                f"calculated sensitivity image does NOT match reference image {ref_sens_img_path}"
+#            )
 
 # %%
 ################################################################################
@@ -325,25 +360,32 @@ proj = parallelproj.ListmodePETProjector(
 
 non_tof_backproj = proj.adjoint(xp.ones(coords0.shape[0], dtype="float32"))
 
-xp.save(Path(fname).with_suffix(".non_tof_backproj.npy"), non_tof_backproj)
+non_tof_backproj_path = Path(fname).with_name(
+    f"{Path(fname).stem}_nontof_backproj_{params_hash}.npy"
+)
+xp.save(non_tof_backproj_path, non_tof_backproj)
 
 #### HACK assumes same TOF parameters for all module type pairs
-sigma_tof = scanner_info.tof_resolution[0][0] / 2.35
-tof_bin_edges = scanner_info.tof_bin_edges[0][0].edges
-num_tofbins = tof_bin_edges.size - 1
-tofbin_width = float(tof_bin_edges[1] - tof_bin_edges[0])
+if tof:
+    sigma_tof = scanner_info.tof_resolution[0][0] / 2.35
+    tof_bin_edges = scanner_info.tof_bin_edges[0][0].edges
+    num_tofbins = tof_bin_edges.size - 1
+    tofbin_width = float(tof_bin_edges[1] - tof_bin_edges[0])
 
-tof_params = parallelproj.TOFParameters(
-    num_tofbins=num_tofbins, tofbin_width=tofbin_width, sigma_tof=sigma_tof
-)
+    tof_params = parallelproj.TOFParameters(
+        num_tofbins=num_tofbins, tofbin_width=tofbin_width, sigma_tof=sigma_tof
+    )
 
-proj.tof_parameters = tof_params
-proj.event_tofbins = xp.asarray(signed_tof_bins).copy()
-proj.tof = True
+    proj.tof_parameters = tof_params
+    proj.event_tofbins = xp.asarray(signed_tof_bins).copy()
+    proj.tof = True
 
-tof_backproj = proj.adjoint(xp.ones(coords0.shape[0], dtype="float32"))
+    tof_backproj = proj.adjoint(xp.ones(coords0.shape[0], dtype="float32"))
 
-xp.save(Path(fname).with_suffix(".tof_backproj.npy"), tof_backproj)
+    tof_backproj_path = Path(fname).with_name(
+        f"{Path(fname).stem}_tof_backproj_{params_hash}.npy"
+    )
+    xp.save(tof_backproj_path, tof_backproj)
 
 del proj
 
@@ -412,7 +454,7 @@ for i_epoch in range(num_epochs):
         )
         recon *= tmp / sens_img
 
-opath = Path(fname).parent / f"lm_osem_{num_epochs}_{num_subsets}.npy"
+opath = Path(fname).with_name(f"lm_osem_{num_epochs}_{num_subsets}_{params_hash}.npy")
 xp.save(opath, recon)
 print(f"LM OSEM recon saved to {opath}")
 
