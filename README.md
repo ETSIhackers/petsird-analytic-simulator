@@ -77,21 +77,22 @@ options:
 value > 0 is given via `--num_epochs_mlem`. Otherwise it is skipped to save
 time.
 
-## NAC reconstructions a PETSIRD listmode file
+## Reconstructions of PETSIRD listmode files
 
-**NON-TOF NAC recon**
+
+### NON-TOF NAC recon
 
 ```
 python 02_reconstruct_petsird.py my_petsird_file.bin --non-tof
 ```
 
-**TOF NAC recon**
+### TOF NAC recon
 
 ```
 python 02_reconstruct_petsird.py my_petsird_file.bin
 ```
 
-## Creation of a simple 2-class air/water attenuation image
+### Creation of a simple 2-class air/water attenuation image
 
 To create a simple 2-class attenuation image, use
 
@@ -101,15 +102,14 @@ python 03_create_two_class_att_img.py tof_back_proj_file.npy
 
 which uses the TOF backprojection created by the TOF NAC recon script above.
 
-## AC reconstructions a PETSIRD listmode file
 
-**NON-TOF AC recon**
+### NON-TOF AC recon
 
 ```
 python 02_reconstruct_petsird.py my_petsird_file.bin --non-tof --attenuation_image my_att_img.npy
 ```
 
-**TOF AC recon**
+### TOF AC recon
 
 ```
 python 02_reconstruct_petsird.py my_petsird_file.bin --non-tof --attenuation_image my_att_img.npy
