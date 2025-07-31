@@ -15,7 +15,7 @@ conda activate petsird-analytic-simulator
 cd python
 ```
 
-## Simulate petsird LM data (work in progress)
+## Simulate petsird LM data
 
 ```
 python 01_analytic_petsird_lm_simulator.py
@@ -77,9 +77,43 @@ options:
 value > 0 is given via `--num_epochs_mlem`. Otherwise it is skipped to save
 time.
 
-## Run a listmode OSEM recon on the simulated
+## NAC reconstructions a PETSIRD listmode file
+
+**NON-TOF NAC recon**
+
+```
+python 02_reconstruct_petsird.py my_petsird_file.bin --non-tof
+```
+
+**TOF NAC recon**
 
 ```
 python 02_reconstruct_petsird.py my_petsird_file.bin
 ```
+
+## Creation of a simple 2-class air/water attenuation image
+
+To create a simple 2-class attenuation image, use
+
+```
+python 03_create_two_class_att_img.py tof_back_proj_file.npy
+```
+
+which uses the TOF backprojection created by the TOF NAC recon script above.
+
+## AC reconstructions a PETSIRD listmode file
+
+**NON-TOF AC recon**
+
+```
+python 02_reconstruct_petsird.py my_petsird_file.bin --non-tof --attenuation_image my_att_img.npy
+```
+
+**TOF AC recon**
+
+```
+python 02_reconstruct_petsird.py my_petsird_file.bin --non-tof --attenuation_image my_att_img.npy
+```
+
+
 
