@@ -90,6 +90,7 @@ def backproject_efficiencies(
     all_detector_centers: list[np.ndarray],
     img_shape: tuple[int, int, int],
     voxel_size: tuple[float, float, float],
+    img_origin: np.ndarray,  # xp.array
     tof: bool = False,
     verbose: bool = False,
     xp: ModuleType = np,
@@ -234,7 +235,7 @@ def backproject_efficiencies(
             for i_mod_1 in range(num_modules_1):
 
                 # get the row of the SGID LUT for the current module type
-                sgids = all_module_pair_sgidluts[0][0][i_mod_1].copy()
+                sgids = all_module_pair_sgidluts[mod_type_1][mod_type_2][i_mod_1].copy()
 
                 # neglect the lower triangle of the SGID LUT to make sure we
                 # only back-project every module pair once
@@ -359,6 +360,7 @@ def backproject_efficiencies(
                     end_coords,
                     img_shape,
                     voxel_size,
+                    img_origin=img_origin,
                 )
 
                 if tof:

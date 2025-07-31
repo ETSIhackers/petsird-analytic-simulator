@@ -259,6 +259,7 @@ else:
             all_detector_centers,
             img_shape,
             voxel_size,
+            img_origin,
             verbose=verbose,
             tof=tof,
             xp=xp,
