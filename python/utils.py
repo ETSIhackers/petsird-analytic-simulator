@@ -349,7 +349,6 @@ def read_listmode_prompt_events(
     store_energy_bins: bool = True,
     unity_effs: bool = False,
     verbose: bool = False,
-    flip_tofbin_sign: bool = False,
     with_calibration_factor: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """read all prompt events and convert them to LOR coordinates, TOF bins and efficiencies
@@ -442,11 +441,7 @@ def read_listmode_prompt_events(
         coords0.append(all_detector_centers[m1][mod_0, el_0])
         coords1.append(all_detector_centers[m2][mod_1, el_1])
 
-        num_tofbins = scanner_info.tof_bin_edges[m1][m2].number_of_bins()
-        if flip_tofbin_sign:
-            tof_bins.append(num_tofbins - 1 - tof_idx)
-        else:
-            tof_bins.append(tof_idx)
+        tof_bins.append(tof_idx)
 
         if unity_effs:
             effs.append(np.ones(det_bin_0.size, dtype="float32"))
