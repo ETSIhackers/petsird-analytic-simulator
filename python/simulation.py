@@ -207,9 +207,11 @@ def create_petsird_header(
             efficiency_model, config, num_energy_bins
         ),
     )
-    # we only store prompt (true) coincidences, all other event types (singles,
-    # delayeds, triples, quadruples) keep the default policy NONE
-    scanner.prompt_event_policy = petsird.CoincidencePolicy.REJECT_HIGHER_MULTIPLES
+    # we only store prompt coincidences, all other event types (singles, delayeds,
+    # triples, quadruples) keep the default policy NONE.
+    # All pairs of singles within the coincidence window are coincidences
+    # (multiples are stored as all pairs; the simulation itself creates no multiples)
+    scanner.prompt_event_policy = petsird.CoincidencePolicy.MULTIPLES_AS_ALL_COINCIDENCES
 
     exam = petsird.ExamInformation(
         modality="PT", patient=petsird.DICOMPatientInformation(patient_id="42")

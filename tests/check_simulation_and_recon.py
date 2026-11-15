@@ -128,7 +128,7 @@ check(
     f"({', '.join(m.name for m in materials.values())})",
 )
 check(
-    scanner.prompt_event_policy == petsird.CoincidencePolicy.REJECT_HIGHER_MULTIPLES
+    scanner.prompt_event_policy == petsird.CoincidencePolicy.MULTIPLES_AS_ALL_COINCIDENCES
     and scanner.delayed_event_policy == petsird.CoincidencePolicy.NONE,
     "event policies",
 )
