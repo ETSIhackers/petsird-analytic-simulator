@@ -1,4 +1,4 @@
-"""analytic simulation of PETSIRD v0.13.1 listmode data for a block PET scanner
+"""analytic simulation of PETSIRD v0.13.2 listmode data for a block PET scanner
 
 We simulate true (unscattered) TOF coincidences including the effect of attenuation
 (of a water body), detecting element (crystal) efficiencies and module pair
@@ -63,7 +63,7 @@ def positive_int(arg):
 # parse the command line
 
 parser = argparse.ArgumentParser(
-    description="Analytic simulation of PETSIRD v0.13.1 listmode data for a block PET scanner",
+    description="Analytic simulation of PETSIRD v0.13.2 listmode data for a block PET scanner",
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
 
