@@ -142,7 +142,7 @@ image_group.add_argument(
     "--phantom",
     type=str,
     default="uniform_cylinder",
-    choices=["uniform_cylinder", "squares", "points"],
+    choices=["uniform_cylinder", "offcenter_cylinder", "points"],
     help="phantom to simulate",
 )
 image_group.add_argument(
@@ -352,16 +352,35 @@ tmp = np.linspace(-1, 1, img_shape[0])
 X0, X1 = np.meshgrid(tmp, tmp, indexing="ij")
 disk = np.astype(np.sqrt(X0**2 + X1**2) < 0.7, "float32")
 
+# coordinates (mm) of all voxel centers (the image is centered at (0,0,0))
+X, Y, Z = np.meshgrid(
+    *[(np.arange(n) - (n - 1) / 2) * vs for n, vs in zip(img_shape, voxel_size)],
+    indexing="ij",
+)
+
 img = np.zeros(img_shape, dtype=np.float32)
+
+# attenuating water body (as boolean mask)
+# (by default a centered water cylinder covering all slices)
+water_body = np.broadcast_to(disk[..., None].astype(bool), img_shape)
 
 if phantom == "uniform_cylinder":
     for i in range(2, img_shape[2] - 2):
         img[..., i] = disk
-elif phantom == "squares":
-    img[2:-12, 32:-20, 2:-1] = 3
-    img[24:-40, 36:-28, 4:-2] = 9
-    img[76:78, 68:72, :-2] = 18
-    img[14:20, 35:75, 5:-3] = 0
+elif phantom == "offcenter_cylinder":
+    # off-center (transaxially and axially) cylinder with 3 hot spheres of different
+    # size, contrast and position, such that axis flips, swaps and mirroring (e.g. in
+    # readers of the PETSIRD data) are visible in the reconstructions
+    cylinder = (np.hypot(X - 10, Y + 5) <= 30) & (Z >= -12) & (Z <= 16)
+    img[cylinder] = 1
+    # (center x, y, z in mm, radius in mm, activity)
+    for (cx, cy, cz), radius, activity in [
+        ((22, -5, 6), 8, 3),
+        ((5, 12, -4), 6, 2),
+        ((0, -18, 10), 4, 3),
+    ]:
+        img[np.sqrt((X - cx) ** 2 + (Y - cy) ** 2 + (Z - cz) ** 2) <= radius] = activity
+    water_body = cylinder
 elif phantom == "points":
     img[img_shape[0] // 2, img_shape[1] // 2, img_shape[2] // 2] = 8
     img[img_shape[0] // 2, img_shape[1] // 6, img_shape[2] // 2] = 4
@@ -376,11 +395,10 @@ else:
 
 # %%
 # setup of the attenuation image (linear attenuation coefficients in mm^-1)
-# all phantoms are embedded in a water cylinder covering all slices
+# all phantoms are embedded in a water body (see phantom setup)
 
 mu_water = 0.0096  # linear attenuation coefficient of water at 511 keV (mm^-1)
-att_img = np.zeros(img_shape, dtype=np.float32)
-att_img[...] = mu_water * disk[..., None]
+att_img = np.where(water_body, mu_water, 0).astype(np.float32)
 
 # save the attenuation image (can be used for attenuation correction in the recon)
 np.save(output_dir / "attenuation_image.npy", att_img)

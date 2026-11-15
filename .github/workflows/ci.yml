@@ -41,7 +41,7 @@ jobs:
         run: |
           python 01_analytic_petsird_lm_simulator.py \
             --output_dir "$OUT_DIR" \
-            --phantom squares \
+            --phantom offcenter_cylinder \
             --img_shape 55,55,19 \
             --num_true_counts 200000 \
             --check_backprojection \

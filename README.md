@@ -45,7 +45,16 @@ data/sim_uniform_cylinder_4000000_0
 `-- tof_profile_and_sensitivity_image.png
 ```
 
-All phantoms are embedded in a water cylinder (linear attenuation coefficient
+The following phantoms are available (`--phantom`):
+
+- `uniform_cylinder`: uniform cylinder centered in the field of view
+- `offcenter_cylinder`: cylinder that is off-center (transaxially and axially) with
+  3 hot spheres of different size (radius 8, 6, 4 mm), contrast (3:1, 2:1, 3:1) and
+  position. Since the phantom has no symmetry, axis flips, swaps and mirroring
+  (e.g. in readers of the PETSIRD data) are visible in the reconstructions.
+- `points`: point sources (in a centered water cylinder)
+
+All phantoms are embedded in a water body (linear attenuation coefficient
 0.0096 / mm) whose attenuation is included in the simulated data. The attenuation
 image (in 1 / mm) is saved as `attenuation_image.npy` and can be used for
 attenuation correction in the reconstruction (see below).
@@ -69,7 +78,7 @@ Output Configuration:
   --skip_writing        skip writing the LM data to a file (default: False)
 
 Image and Phantom Configuration:
-  --phantom {uniform_cylinder,squares,points}
+  --phantom {uniform_cylinder,offcenter_cylinder,points}
                         phantom to simulate (default: uniform_cylinder)
   --img_shape IMG_SHAPE
                         shape of the image to simulate (default: (55, 55, 19))
@@ -214,7 +223,7 @@ These checks are run in the CI:
 
 ```
 cd python
-python 01_analytic_petsird_lm_simulator.py --output_dir ../ci_output --phantom squares --num_true_counts 200000 --check_backprojection --skip_plots
+python 01_analytic_petsird_lm_simulator.py --output_dir ../ci_output --phantom offcenter_cylinder --num_true_counts 200000 --check_backprojection --skip_plots
 python 02_reconstruct_petsird.py ../ci_output/simulated_petsird_lm_file.bin --img_shape 55 55 19 --num_epochs 1
 python 02_reconstruct_petsird.py ../ci_output/simulated_petsird_lm_file.bin --img_shape 55 55 19 --num_epochs 1 --attenuation_image ../ci_output/attenuation_image.npy
 cd ..
