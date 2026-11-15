@@ -110,8 +110,8 @@ image_group = parser.add_argument_group("Image and Phantom Configuration")
 image_group.add_argument(
     "--phantom",
     type=str,
-    default="cylinder",
-    choices=["cylinder", "uniform_cylinder", "squares", "points"],
+    default="uniform_cylinder",
+    choices=["uniform_cylinder", "squares", "points"],
     help="phantom to simulate",
 )
 image_group.add_argument(

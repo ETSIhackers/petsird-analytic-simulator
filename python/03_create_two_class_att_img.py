@@ -2,7 +2,36 @@ import numpy as np
 import argparse
 
 from pathlib import Path
-from skimage.filters import threshold_otsu
+
+
+def threshold_otsu(image: np.ndarray, nbins: int = 256) -> float:
+    """Otsu threshold of an image (numpy re-implementation of skimage.filters.threshold_otsu)
+
+    The threshold is the center of the histogram bin that maximizes the
+    between-class variance of the two classes "<= threshold" and "> threshold".
+    """
+    image = np.asarray(image, dtype=np.float64).ravel()
+    vmin, vmax = float(image.min()), float(image.max())
+
+    if vmin == vmax:
+        return vmin
+
+    hist, bin_edges = np.histogram(image, bins=nbins, range=(vmin, vmax))
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    hist = hist.astype(np.float64)
+
+    # class probabilities and means for all possible thresholds
+    weight1 = np.cumsum(hist)
+    weight2 = np.cumsum(hist[::-1])[::-1]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mean1 = np.cumsum(hist * bin_centers) / weight1
+        mean2 = (np.cumsum((hist * bin_centers)[::-1]) / weight2[::-1])[::-1]
+
+    # between-class variance for a threshold between bin i and i+1
+    variance12 = weight1[:-1] * weight2[1:] * (mean1[:-1] - mean2[1:]) ** 2
+
+    return float(bin_centers[np.nanargmax(variance12)])
+
 
 
 parser = argparse.ArgumentParser(
