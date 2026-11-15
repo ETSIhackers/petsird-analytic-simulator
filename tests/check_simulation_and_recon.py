@@ -15,6 +15,9 @@ reconstruction code:
 - a TOF LM back projection of the events in the PETSIRD file matches the one
   calculated by the simulator before writing (checks detection bin swapping and
   TOF bin mirroring)
+- the TOF information follows the PETSIRD definition: the emission positions decoded
+  from the TOF bins (only using the PETSIRD specification, no parallelproj) agree with
+  the positions expected from the ground truth activity along the LORs
 - vectorized efficiencies match petsird.helpers.get_detection_efficiency
 
 If the reconstruction outputs exist, the sensitivity images and the LM back projections
@@ -185,6 +188,49 @@ else:
     check(False, "simulator TOF LM back projection exists (run with --check_backprojection)")
 
 # %%
+# TOF sign / scale following the PETSIRD specification (independent of parallelproj)
+#
+# PETSIRD stores (t1 - t2) * c / 2 where t1 / t2 are the arrival times at the first /
+# second detection bin. A positive value means that the photon arrived first at the
+# second detection bin, i.e. that the emission happened closer to the second detection
+# bin. We decode the emission position along each LOR (relative to the LOR center,
+# positive towards the second detection bin) from the center of its TOF bin and compare
+# it to the position expected from the ground truth activity along the LOR.
+# (Attenuation and detection efficiencies are constant along a LOR and do not change
+# the expected position.) For the correct convention, the slope of the regression of
+# decoded vs expected positions is close to +1, for a flipped one close to -1.
+
+rng = np.random.default_rng(0)
+idx = rng.choice(num_events, min(20000, num_events), replace=False)
+
+tof_bin_centers = 0.5 * (tof_bin_edges[1:] + tof_bin_edges[:-1]).astype("float64")
+decoded_pos = tof_bin_centers[tof_idx[idx]]
+
+p1 = adp[det_bin_0[idx]].astype("float64")
+p2 = adp[det_bin_1[idx]].astype("float64")
+lor_length = np.linalg.norm(p2 - p1, axis=1)
+lor_dir = (p2 - p1) / lor_length[:, None]
+lor_center = 0.5 * (p1 + p2)
+
+gt_img = np.load(out_dir / "ground_truth_image.npy")
+# sample the ground truth image (nearest voxel) at 401 points along every LOR
+t = np.linspace(-0.5, 0.5, 401)[None, :] * lor_length[:, None]
+sample_pos = lor_center[:, None, :] + t[..., None] * lor_dir[:, None, :]
+vox = np.rint(sample_pos / np.asarray(voxel_size) + (np.asarray(img_shape) - 1) / 2).astype(int)
+inside = np.all((vox >= 0) & (vox < np.asarray(img_shape)), axis=-1)
+vox = np.clip(vox, 0, np.asarray(img_shape) - 1)
+act = np.where(inside, gt_img[vox[..., 0], vox[..., 1], vox[..., 2]], 0)
+
+has_act = act.sum(1) > 0
+expected_pos = (act * t).sum(1)[has_act] / act.sum(1)[has_act]
+slope = np.polyfit(expected_pos, decoded_pos[has_act], 1)[0]
+check(
+    0.5 < slope < 1.5,
+    f"TOF bins follow the PETSIRD convention: slope of decoded vs expected emission "
+    f"positions {slope:+.2f} (flipped convention: -1)",
+)
+
+# %%
 # vectorized efficiencies vs petsird.helpers.get_detection_efficiency
 
 det_bin_effs = np.asarray(det_effs.detection_bin_efficiencies[0])
@@ -202,7 +248,6 @@ sgid = np.array(
 )
 check(bool(np.all(sgid >= 0)), "all events are in module pairs in coincidence")
 
-rng = np.random.default_rng(0)
 idx = rng.choice(num_events, min(2000, num_events), replace=False)
 effs = (
     det_effs.calibration_factor

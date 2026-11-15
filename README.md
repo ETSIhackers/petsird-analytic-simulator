@@ -79,7 +79,7 @@ Image and Phantom Configuration:
 Physics / simulation parameters:
   --fwhm_mm FWHM_MM     FWHM of the image space resolution model in mm (default: 2.5)
   --tof_fwhm_mm TOF_FWHM_MM
-                        FWHM of the TOF resolution model in mm (default: 20.0)
+                        FWHM of the TOF resolution model in mm (default: 10.0)
   --num_true_counts NUM_TRUE_COUNTS
                         number of true coincidences to simulate (default: 4000000)
 

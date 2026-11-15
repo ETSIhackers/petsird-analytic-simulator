@@ -169,7 +169,7 @@ physics_group.add_argument(
 physics_group.add_argument(
     "--tof_fwhm_mm",
     type=float,
-    default=20.0,
+    default=10.0,
     help="FWHM of the TOF resolution model in mm",
 )
 physics_group.add_argument(
