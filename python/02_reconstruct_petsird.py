@@ -279,10 +279,14 @@ elif num_delayeds > 0:
         UserWarning,
     )
 
-# eps added to the expected counts of all events (if the contamination is not strictly
-# positive): 1e-6 x mean counts per data bin
-eps = 1e-6 * events["coords0"].shape[0] / get_num_data_bins(scanner_info, tof)
-print("Starting parallelproj LM OSEM reconstruction ...")
+# eps added to the expected counts of all events: only needed if the contamination is
+# not strictly positive (e.g. without randoms correction) to avoid divisions by zero,
+# then 1e-6 x mean counts per data bin (as recommended by parallelproj)
+if contamination_list is not None and np.min(contamination_list) > 0:
+    eps = 0.0
+else:
+    eps = 1e-6 * events["coords0"].shape[0] / get_num_data_bins(scanner_info, tof)
+print(f"Starting parallelproj LM OSEM reconstruction (eps = {eps:.2e}) ...")
 
 # negative Poisson log-likelihoods of all subsets
 subset_objectives = create_lm_subset_objectives(

@@ -314,16 +314,21 @@ def create_lm_subset_objectives(
     model G and the additive contamination s_e (e.g. randoms, scatter; 0 if not given).
     The sensitivity image of a subset is approximated by sens_img / num_subsets.
 
-    If the contamination is not strictly positive, eps is added to the expected counts
-    of all events to avoid divisions by zero for events with zero expected counts
-    (see parallelproj.functions.NegPoissonLogLListmode).
+    eps is added to the expected counts of all events (see
+    parallelproj.functions.NegPoissonLogLListmode). It is only needed if the
+    contamination is not strictly positive, to avoid divisions by zero for events with
+    zero expected counts (e.g. when the image is 0 along their LOR); otherwise use
+    eps = 0 (exact log-likelihood).
     """
     num_events = coords0.shape[0]
     if contamination_list is None:
         contamination_list = np.zeros(num_events, dtype=np.float32)
     contamination_list = xp.asarray(contamination_list, dtype=xp.float32)
-    if float(xp.min(contamination_list)) > 0:
-        eps = 0.0
+    if eps <= 0 and float(xp.min(contamination_list)) <= 0:
+        raise ValueError(
+            "eps > 0 is required if the contamination is not strictly positive "
+            "(expected counts of events can be 0)"
+        )
 
     effs = xp.asarray(effs, dtype="float32")
     if att_img is not None:

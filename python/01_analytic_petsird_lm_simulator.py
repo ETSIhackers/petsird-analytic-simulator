@@ -219,22 +219,23 @@ sens_img = fwd_op.adjoint(np.ones(fwd_op.out_shape, dtype=np.float32))
 np.save(output_dir / "reference_sensitivity_image.npy", sens_img)
 
 # %%
-# expected and noisy TOF histogram (scaled to the requested number of counts)
+# expected trues and randoms, and Poisson realizations of the prompts and delayeds
+# (TOF histograms)
 
-expected_counts = fwd_op(img)
-scale_fac = args.num_true_counts / expected_counts.sum()
+expected_trues = fwd_op(img)
+scale_fac = args.num_true_counts / expected_trues.sum()
 img *= scale_fac
-expected_counts *= scale_fac
+expected_trues *= scale_fac
 
 # noise-free randoms (constant for all LORs and TOF bins, 0 for LORs with a dead
 # crystal) with an expected random fraction R / (T + R)
-num_randoms = args.random_fraction / (1 - args.random_fraction) * args.num_true_counts
-randoms, randoms_per_bin = randoms_expectation(
-    lor_efficiencies(efficiency_model, lor_desc), tof_params.num_tofbins, num_randoms
+total_expected_randoms = args.random_fraction / (1 - args.random_fraction) * args.num_true_counts
+expected_randoms, expected_randoms_per_bin = randoms_expectation(
+    lor_efficiencies(efficiency_model, lor_desc), tof_params.num_tofbins, total_expected_randoms
 )
 
 # prompts: Poisson realization of trues + randoms
-emission_data = np.random.poisson(expected_counts + randoms)
+prompts_histogram = np.random.poisson(expected_trues + expected_randoms)
 
 # true expectation of the randoms (e.g. to test randoms corrections)
 with open(output_dir / "randoms_expectation.json", "w", encoding="UTF-8") as f:
@@ -242,8 +243,8 @@ with open(output_dir / "randoms_expectation.json", "w", encoding="UTF-8") as f:
         {
             "random_fraction": args.random_fraction,
             "expected_trues": float(args.num_true_counts),
-            "expected_randoms": float(num_randoms),
-            "expected_randoms_per_lor_and_tof_bin": randoms_per_bin,
+            "expected_randoms": float(total_expected_randoms),
+            "expected_randoms_per_lor_and_tof_bin": expected_randoms_per_bin,
             "num_tofbins": tof_params.num_tofbins,
             "description": "the randoms are constant for all LORs (pairs of detection bins "
             "of modules in coincidence) of detecting elements with non-zero efficiency and "
@@ -260,22 +261,22 @@ np.save(output_dir / "ground_truth_image.npy", img)
 if args.num_epochs_mlem > 0:
     recon = histogram_mlem(
         fwd_op,
-        emission_data,
+        prompts_histogram,
         sens_img,
         args.num_epochs_mlem,
-        contamination=randoms if args.random_fraction > 0 else None,
+        contamination=expected_randoms if args.random_fraction > 0 else None,
     )
     np.save(output_dir / f"reference_histogram_mlem_{args.num_epochs_mlem}_epochs.npy", recon)
 
 # %%
-# listmode events
+# listmode events of the prompts and delayeds
 
-events = histogram_to_listmode(emission_data, lor_desc, tof_params.num_tofbins)
+prompt_events = histogram_to_listmode(prompts_histogram, lor_desc, tof_params.num_tofbins)
 
 # delayeds: independent Poisson realization of the randoms
 if args.random_fraction > 0:
     delayed_events = histogram_to_listmode(
-        np.random.poisson(randoms), lor_desc, tof_params.num_tofbins
+        np.random.poisson(expected_randoms), lor_desc, tof_params.num_tofbins
     )
 
 if args.save_lm_backprojection:
@@ -283,18 +284,18 @@ if args.save_lm_backprojection:
     # (parallelproj uses unsigned TOF bins 0 ... num_tofbins - 1)
     scanner = lor_desc.scanner
     lm_proj = ListmodePETProjector(
-        scanner.get_lor_endpoints(events.start_module, events.start_el),
-        scanner.get_lor_endpoints(events.end_module, events.end_el),
+        scanner.get_lor_endpoints(prompt_events.start_module, prompt_events.start_el),
+        scanner.get_lor_endpoints(prompt_events.end_module, prompt_events.end_el),
         img_shape,
         tof_proj.voxel_size,
         img_origin=tof_proj.img_origin,
     )
     lm_proj.tof_parameters = tof_params
-    lm_proj.event_tofbins = events.tof_bin.astype(np.int16)
+    lm_proj.event_tofbins = prompt_events.tof_bin.astype(np.int16)
     lm_proj.tof = True
     np.save(
         output_dir / "lm_backprojection_tof.npy",
-        lm_proj.adjoint(np.ones(events.num_events, dtype=np.float32)),
+        lm_proj.adjoint(np.ones(prompt_events.num_events, dtype=np.float32)),
     )
 
 # %%
@@ -309,7 +310,7 @@ header = create_petsird_header(
     store_delayeds=args.random_fraction > 0,
 )
 det_bin_0, det_bin_1, tof_idx = to_petsird_coincidences(
-    events, scanner_config.num_det_els_per_module, num_energy_bins, tof_params.num_tofbins
+    prompt_events, scanner_config.num_det_els_per_module, num_energy_bins, tof_params.num_tofbins
 )
 petsird_delayeds = (
     to_petsird_coincidences(

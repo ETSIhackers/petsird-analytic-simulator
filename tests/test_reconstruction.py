@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from parallelproj.operators import GaussianFilterOperator
 from parallelproj.projectors import EqualBlockPETProjector
 
@@ -60,7 +61,8 @@ def test_lm_osem_finite_with_zero_sensitivity_and_zero_expectations():
     assert np.all(recon[0] == 0)
 
 
-def test_lm_objectives_use_eps_only_without_positive_contamination():
+def test_lm_objectives_eps():
+    """eps is used as given; eps = 0 requires a strictly positive contamination"""
     img_shape, voxel_size = (8, 8, 2), (2.0, 2.0, 2.0)
     img_origin = -(np.asarray(img_shape) - 1) / 2 * np.asarray(voxel_size)
     coords0 = np.array([[-20.0, 1.0, 0.0]] * 4, dtype="float32")
@@ -79,8 +81,12 @@ def test_lm_objectives_use_eps_only_without_positive_contamination():
         1e-3,
     )
     assert all(o.eps == 1e-3 for o in create_lm_subset_objectives(*args))
+
+    args_no_eps = args[:-1] + (0.0,)
+    with pytest.raises(ValueError):
+        create_lm_subset_objectives(*args_no_eps)
     with_contamination = create_lm_subset_objectives(
-        *args, contamination_list=np.full(4, 0.1, dtype="float32"), contamination_sum=1.0
+        *args_no_eps, contamination_list=np.full(4, 0.1, dtype="float32"), contamination_sum=1.0
     )
     assert all(o.eps == 0.0 for o in with_contamination)
 
