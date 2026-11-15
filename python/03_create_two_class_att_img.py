@@ -1,7 +1,10 @@
 import numpy as np
 import argparse
+import matplotlib.pyplot as plt
 
 from pathlib import Path
+
+from viewer import show_vol_cuts
 
 
 def threshold_otsu(image: np.ndarray, nbins: int = 256) -> float:
@@ -104,6 +107,9 @@ print(f"Attenuation image saved to {att_img_file}")
 
 # %%
 
-import pymirc.viewer as pv
-
-pv.ThreeAxisViewer([corrected_backproj, att_img])
+# keep references to the viewers (widgets) to keep them interactive
+viewers = [
+    show_vol_cuts(corrected_backproj, fig_title="sens. corrected TOF backprojection"),
+    show_vol_cuts(att_img, fig_title="attenuation image"),
+]
+plt.show()

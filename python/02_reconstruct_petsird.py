@@ -23,6 +23,7 @@ from utils import (
     read_listmode_prompt_events,
     backproject_efficiencies,
 )
+from viewer import show_vol_cuts
 
 
 def get_params_hash(
@@ -473,11 +474,14 @@ print(f"LM OSEM recon saved to {opath}")
 
 # %%
 # SHOW RECON
-import pymirc.viewer as pv
 
-if att_img is None:
-    vi = pv.ThreeAxisViewer([parallelproj.to_numpy_array(x) for x in [recon, sens_img]])
-else:
-    vi = pv.ThreeAxisViewer(
-        [parallelproj.to_numpy_array(x) for x in [recon, att_img, sens_img]]
-    )
+vols_to_show = {"LM OSEM recon": recon, "sensitivity image": sens_img}
+if att_img is not None:
+    vols_to_show["attenuation image"] = att_img
+
+# keep references to the viewers (widgets) to keep them interactive
+viewers = [
+    show_vol_cuts(vol, voxel_size=voxel_size, fig_title=title)
+    for title, vol in vols_to_show.items()
+]
+plt.show()

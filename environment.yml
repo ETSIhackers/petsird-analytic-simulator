@@ -8,5 +8,4 @@ dependencies:
   - array-api-compat>=1.7
   - parallelproj>=2.0.2,<3
   - petsird~=0.13.1
-  - pymirc>=0.29
   - ipython

@@ -10,6 +10,7 @@ of software supporting the PETSIRD standard for listmode data.
 Requirements:
 - [PETSIRD](https://github.com/ETSInitiative/PETSIRD) v0.13.x
 - [parallelproj](https://github.com/gschramm/parallelproj) v2.x (requires python >= 3.12)
+- matplotlib (plots and the interactive 3-axis viewer in `python/viewer.py`)
 
 ## Create your conda / mamba environment
 

@@ -220,12 +220,21 @@ recon_sens = sorted(out_dir.glob(f"{stem}_sens_*.npy"))
 recon_tof_back = sorted(out_dir.glob(f"{stem}_tof_backproj_*.npy"))
 
 if recon_sens and recon_tof_back:
-    # the simulator's sensitivity image uses a TOF sinogram projector, the reconstruction
-    # a TOF LM projector, which differ slightly in the normalization of the TOF kernels
-    d = rel_diff(np.load(out_dir / "reference_sensitivity_image.npy"), np.load(recon_sens[-1]))
-    check(d < 2e-3, f"recon sensitivity image matches simulator ({d:.1e})")
-    d = rel_diff(lm_back_tof, np.load(recon_tof_back[-1]))
-    check(d < 1e-4, f"recon TOF LM back projection matches PETSIRD events ({d:.1e})")
+    # there can be multiple recon outputs (e.g. TOF / non-TOF, with / without attenuation)
+    # - the (unweighted) TOF LM back projections all have to match
+    # - at least one sensitivity image (TOF without attenuation) has to match the
+    #   simulator's. The simulator's sensitivity image uses a TOF sinogram projector,
+    #   the reconstruction a TOF LM projector, which differ slightly in the normalization
+    #   of the TOF kernels.
+    ref_sens = np.load(out_dir / "reference_sensitivity_image.npy")
+    sens_diffs = {f.name: rel_diff(ref_sens, np.load(f)) for f in recon_sens}
+    for name, d in sens_diffs.items():
+        print(f"       {name}: rel. diff to simulator sensitivity image {d:.1e}")
+    d = min(sens_diffs.values())
+    check(d < 2e-3, f"a recon sensitivity image matches the simulator's ({d:.1e})")
+    for f in recon_tof_back:
+        d = rel_diff(lm_back_tof, np.load(f))
+        check(d < 1e-4, f"recon TOF LM back projection {f.name} matches PETSIRD events ({d:.1e})")
 else:
     print("no reconstruction outputs found - skipping reconstruction checks")
 
