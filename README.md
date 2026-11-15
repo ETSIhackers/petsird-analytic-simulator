@@ -224,6 +224,17 @@ attenuation correction. The 2-class attenuation image created by
 Reconstructions without attenuation correction are expected to be biased low
 (and to show "cupping").
 
+## Simulated data from the CI
+
+Every CI run uploads all outputs of the simulation and the reconstructions (the
+PETSIRD listmode file, ground truth / attenuation / sensitivity images,
+reconstructions, figures, `sim_parameters.json` and `provenance.json` with the
+commit and package versions) as a workflow artifact
+(`petsird-simulation-<phantom>-<counts>-<commit>`, kept for 90 days). They can be
+downloaded from the "Actions" tab of the repository (requires a GitHub login).
+Datasets with other phantoms / number of counts can be created by running the
+CI workflow manually ("Run workflow").
+
 ## Consistency checks
 
 `tests/check_simulation_and_recon.py` checks a simulated PETSIRD file (and its
