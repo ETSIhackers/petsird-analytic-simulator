@@ -1,16 +1,38 @@
-import numpy as np
-import matplotlib.pyplot as plt
+"""listmode OSEM reconstruction of PETSIRD (TOF) listmode data with parallelproj
+
+The building blocks are defined in
+- petsird_reader.py: reading and interpreting the PETSIRD data
+- reconstruction.py: image grid, sensitivity image, LM OSEM
+All cached / derived files are written next to the listmode file and are tagged
+with a fingerprint of the listmode file and a hash of the reconstruction parameters.
+"""
+
+import argparse
 from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
 import parallelproj
-from parallelproj.functions import NegPoissonLogLListmode
-from parallelproj.operators import (
-    CompositeLinearOperator,
-    ElementwiseMultiplicationOperator,
-    GaussianFilterOperator,
-)
-from parallelproj.projectors import ListmodePETProjector
 import petsird
-import hashlib
+from parallelproj.operators import GaussianFilterOperator
+from parallelproj.projectors import ListmodePETProjector
+
+from geometry_plots import plot_petsird_geometry, read_first_events
+from petsird_reader import (
+    check_header_support,
+    get_all_detector_centers,
+    get_num_data_bins,
+    get_tof_parameters,
+    read_listmode_prompt_events,
+)
+from reconstruction import (
+    default_image_grid,
+    lm_osem,
+    recon_params_hash,
+    sensitivity_image,
+)
+from utils import FWHM_PER_SIGMA, lm_file_fingerprint, load_or_compute
+from viewer import show_vol_cuts
 
 # for the parallelproj recon we can use cupy as array backend if available
 # otherwise we fall back to numpy
@@ -18,82 +40,22 @@ try:
     import cupy as xp
 except ModuleNotFoundError:
     import numpy as xp
-import argparse
 
 print(f"Using {xp.__name__} for parallelproj reconstructions")
 
-from utils import (
-    FWHM_PER_SIGMA,
-    check_header_support,
-    get_all_detector_centers,
-    get_num_data_bins,
-    get_tof_parameters,
-    lm_file_fingerprint,
-    read_listmode_prompt_events,
-    backproject_efficiencies,
-)
-from geometry_plots import plot_petsird_geometry, read_first_events
-from viewer import show_vol_cuts
-
-
-def get_params_hash(
-    img_shape: tuple[int, int, int],
-    voxel_size: tuple[float, float, float],
-    tof: bool,
-    att_img: np.ndarray | None = None,
-    fwhm_mm: float | None = None,
-) -> str:
-    """Generate a hash string for all sensitivity image parameters."""
-    # Create a hash based on all parameters that affect sensitivity image calculation
-    hash_obj = hashlib.sha256()
-
-    # Add image shape
-    hash_obj.update(str(img_shape).encode())
-
-    # Add voxel size (convert to string with fixed precision to avoid floating point issues)
-    voxel_size_str = f"{voxel_size[0]:.6f},{voxel_size[1]:.6f},{voxel_size[2]:.6f}"
-    hash_obj.update(voxel_size_str.encode())
-
-    # Add TOF flag
-    hash_obj.update(str(tof).encode())
-
-    # Add FWHM of the resolution model (applied to the cached sensitivity image)
-    if fwhm_mm is not None:
-        hash_obj.update(f"{fwhm_mm:.6f}".encode())
-
-    # Add attenuation image data if present
-    if att_img is not None:
-        hash_obj.update(att_img.tobytes())
-    else:
-        hash_obj.update(b"no_attenuation")
-
-    # Return first 12 characters to reduce collision probability with more parameters
-    return hash_obj.hexdigest()[:6]
-
-
 # %%
-################################################################################
-#### PARSE THE COMMAND LINE ####################################################
-################################################################################
+# parse the command line
 
 parser = argparse.ArgumentParser(
-    description="PETSIRD analytic simulator reconstruction",
+    description="LM OSEM reconstruction of PETSIRD listmode data",
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
 parser.add_argument("fname", type=str, help="Path to the PETSIRD listmode file")
 parser.add_argument(
-    "--img_shape",
-    type=int,
-    nargs=3,
-    default=None,
-    help="Shape of the image to be reconstructed",
+    "--img_shape", type=int, nargs=3, default=None, help="Shape of the image to be reconstructed"
 )
 parser.add_argument(
-    "--voxel_size",
-    type=float,
-    nargs=3,
-    default=[2.0, 2.0, 2.0],
-    help="Voxel size in mm",
+    "--voxel_size", type=float, nargs=3, default=[2.0, 2.0, 2.0], help="Voxel size in mm"
 )
 parser.add_argument(
     "--fwhm_mm",
@@ -102,391 +64,208 @@ parser.add_argument(
     help="FWHM in mm for Gaussian filter for resolution model",
 )
 parser.add_argument("--num_epochs", type=int, default=5, help="Number of OSEM epochs")
-parser.add_argument(
-    "--num_subsets", type=int, default=20, help="Number of OSEM subsets"
-)
-parser.add_argument(
-    "--verbose", action="store_true", help="Whether to print verbose output"
-)
+parser.add_argument("--num_subsets", type=int, default=20, help="Number of OSEM subsets")
+parser.add_argument("--verbose", action="store_true", help="Whether to print verbose output")
 parser.add_argument(
     "--unity_sens_img",
     action="store_true",
     help="Whether to skip sensitivity image calculation and use unity image",
 )
-parser.add_argument(
-    "--non-tof", action="store_true", help="Whether to disable TOF in recon"
-)
+parser.add_argument("--non-tof", action="store_true", help="Whether to disable TOF in recon")
 parser.add_argument(
     "--attenuation_image", type=str, default=None, help="Path to attenuation image"
 )
-
 args = parser.parse_args()
 
-fname = args.fname
-img_shape: list[int] | None = args.img_shape
+fname = Path(args.fname)
 voxel_size = tuple(args.voxel_size)
-fwhm_mm = args.fwhm_mm
-num_epochs = args.num_epochs
-num_subsets = args.num_subsets
-verbose = args.verbose
-unity_sens_img = args.unity_sens_img
 tof = not args.non_tof
-attenuation_image_fname: str | None = args.attenuation_image
 
 # %%
-################################################################################
-#### READ PETSIRD HEADER #######################################################
-################################################################################
+# read the PETSIRD header
 
-reader = petsird.BinaryPETSIRDReader(fname)
+reader = petsird.BinaryPETSIRDReader(str(fname))
 header: petsird.Header = reader.read_header()
 # raise errors / warnings for PETSIRD features that are not supported
 check_header_support(header)
 scanner_info: petsird.ScannerInformation = header.scanner
-scanner_geom: petsird.ScannerGeometry = scanner_info.scanner_geometry
-
-num_replicated_modules = scanner_geom.number_of_replicated_modules()
-print(f"Scanner with {num_replicated_modules} types of replicated modules.")
-
-# %%
-################################################################################
-### READ DETECTOR CENTERS ####################################################
-################################################################################
+print(
+    f"Scanner with {scanner_info.scanner_geometry.number_of_replicated_modules()} "
+    "types of replicated modules."
+)
 
 # all cached / derived files are tagged with a fingerprint of the listmode file
 # such that they are not reused for a different file with the same name
 lm_fingerprint = lm_file_fingerprint(fname)
-lm_stem = Path(fname).stem
 print(f"Listmode file fingerprint: {lm_fingerprint}")
 
-all_detector_centers_file = Path(fname).with_name(
-    f"{lm_stem}_detector_centers_{lm_fingerprint}.npz"
-)
 
-if not all_detector_centers_file.exists():
-    print("Calculating all detector centers ...")
-    all_detector_centers = get_all_detector_centers(scanner_geom)
-    np.savez_compressed(all_detector_centers_file, *all_detector_centers)
-    print(f"Detector centers saved to {all_detector_centers_file}")
-else:
-    print(f"Loading all detector centers from {all_detector_centers_file}")
-    with np.load(all_detector_centers_file) as data:
-        all_detector_centers = [data[name] for name in data.files]
+def output_path(kind: str, suffix: str = ".npy", tag: str | None = None) -> Path:
+    """path of a derived file next to the listmode file"""
+    return fname.with_name(f"{fname.stem}_{kind}_{tag or lm_fingerprint}{suffix}")
+
+
+def load_npz_list(path: Path) -> list[np.ndarray]:
+    with np.load(path) as data:
+        return [data[name] for name in data.files]
+
+
+def load_npz_dict(path: Path) -> dict[str, np.ndarray]:
+    with np.load(path) as data:
+        return {name: data[name] for name in data.files}
+
 
 # %%
-################################################################################
-###  DETERMINE IMAGE ORIGIN AND IMAGE SHAPE IF NOT GIVEN #######################
-################################################################################
+# average detection points (ADPs) of all detecting elements
 
-
-if img_shape is not None:
-    img_shape = tuple(img_shape)
-else:
-    # get the bounding box of the scanner detection elements
-    scanner_bbox = all_detector_centers[0].reshape(-1, 3).max(0) - all_detector_centers[
-        0
-    ].reshape(-1, 3).min(0)
-
-    i_ax = int(
-        np.argmin(
-            np.array(
-                [
-                    np.abs(scanner_bbox[1] - scanner_bbox[2]),
-                    np.abs(scanner_bbox[0] - scanner_bbox[2]),
-                    np.abs(scanner_bbox[0] - scanner_bbox[1]),
-                ]
-            )
-        )
-    )
-
-    img_shape = (0.53 * scanner_bbox / np.array(voxel_size)).astype(int)
-    img_shape[i_ax] = int(scanner_bbox[i_ax] / voxel_size[i_ax])
-    if img_shape[i_ax] % 2 == 0:
-        img_shape[i_ax] += 1  # make sure the image shape is odd
-    img_shape: tuple[int, int, int] = tuple(img_shape.tolist())
-
-# calculate the scanner iso center to set the image origin that we need for the projectors
-scanner_iso_center = xp.asarray(all_detector_centers[0].reshape(-1, 3).mean(0))
-img_origin = scanner_iso_center - 0.5 * (xp.asarray(img_shape) - 1) * xp.asarray(
-    voxel_size
+all_detector_centers = load_or_compute(
+    output_path("detector_centers", ".npz"),
+    compute=lambda: get_all_detector_centers(scanner_info.scanner_geometry),
+    save=lambda path, x: np.savez_compressed(path, *x),
+    load=load_npz_list,
+    description="detector centers",
 )
 
-if verbose:
-    print(f"Image shape: {img_shape}")
-    print(f"Image origin: {img_origin}")
-    print(f"Voxel size: {voxel_size}")
-
 # %%
-################################################################################
-### CALCULATE THE SENSITIVTY IMAGE #############################################
-################################################################################
+# image grid, resolution model, attenuation image
 
-sig = fwhm_mm / (FWHM_PER_SIGMA * np.asarray(voxel_size))
-res_model = GaussianFilterOperator(img_shape, sigma=sig)
+img_shape, img_origin = default_image_grid(
+    all_detector_centers,
+    voxel_size,
+    tuple(args.img_shape) if args.img_shape is not None else None,
+)
+img_origin = xp.asarray(img_origin)
 
-att_img: None | np.ndarray = None
-if attenuation_image_fname is not None:
-    print(f"Loading attenuation image from {attenuation_image_fname}")
-    att_img = np.load(attenuation_image_fname)
+if args.verbose:
+    print(f"Image shape: {img_shape}, origin: {img_origin}, voxel size: {voxel_size}")
+
+res_model = GaussianFilterOperator(
+    img_shape, sigma=args.fwhm_mm / (FWHM_PER_SIGMA * np.asarray(voxel_size))
+)
+
+att_img: np.ndarray | None = None
+if args.attenuation_image is not None:
+    print(f"Loading attenuation image from {args.attenuation_image}")
+    att_img = np.load(args.attenuation_image)
     if att_img.shape != img_shape:
         raise ValueError(
             f"Attenuation image shape {att_img.shape} does not match image shape {img_shape}"
         )
 
-
-# Generate hash for all sensitivity parameters (also used to name the output files)
-# (prefixed with the fingerprint of the listmode file)
-params_hash = (
-    f"{lm_fingerprint}_"
-    f"{get_params_hash(img_shape, voxel_size, tof, att_img, fwhm_mm=fwhm_mm)}"
+# tag of all files that depend on the reconstruction parameters
+params_tag = (
+    f"{lm_fingerprint}_{recon_params_hash(img_shape, voxel_size, tof, att_img, args.fwhm_mm)}"
 )
 
-if unity_sens_img:
+# %%
+# sensitivity image
+
+if args.unity_sens_img:
     print("Using ones as sensitivity image ...")
     sens_img = xp.ones(img_shape, dtype="float32")
 else:
-    sens_img_path = Path(fname).with_name(f"{Path(fname).stem}_sens_{params_hash}.npy")
-
-    if sens_img_path.exists():
-        print(f"Loading sensitivity image from {sens_img_path}")
-        sens_img = xp.load(sens_img_path)
-
-    else:
-        print("Calculating sensitivity image ...")
-
-        sens_img: xp.ndarray = backproject_efficiencies(
+    sens_img = load_or_compute(
+        output_path("sens", tag=params_tag),
+        compute=lambda: sensitivity_image(
             scanner_info,
             all_detector_centers,
             img_shape,
             voxel_size,
             img_origin,
-            verbose=verbose,
-            tof=tof,
+            res_model,
+            tof,
             xp=xp,
             attenuation_image=att_img,
-        )
-
-        # apply adjoint of image-based resolution model
-        # (only for newly calculated sens. images - cached ones already include it)
-        sens_img = res_model.adjoint(sens_img)
-
-        xp.save(sens_img_path, sens_img)
-
-## %%
-#################################################################################
-#### CHECK WHETHER THE CALC SENS IMAGE MATCHES THE REF. SENSE IMAGE #############
-#################################################################################
-#
-# ref_sens_img_path = Path(fname).parent / "reference_sensitivity_image.npy"
-#
-# if ref_sens_img_path.exists():
-#    print(f"loading reference sensitivity image from {ref_sens_img_path}")
-#    ref_sens_img = np.load(ref_sens_img_path)
-#    if ref_sens_img.shape == sens_img.shape:
-#        if np.allclose(np.asarray(sens_img), ref_sens_img):
-#            print(
-#                f"calculated sensitivity image matches reference image {ref_sens_img_path}"
-#            )
-#        else:
-#            print(
-#                f"calculated sensitivity image does NOT match reference image {ref_sens_img_path}"
-#            )
+            verbose=args.verbose,
+        ),
+        save=xp.save,
+        load=xp.load,
+        description="sensitivity image",
+    )
 
 # %%
-################################################################################
-### READ THE LM PROMPT EVENTS AND CONVERT TO COODINATES ########################
-################################################################################
+# prompt events (LOR end points, TOF bins, efficiencies)
 
-preprocess_file = Path(fname).with_name(
-    f"{lm_stem}_preprocessed_events_{lm_fingerprint}.npz"
+event_arrays = ("coords0", "coords1", "tof_bins", "effs", "energy_idx0", "energy_idx1")
+events = load_or_compute(
+    output_path("preprocessed_events", ".npz"),
+    compute=lambda: dict(
+        zip(
+            event_arrays,
+            read_listmode_prompt_events(
+                reader, header, all_detector_centers, verbose=args.verbose
+            ),
+        )
+    ),
+    save=lambda path, x: np.savez_compressed(path, **x),
+    load=load_npz_dict,
+    description="preprocessed events",
 )
 
-if not preprocess_file.exists():
-    print("Reading prompt events from listmode file ...")
-    coords0, coords1, tof_bins, effs, energy_idx0, energy_idx1 = (
-        read_listmode_prompt_events(
-            reader,
-            header,
-            all_detector_centers,
-            store_energy_bins=True,
-            verbose=verbose,
-        )
-    )
-
-    print(tof_bins.min(), tof_bins.max())
-
-    # store coords0, coords1, tof_bins, effs, energy_idx0, energy_idx1 into a compressed npz file
-    np.savez_compressed(
-        preprocess_file,
-        coords0=coords0,
-        coords1=coords1,
-        tof_bins=tof_bins,
-        effs=effs,
-        energy_idx0=energy_idx0,
-        energy_idx1=energy_idx1,
-    )
-else:
-    print(f"Loading preprocessed events from {preprocess_file}")
-    with np.load(preprocess_file) as data:
-        coords0 = data["coords0"]
-        coords1 = data["coords1"]
-        tof_bins = data["tof_bins"]
-        effs = data["effs"]
-        energy_idx0 = data["energy_idx0"]
-        energy_idx1 = data["energy_idx1"]
+# TOF parameters (check_header_support() made sure that all module type pairs have
+# the same TOF parameters)
+tof_params = get_tof_parameters(scanner_info, 0, 0) if tof else None
 
 # %%
-################################################################################
-### PARALLELRPOJ BACKPROJECTIONS ###############################################
-################################################################################
+# (unweighted) non-TOF and TOF backprojections of all events
 
 proj = ListmodePETProjector(
-    xp.asarray(coords0).copy(),
-    xp.asarray(coords1).copy(),
+    xp.asarray(events["coords0"]).copy(),
+    xp.asarray(events["coords1"]).copy(),
     img_shape,
     voxel_size,
     img_origin=img_origin,
 )
+ones = xp.ones(events["coords0"].shape[0], dtype="float32")
+xp.save(output_path("nontof_backproj", tag=params_tag), proj.adjoint(ones))
 
-non_tof_backproj = proj.adjoint(xp.ones(coords0.shape[0], dtype="float32"))
-
-non_tof_backproj_path = Path(fname).with_name(
-    f"{Path(fname).stem}_nontof_backproj_{params_hash}.npy"
-)
-xp.save(non_tof_backproj_path, non_tof_backproj)
-
-# (check_header_support() made sure that all module type pairs have the same TOF parameters)
 if tof:
-    tof_params = get_tof_parameters(scanner_info, 0, 0)
-
     proj.tof_parameters = tof_params
-    proj.event_tofbins = xp.asarray(tof_bins, dtype=xp.int16).copy()
+    proj.event_tofbins = xp.asarray(events["tof_bins"], dtype=xp.int16).copy()
     proj.tof = True
-
-    tof_backproj = proj.adjoint(xp.ones(coords0.shape[0], dtype="float32"))
-
-    tof_backproj_path = Path(fname).with_name(
-        f"{Path(fname).stem}_tof_backproj_{params_hash}.npy"
-    )
-    xp.save(tof_backproj_path, tof_backproj)
-
+    xp.save(output_path("tof_backproj", tag=params_tag), proj.adjoint(ones))
 del proj
 
 # %%
-################################################################################
-### FILTER OUT EVENTS THAT HAVE 0 EFFICIENCY DUE TO ERRORS IN ENCODING #########
-################################################################################
+# LM OSEM reconstruction
 
-if effs.min() == 0:
-    print("Filtering out events with zero efficiency ...")
-    valid_events = effs > 0
-    coords0 = coords0[valid_events]
-    coords1 = coords1[valid_events]
-    tof_bins = tof_bins[valid_events]
-    effs = effs[valid_events]
-    energy_idx0 = energy_idx0[valid_events]
-    energy_idx1 = energy_idx1[valid_events]
+# events with zero efficiency (e.g. due to errors in the encoding) can not be detected
+valid = events["effs"] > 0
+if not np.all(valid):
+    print(f"Filtering out {np.count_nonzero(~valid)} events with zero efficiency ...")
+    events = {k: v[valid] for k, v in events.items()}
 
-
-# %%
-################################################################################
-### PARALLELRPOJ LM OSEM RECONSTRUCTION ########################################
-################################################################################
-
-# forward model of the expected counts of an event e:
-#   ybar_e = eff_e * att_e * (P G x)_e (+ eps)
-# with the detection efficiency eff_e, the attenuation factor att_e, the (TOF) LM
-# projector P and the image-based resolution model G.
-# Without additive contamination (randoms, scatter), the multiplicative factors
-# cancel in the LM OSEM update, but they are needed for an additive term like eps
-# (and contaminations in the future).
-#
-# Since we do not model additive contamination, a detected event with zero expected
-# counts (e.g. when the image is 0 along its LOR) would lead to a division by 0.
-# We therefore use a small eps added to the expected counts of all events
-# (see parallelproj.functions.NegPoissonLogLListmode), as recommended:
-# 1e-6 times the mean number of counts per data bin.
-
-num_data_bins = get_num_data_bins(scanner_info, tof)
-eps = 1e-6 * coords0.shape[0] / num_data_bins
-
+# eps added to the expected counts of all events: 1e-6 x mean counts per data bin
+eps = 1e-6 * events["coords0"].shape[0] / get_num_data_bins(scanner_info, tof)
 print(f"Starting parallelproj LM OSEM reconstruction (eps = {eps:.2e}) ...")
 
-subset_slices = [slice(i, None, num_subsets) for i in range(num_subsets)]
+recon = lm_osem(
+    events["coords0"],
+    events["coords1"],
+    events["tof_bins"],
+    events["effs"],
+    img_shape,
+    voxel_size,
+    img_origin,
+    res_model,
+    sens_img,
+    args.num_epochs,
+    args.num_subsets,
+    eps,
+    tof_params=tof_params,
+    att_img=att_img,
+    xp=xp,
+)
 
-# init recon and convert arrays to xp (numpy or cupy) arrays
-recon = xp.ones(img_shape, dtype="float32")
-effs = xp.asarray(effs, dtype="float32")
-if att_img is not None:
-    att_img_xp = xp.asarray(att_img, dtype=xp.float32)
-
-# negative Poisson log-likelihood of every subset
-subset_objectives: list[NegPoissonLogLListmode] = []
-
-for i_subset, sl in enumerate(subset_slices):
-    lm_proj = ListmodePETProjector(
-        xp.asarray(coords0[sl, :]).copy(),
-        xp.asarray(coords1[sl, :]).copy(),
-        img_shape,
-        voxel_size,
-        img_origin=img_origin,
-    )
-
-    # multiplicative factors of all events: efficiencies x attenuation factors
-    # (non-TOF line integrals through the attenuation image)
-    mult_factors = effs[sl]
-    if att_img is not None:
-        mult_factors = mult_factors * xp.exp(-lm_proj(att_img_xp))
-
-    if tof:
-        lm_proj.tof_parameters = tof_params
-        lm_proj.event_tofbins = xp.asarray(tof_bins[sl], dtype=xp.int16).copy()
-        lm_proj.tof = True
-
-    num_subset_events = int(mult_factors.shape[0])
-    subset_objectives.append(
-        NegPoissonLogLListmode(
-            CompositeLinearOperator(
-                [
-                    ElementwiseMultiplicationOperator(mult_factors),
-                    lm_proj,
-                    res_model,
-                ]
-            ),
-            # the sensitivity image of a subset is (approx.) sens_img / num_subsets
-            sensitivity_image=sens_img / num_subsets,
-            contamination_list=xp.zeros(num_subset_events, dtype=xp.float32),
-            contamination_sinogram_sum=0.0,
-            eps=eps,
-        )
-    )
-
-# OSEM update x <- x - (x / sens_subset) * grad_subset(x)
-#                 = (x / sens_subset) * A_subset^T (1 / (A_subset x + eps))
-# voxels with zero sensitivity are not "seen" by the scanner and set to 0
-step_scale = xp.where(sens_img > 0, num_subsets / xp.where(sens_img > 0, sens_img, 1), 0)
-recon = xp.where(sens_img > 0, recon, 0)
-
-for i_epoch in range(num_epochs):
-    for i_subset, objective in enumerate(subset_objectives):
-        print(
-            f"it {(i_epoch +1):03} / {num_epochs:03}, ss {(i_subset+1):03} / {num_subsets:03}",
-            end="\r",
-        )
-        recon = recon - recon * step_scale * objective.gradient(recon)
-        # remove negative values due to floating point rounding
-        recon = xp.clip(recon, 0, None)
-
-opath = Path(fname).with_name(f"lm_osem_{num_epochs}_{num_subsets}_{params_hash}.npy")
+opath = fname.with_name(f"lm_osem_{args.num_epochs}_{args.num_subsets}_{params_tag}.npy")
 xp.save(opath, recon)
 print(f"LM OSEM recon saved to {opath}")
 
-
 # %%
-# SHOW THE PETSIRD GEOMETRY AND THE FIRST EVENTS (ON TOP OF THE RECON)
+# PETSIRD geometry and the first events (on top of the recon)
 
 num_events_to_show = 8
-geometry_reader = petsird.BinaryPETSIRDReader(fname)
+geometry_reader = petsird.BinaryPETSIRDReader(str(fname))
 geometry_reader.read_header()
 fig_geom = plot_petsird_geometry(
     scanner_info,
@@ -497,14 +276,14 @@ fig_geom = plot_petsird_geometry(
         parallelproj.to_numpy_array(img_origin),
     ),
     background_label="LM OSEM recon",
-    title=f"PETSIRD scanner geometry and the first {num_events_to_show} events of {Path(fname).name}",
+    title=f"PETSIRD scanner geometry and the first {num_events_to_show} events of {fname.name}",
 )
-geometry_fig_path = Path(fname).with_name(f"{lm_stem}_geometry_and_events_{params_hash}.png")
+geometry_fig_path = output_path("geometry_and_events", ".png", tag=params_tag)
 fig_geom.savefig(geometry_fig_path, dpi=150)
 print(f"Geometry figure saved to {geometry_fig_path}")
 
 # %%
-# SHOW RECON
+# show the recon
 
 vols_to_show = {"LM OSEM recon": recon, "sensitivity image": sens_img}
 if att_img is not None:
