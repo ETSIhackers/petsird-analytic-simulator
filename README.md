@@ -116,6 +116,13 @@ time.
 
 ## Reconstructions of PETSIRD listmode files
 
+All files written by the reconstruction script (cached detector positions, events
+and sensitivity images, backprojections and reconstructions) are tagged with a
+fingerprint of the listmode file (`<fingerprint>`, computed from the file size and
+its first and last 4 MiB) and a hash of the reconstruction parameters (`<hash>`).
+Re-running a simulation into the same directory therefore never reuses cached files
+of the previous listmode file.
+
 ### NON-TOF NAC recon
 
 ```
@@ -136,11 +143,11 @@ To create a simple 2-class attenuation image, use
 python 03_create_two_class_att_img.py my_petsird_file.bin
 ```
 
-which uses the TOF backprojection (`my_petsird_file_tof_backproj_<hash>.npy`)
+which uses the TOF backprojection (`my_petsird_file_tof_backproj_<fingerprint>_<hash>.npy`)
 created by the TOF NAC recon script above. If several reconstructions with different
 settings were run, pass the TOF backprojection `.npy` file of the TOF NAC recon instead.
 If no `--threshold` is given, Otsu's method is used for the segmentation.
-The attenuation image is saved as `my_petsird_file_att_img_<hash>.npy`.
+The attenuation image is saved as `my_petsird_file_att_img_<fingerprint>_<hash>.npy`.
 
 
 ### NON-TOF AC recon

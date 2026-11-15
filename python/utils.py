@@ -8,7 +8,9 @@ if petsird_version < (0, 13, 1):
     )
 
 
+import hashlib
 import warnings
+from pathlib import Path
 from types import ModuleType
 
 import numpy as np
@@ -31,6 +33,28 @@ from petsird.helpers.plot_scanner import draw_BoxShape
 #   of type_1 and (for equal types) detection_bins[0] >= detection_bins[1]
 # - parallelproj (>= 2) uses unsigned TOF bins (0 ... num_tofbins - 1) which
 #   correspond directly to the PETSIRD tof_idx
+
+
+def lm_file_fingerprint(fname: str | Path, chunk_size: int = 4 * 1024**2) -> str:
+    """short content fingerprint of a (PETSIRD listmode) file
+
+    Used to tag cached / derived files such that they are not reused for a different
+    file with the same name (e.g. after re-running the simulation into the same
+    directory). To be fast also for large files, only the file size, the first and
+    the last chunk of the file are hashed. The first chunk contains the PETSIRD
+    header (incl. the detection efficiencies), the last chunk the last events.
+    """
+    fname = Path(fname)
+    size = fname.stat().st_size
+
+    hash_obj = hashlib.sha256(str(size).encode())
+    with open(fname, "rb") as f:
+        hash_obj.update(f.read(chunk_size))
+        if size > chunk_size:
+            f.seek(max(chunk_size, size - chunk_size))
+            hash_obj.update(f.read(chunk_size))
+
+    return hash_obj.hexdigest()[:8]
 
 
 def get_all_detector_centers(

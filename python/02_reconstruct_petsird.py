@@ -20,6 +20,7 @@ print(f"Using {xp.__name__} for parallelproj reconstructions")
 
 from utils import (
     get_all_detector_centers,
+    lm_file_fingerprint,
     read_listmode_prompt_events,
     backproject_efficiencies,
 )
@@ -155,7 +156,15 @@ print(f"Scanner with {num_replicated_modules} types of replicated modules.")
 fig = plt.figure()
 ax = fig.add_subplot(111, projection="3d")
 
-all_detector_centers_file = Path(fname).with_suffix(".detector_centers.npz")
+# all cached / derived files are tagged with a fingerprint of the listmode file
+# such that they are not reused for a different file with the same name
+lm_fingerprint = lm_file_fingerprint(fname)
+lm_stem = Path(fname).stem
+print(f"Listmode file fingerprint: {lm_fingerprint}")
+
+all_detector_centers_file = Path(fname).with_name(
+    f"{lm_stem}_detector_centers_{lm_fingerprint}.npz"
+)
 
 if not all_detector_centers_file.exists():
     print("Calculating all detector centers ...")
@@ -248,7 +257,11 @@ if attenuation_image_fname is not None:
 
 
 # Generate hash for all sensitivity parameters (also used to name the output files)
-params_hash = get_params_hash(img_shape, voxel_size, tof, att_img, fwhm_mm=fwhm_mm)
+# (prefixed with the fingerprint of the listmode file)
+params_hash = (
+    f"{lm_fingerprint}_"
+    f"{get_params_hash(img_shape, voxel_size, tof, att_img, fwhm_mm=fwhm_mm)}"
+)
 
 if unity_sens_img:
     print("Using ones as sensitivity image ...")
@@ -306,7 +319,9 @@ else:
 ### READ THE LM PROMPT EVENTS AND CONVERT TO COODINATES ########################
 ################################################################################
 
-preprocess_file = Path(fname).with_suffix(".preprocessed_events.npz")
+preprocess_file = Path(fname).with_name(
+    f"{lm_stem}_preprocessed_events_{lm_fingerprint}.npz"
+)
 
 if not preprocess_file.exists():
     print("Reading prompt events from listmode file ...")

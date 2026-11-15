@@ -27,6 +27,7 @@ import argparse
 import contextlib
 import io
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +41,9 @@ from petsird.helpers import (
 )
 from petsird.helpers.geometry import get_ADP
 from petsird.validate.geometry import validate_detecting_element
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
+from utils import lm_file_fingerprint  # noqa: E402
 
 parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
 parser.add_argument("output_dir", type=Path, help="output directory of the simulator")
@@ -215,9 +219,11 @@ check(
 # %%
 # reconstruction outputs (if present)
 
+# only consider recon outputs of the current listmode file (tagged with its fingerprint)
 stem = lm_file.stem
-recon_sens = sorted(out_dir.glob(f"{stem}_sens_*.npy"))
-recon_tof_back = sorted(out_dir.glob(f"{stem}_tof_backproj_*.npy"))
+fingerprint = lm_file_fingerprint(lm_file)
+recon_sens = sorted(out_dir.glob(f"{stem}_sens_{fingerprint}_*.npy"))
+recon_tof_back = sorted(out_dir.glob(f"{stem}_tof_backproj_{fingerprint}_*.npy"))
 
 if recon_sens and recon_tof_back:
     # there can be multiple recon outputs (e.g. TOF / non-TOF, with / without attenuation)

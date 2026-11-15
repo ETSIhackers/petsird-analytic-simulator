@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 
 from pathlib import Path
 
+from utils import lm_file_fingerprint
 from viewer import show_vol_cuts
 
 
@@ -76,9 +77,11 @@ if input_file.suffix == ".npy":
     tof_backproj_file = input_file
 else:
     # PETSIRD listmode file: look for the TOF backprojection(s) written by
-    # 02_reconstruct_petsird.py next to it
+    # 02_reconstruct_petsird.py for this file (tagged with its fingerprint)
     candidates = sorted(
-        input_file.parent.glob(f"{input_file.stem}_tof_backproj_*.npy")
+        input_file.parent.glob(
+            f"{input_file.stem}_tof_backproj_{lm_file_fingerprint(input_file)}_*.npy"
+        )
     )
     if len(candidates) == 0:
         raise SystemExit(
