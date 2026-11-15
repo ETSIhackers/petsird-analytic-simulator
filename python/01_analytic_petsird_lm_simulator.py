@@ -20,6 +20,18 @@ from array_api_compat import size
 from itertools import combinations
 
 import parallelproj
+from parallelproj.operators import (
+    CompositeLinearOperator,
+    ElementwiseMultiplicationOperator,
+    GaussianFilterOperator,
+)
+from parallelproj.pet_lors import EqualBlockPETLORDescriptor
+from parallelproj.pet_scanners import (
+    BlockPETScannerModule,
+    ModularizedPETScannerGeometry,
+)
+from parallelproj.projectors import EqualBlockPETProjector, ListmodePETProjector
+from parallelproj.tof import TOFParameters
 import matplotlib.pyplot as plt
 import math
 import json
@@ -245,7 +257,7 @@ num_blocks = 12
 # %%
 # Setup of a modularized parallelproj PET scanner geometry
 
-modules: list[parallelproj.BlockPETScannerModule] = []
+modules: list[BlockPETScannerModule] = []
 
 # setup an affine transformation matrix to translate the block modules from the
 # center to the radius of the scanner
@@ -270,7 +282,7 @@ for i, phi in enumerate(np.linspace(0, 2 * np.pi, num_blocks, endpoint=False)):
     module_transforms.append(aff_mat_rot @ aff_mat_trans)
 
     modules.append(
-        parallelproj.BlockPETScannerModule(
+        BlockPETScannerModule(
             np,
             "cpu",
             block_shape,
@@ -281,7 +293,7 @@ for i, phi in enumerate(np.linspace(0, 2 * np.pi, num_blocks, endpoint=False)):
 
 # create the scanner geometry from a list of identical block modules at
 # different locations in space
-scanner = parallelproj.ModularizedPETScannerGeometry(tuple(modules))
+scanner = ModularizedPETScannerGeometry(tuple(modules))
 
 # %%
 # Setup of a parllelproj LOR descriptor that connectes LOR endpoints in modules
@@ -294,7 +306,7 @@ block_pairs = [
     (v1, v2) for v1, v2 in all_combinations if circular_distance(v1, v2, num_blocks) > 2
 ]
 
-lor_desc = parallelproj.EqualBlockPETLORDescriptor(
+lor_desc = EqualBlockPETLORDescriptor(
     scanner,
     np.asarray(block_pairs),
 )
@@ -340,8 +352,8 @@ num_tof_bins = int(np.sqrt(2) * img_shape[0] * voxel_size[0] / tof_bin_width)
 if num_tof_bins % 2 == 0:
     num_tof_bins += 1
 
-proj = parallelproj.EqualBlockPETProjector(lor_desc, img_shape, voxel_size)
-proj.tof_parameters = parallelproj.TOFParameters(
+proj = EqualBlockPETProjector(lor_desc, img_shape, voxel_size)
+proj.tof_parameters = TOFParameters(
     num_tofbins=num_tof_bins,
     tofbin_width=tof_bin_width,
     sigma_tof=sig_tof,
@@ -349,14 +361,15 @@ proj.tof_parameters = parallelproj.TOFParameters(
 )
 
 # check if the projector passes the adjointness test
-assert proj.adjointness_test(np, "cpu")
+# (parallelproj v2 defaults to float64 test arrays, but the projectors require float32)
+assert proj.adjointness_test(np, "cpu", dtype=np.float32, rtol=1e-4)
 
 
 # %%
 # setup a simple image space resolution model
 
 sig = fwhm_mm / (2.35 * np.asarray(voxel_size))
-res_model = parallelproj.GaussianFilterOperator(img_shape, sigma=sig)
+res_model = GaussianFilterOperator(img_shape, sigma=sig)
 
 # %%
 # setup the sensitivity sinogram consisting of the crystal efficiencies factors
@@ -399,10 +412,12 @@ for i, bp in enumerate(proj.lor_descriptor.all_block_pairs):
 # where G is the image-based resolution model
 # P is the (TOF) forward projector
 # diag(s) is the elementwise multiplication with a non-TOF sensitivity histogram
-fwd_op = parallelproj.CompositeLinearOperator(
+# (parallelproj v2 no longer has a TOFNonTOFElementwiseMultiplicationOperator,
+#  so we broadcast the non-TOF sensitivities along the TOF axis - zero-copy view)
+fwd_op = CompositeLinearOperator(
     [
-        parallelproj.TOFNonTOFElementwiseMultiplicationOperator(
-            proj.out_shape, nontof_sens_histo
+        ElementwiseMultiplicationOperator(
+            np.broadcast_to(nontof_sens_histo[..., None], proj.out_shape)
         ),
         proj,
         res_model,
@@ -442,7 +457,8 @@ if num_epochs_mlem > 0:
         print(f"{(i+1):03}/{num_epochs_mlem:03}", end="\r")
 
         exp = np.clip(fwd_op(recon), 1e-6, None)
-        grad = fwd_op.adjoint((exp - emission_data) / exp)
+        # emission_data contains int64 Poisson counts -> cast back to float32
+        grad = fwd_op.adjoint(((exp - emission_data) / exp).astype(np.float32))
         step = recon / sens_img
         recon -= step * grad
 
@@ -569,33 +585,28 @@ if not skip_plots:
 # do a TOF histogram as well as TOF and nonTOF LM backprojection
 
 if check_backprojection and (num_true_counts > 0):
-    histo_back = proj.adjoint(emission_data)
+    histo_back = proj.adjoint(emission_data.astype(np.float32))
 
     np.save(output_dir / "histogram_backprojection_tof.npy", histo_back)
 
-    lm_back = parallelproj.joseph3d_back_tof_lm(
-        xstart=scanner.get_lor_endpoints(event_start_block, event_start_el),
-        xend=scanner.get_lor_endpoints(event_end_block, event_end_el),
-        img_shape=img_shape,
+    lm_proj = ListmodePETProjector(
+        scanner.get_lor_endpoints(event_start_block, event_start_el),
+        scanner.get_lor_endpoints(event_end_block, event_end_el),
+        img_shape,
+        proj.voxel_size,
         img_origin=proj.img_origin,
-        voxsize=proj.voxel_size,
-        img_fwd=np.ones(num_events, dtype=np.float32),
-        tofbin_width=proj.tof_parameters.tofbin_width,
-        sigma_tof=np.asarray([proj.tof_parameters.sigma_tof]),
-        tofcenter_offset=np.asarray([proj.tof_parameters.tofcenter_offset]),
-        nsigmas=proj.tof_parameters.num_sigmas,
-        tofbin=event_tof_bin,
     )
-    np.save(output_dir / "lm_backprojection_tof.npy", lm_back)
 
-    lm_back_non_tof = parallelproj.joseph3d_back(
-        xstart=scanner.get_lor_endpoints(event_start_block, event_start_el),
-        xend=scanner.get_lor_endpoints(event_end_block, event_end_el),
-        img_shape=img_shape,
-        img_origin=proj.img_origin,
-        voxsize=proj.voxel_size,
-        img_fwd=np.ones(num_events, dtype=np.float32),
-    )
+    # non-TOF LM backprojection
+    lm_back_non_tof = lm_proj.adjoint(np.ones(num_events, dtype=np.float32))
+
+    # TOF LM backprojection - parallelproj v2 uses unsigned TOF bins (0 ... num_tofbins - 1)
+    lm_proj.tof_parameters = proj.tof_parameters
+    lm_proj.event_tofbins = unsigned_event_tof_bin.astype(np.int16)
+    lm_proj.tof = True
+    lm_back = lm_proj.adjoint(np.ones(num_events, dtype=np.float32))
+
+    np.save(output_dir / "lm_backprojection_tof.npy", lm_back)
     np.save(output_dir / "lm_backprojection_non_tof.npy", lm_back_non_tof)
 
 ################################################################################
@@ -613,7 +624,7 @@ if check_backprojection and (num_true_counts > 0):
 #   DetectorModule(ReplicatedBoxSolidVolume)
 #   ReplicatedBoxSolidVolume(list[RigidTransformation], BoxSolidVolume)
 
-crystal_centers = parallelproj.BlockPETScannerModule(
+crystal_centers = BlockPETScannerModule(
     np, "cpu", block_shape, block_spacing
 ).lor_endpoints
 

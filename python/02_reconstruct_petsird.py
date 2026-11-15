@@ -2,6 +2,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 import parallelproj
+from parallelproj.operators import GaussianFilterOperator
+from parallelproj.projectors import ListmodePETProjector
+from parallelproj.tof import TOFParameters
 import petsird
 import hashlib
 
@@ -226,7 +229,7 @@ if verbose:
 ################################################################################
 
 sig = fwhm_mm / (2.35 * np.asarray(voxel_size))
-res_model = parallelproj.GaussianFilterOperator(img_shape, sigma=sig)
+res_model = GaussianFilterOperator(img_shape, sigma=sig)
 
 att_img: None | np.ndarray = None
 if attenuation_image_fname is not None:
@@ -298,9 +301,16 @@ else:
 
 preprocess_file = Path(fname).with_suffix(".preprocessed_events.npz")
 
-if not preprocess_file.exists():
+# caches written by older versions store signed TOF bins (parallelproj v1 convention)
+# under "signed_tof_bins" - those are ignored and the events are re-read
+cache_is_valid = False
+if preprocess_file.exists():
+    with np.load(preprocess_file) as data:
+        cache_is_valid = "tof_bins" in data.files
+
+if not cache_is_valid:
     print("Reading prompt events from listmode file ...")
-    coords0, coords1, signed_tof_bins, effs, energy_idx0, energy_idx1 = (
+    coords0, coords1, tof_bins, effs, energy_idx0, energy_idx1 = (
         read_listmode_prompt_events(
             reader,
             header,
@@ -311,14 +321,14 @@ if not preprocess_file.exists():
         )
     )
 
-    print(signed_tof_bins.min(), signed_tof_bins.max())
+    print(tof_bins.min(), tof_bins.max())
 
-    # store coords0, coords1, signed_tof_bins, effs, energy_idx0, energy_idx1 into a compressed npz file
+    # store coords0, coords1, tof_bins, effs, energy_idx0, energy_idx1 into a compressed npz file
     np.savez_compressed(
         preprocess_file,
         coords0=coords0,
         coords1=coords1,
-        signed_tof_bins=signed_tof_bins,
+        tof_bins=tof_bins,
         effs=effs,
         energy_idx0=energy_idx0,
         energy_idx1=energy_idx1,
@@ -328,7 +338,7 @@ else:
     with np.load(preprocess_file) as data:
         coords0 = data["coords0"]
         coords1 = data["coords1"]
-        signed_tof_bins = data["signed_tof_bins"]
+        tof_bins = data["tof_bins"]
         effs = data["effs"]
         energy_idx0 = data["energy_idx0"]
         energy_idx1 = data["energy_idx1"]
@@ -351,7 +361,7 @@ if not ax is None:
 ### PARALLELRPOJ BACKPROJECTIONS ###############################################
 ################################################################################
 
-proj = parallelproj.ListmodePETProjector(
+proj = ListmodePETProjector(
     xp.asarray(coords0).copy(),
     xp.asarray(coords1).copy(),
     img_shape,
@@ -373,12 +383,12 @@ if tof:
     num_tofbins = tof_bin_edges.size - 1
     tofbin_width = float(tof_bin_edges[1] - tof_bin_edges[0])
 
-    tof_params = parallelproj.TOFParameters(
+    tof_params = TOFParameters(
         num_tofbins=num_tofbins, tofbin_width=tofbin_width, sigma_tof=sigma_tof
     )
 
     proj.tof_parameters = tof_params
-    proj.event_tofbins = xp.asarray(signed_tof_bins).copy()
+    proj.event_tofbins = xp.asarray(tof_bins, dtype=xp.int16).copy()
     proj.tof = True
 
     tof_backproj = proj.adjoint(xp.ones(coords0.shape[0], dtype="float32"))
@@ -400,7 +410,7 @@ if effs.min() == 0:
     valid_events = effs > 0
     coords0 = coords0[valid_events]
     coords1 = coords1[valid_events]
-    signed_tof_bins = signed_tof_bins[valid_events]
+    tof_bins = tof_bins[valid_events]
     effs = effs[valid_events]
 
     if store_energy_bins:
@@ -427,7 +437,7 @@ effs = xp.asarray(effs, dtype="float32")
 
 for i_subset, sl in enumerate(subset_slices):
     lm_subset_projs.append(
-        parallelproj.ListmodePETProjector(
+        ListmodePETProjector(
             xp.asarray(coords0[sl, :]).copy(),
             xp.asarray(coords1[sl, :]).copy(),
             img_shape,
@@ -439,7 +449,9 @@ for i_subset, sl in enumerate(subset_slices):
     #### HACK assumes same TOF parameters for all module type pairs
     if tof:
         lm_subset_projs[i_subset].tof_parameters = tof_params
-        lm_subset_projs[i_subset].event_tofbins = xp.asarray(signed_tof_bins[sl]).copy()
+        lm_subset_projs[i_subset].event_tofbins = xp.asarray(
+            tof_bins[sl], dtype=xp.int16
+        ).copy()
         lm_subset_projs[i_subset].tof = True
 
 for i_epoch in range(num_epochs):

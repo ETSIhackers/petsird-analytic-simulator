@@ -11,7 +11,8 @@ if petsird_version < (0, 7, 2):
 import numpy as np
 import warnings
 
-import parallelproj
+from parallelproj.projectors import ListmodePETProjector
+from parallelproj.tof import TOFParameters
 import petsird
 import petsird.helpers.geometry
 
@@ -355,7 +356,7 @@ def backproject_efficiencies(
                 start_coords = xp.asarray(start_coords.reshape(-1, 3))
                 end_coords = xp.asarray(end_coords.reshape(-1, 3))
 
-                proj = parallelproj.ListmodePETProjector(
+                proj = ListmodePETProjector(
                     start_coords,
                     end_coords,
                     img_shape,
@@ -364,7 +365,7 @@ def backproject_efficiencies(
                 )
 
                 if tof:
-                    proj.tof_parameters = parallelproj.TOFParameters(
+                    proj.tof_parameters = TOFParameters(
                         num_tofbins=num_tofbins,
                         tofbin_width=tofbin_width,
                         sigma_tof=sigma_tof,
@@ -374,7 +375,9 @@ def backproject_efficiencies(
                 # assume the same attenuation image for energy bin combinations so far
                 if attenuation_image is not None:
                     # forward project the attenuation image and take neg. exponential
-                    att_vals = xp.exp(-proj(xp.asarray(attenuation_image)))
+                    att_vals = xp.exp(
+                        -proj(xp.asarray(attenuation_image, dtype=xp.float32))
+                    )
                     if verbose:
                         print(
                             f"backprojecting all attenuation values for LORs starting at module {i_mod_1}\n"
@@ -397,13 +400,12 @@ def backproject_efficiencies(
                             tmp *= att_vals
 
                         if tof:
-                            for signed_tofbin in np.arange(
-                                -(num_tofbins // 2), num_tofbins // 2 + 1
-                            ):
+                            # parallelproj v2 uses unsigned TOF bins (0 ... num_tofbins - 1)
+                            for tofbin in range(num_tofbins):
                                 proj.event_tofbins = xp.full(
                                     start_coords.shape[0],
-                                    signed_tofbin,
-                                    dtype="int32",
+                                    tofbin,
+                                    dtype=xp.int16,
                                 )
                                 proj.tof = True
 
@@ -440,7 +442,7 @@ def read_listmode_prompt_events(
     coords0 = []
     coords1 = []
     effs = []
-    signed_tof_bins = []
+    tof_bins = []
     energy_idx0 = []
     energy_idx1 = []
 
@@ -481,10 +483,11 @@ def read_listmode_prompt_events(
                             ]
                         )
 
+                        # unsigned TOF bin (0 ... num_tofbins - 1) as used by parallelproj v2
                         if flip_tofbin_sign:
-                            signed_tof_bins.append(-(event.tof_idx - num_tofbins // 2))
+                            tof_bins.append(num_tofbins - 1 - event.tof_idx)
                         else:
-                            signed_tof_bins.append(event.tof_idx - num_tofbins // 2)
+                            tof_bins.append(event.tof_idx)
 
                         if unity_effs:
                             effs.append(1.0)
@@ -507,12 +510,12 @@ def read_listmode_prompt_events(
     # convert lists to numpy arrays
     coords0 = np.array(coords0, dtype="float32")
     coords1 = np.array(coords1, dtype="float32")
-    signed_tof_bins = np.array(signed_tof_bins, dtype="int16")
+    tof_bins = np.array(tof_bins, dtype="int16")
     effs = np.array(effs, dtype="float32")
     energy_idx0 = np.array(energy_idx0, dtype="uint16")
     energy_idx1 = np.array(energy_idx1, dtype="uint16")
 
-    return coords0, coords1, signed_tof_bins, effs, energy_idx0, energy_idx1
+    return coords0, coords1, tof_bins, effs, energy_idx0, energy_idx1
 
 
 # %%
