@@ -125,6 +125,13 @@ time.
   from the scanner center) with the average detection point at the crystal center.
 - The detection efficiencies consist of detection bin (crystal) efficiencies,
   module pair (symmetry group) efficiencies and a calibration factor of 1.
+  The crystal efficiencies are random (including some "dead" crystals).
+  Module pairs are grouped into symmetry groups by their offset
+  `(i_mod_1 - i_mod_2) mod 12` (first module = module with the higher index).
+  The module pair efficiency matrices `values[bin in first module][bin in second module]`
+  are random and non-symmetric, such that readers that e.g. transpose them or mix up
+  the module order produce wrong results. Consistent with the rotational symmetry of
+  the scanner, the matrix of offset `12 - d` is the transpose of the one of offset `d`.
 
 ## Reconstructions of PETSIRD listmode files
 

@@ -51,21 +51,52 @@ def circular_distance(i_mod_1: int, i_mod_2: int, num_modules: int) -> int:
 
 
 # %%
-def sgid_from_module_pair(i_mod_1: int, i_mod_2: int, num_modules: int) -> int:
-    """a random mapping between two modules into a symmetry group"""
+def module_offset(i_mod_1: int, i_mod_2: int, num_modules: int) -> int:
+    """offset (i_mod_1 - i_mod_2) mod num_modules between the first and second module of a pair
 
-    return circular_distance(i_mod_1, i_mod_2, num_modules) % 3
+    For our scanner with rotationally symmetric modules, two module pairs with the
+    same offset are related by a rotation that maps the first (second) module of one
+    pair onto the first (second) module of the other pair. Therefore, all module pairs
+    with the same offset have the same module pair efficiencies, i.e. they form a
+    PETSIRD symmetry group.
+    Note: since PETSIRD stores module pairs (of the same type) in lower-triangular order
+    (first module index >= second module index), a rotation can swap the order of the
+    modules, which maps offset d to num_modules - d. The module pair efficiencies of
+    offset num_modules - d are therefore the transpose of the ones of offset d.
+    """
+    return (i_mod_1 - i_mod_2) % num_modules
 
 
-# %%
-def module_pair_eff_from_sgd(i_sgd: int, uniform: bool = False) -> float:
-    """a random mapping from symmetry group id (sgid) to efficiency"""
-    if uniform:
-        res = 1.0
-    else:
-        res = 1 + 0.5 * ((-1) ** i_sgd)
+def generate_module_pair_efficiencies(
+    offsets: list[int],
+    num_modules: int,
+    num_det_els: int,
+    uniform: bool = False,
+) -> dict[int, np.ndarray]:
+    """(non-physical) module pair efficiency matrices for all module offsets
 
-    return res
+    Returns a dictionary offset -> matrix of shape (num_det_els, num_det_els) where
+    matrix[i_el_1, i_el_2] is the efficiency for detecting element i_el_1 in the first
+    and i_el_2 in the second module of a pair.
+    The matrices are random and non-symmetric (to be able to detect transposition
+    errors when reading the data), but consistent with the rotational symmetry of the
+    scanner: matrix[num_modules - d] = matrix[d].T
+    """
+    effs = {}
+    for d in sorted(offsets):
+        if uniform:
+            effs[d] = np.ones((num_det_els, num_det_els), dtype="float32")
+        elif (num_modules - d) in effs:
+            effs[d] = effs[num_modules - d].T.copy()
+        else:
+            # level alternating between offsets (same level for d and num_modules - d)
+            level = 1 + 0.5 * (-1) ** d
+            m = np.random.uniform(0.5, 1.5, (num_det_els, num_det_els))
+            if 2 * d == num_modules:
+                # opposite modules: matrix has to be symmetric
+                m = 0.5 * (m + m.T)
+            effs[d] = (level * m).astype("float32")
+    return effs
 
 
 def parse_int_tuple(arg):
@@ -158,7 +189,7 @@ efficiency_group.add_argument(
 efficiency_group.add_argument(
     "--uniform_sg_eff",
     action="store_true",
-    help="use uniform symmetry group (module pair) efficiencies, otherwise pseudo random pattern is used",
+    help="use uniform symmetry group (module pair) efficiencies, otherwise random non-symmetric module pair efficiency matrices are used",
 )
 
 # Time block configuration group
@@ -415,12 +446,24 @@ else:
     # simulate a few dead crystals
     det_el_efficiencies[det_el_efficiencies < 0.21] = 0
 
+# module pair efficiency matrices for all offsets between modules in coincidence
+# (in the PETSIRD convention: first module = module with the higher index)
+module_pair_effs = generate_module_pair_efficiencies(
+    sorted({module_offset(max(bp), min(bp), num_blocks) for bp in block_pairs}),
+    num_blocks,
+    lor_desc.num_lorendpoints_per_block,
+    uniform=uniform_sg_eff,
+)
+
 for i, bp in enumerate(proj.lor_descriptor.all_block_pairs):
-    sgid = sgid_from_module_pair(bp[0], bp[1], num_blocks)
-    sg_eff = module_pair_eff_from_sgd(sgid, uniform=uniform_sg_eff)
+    # the block pairs of the LOR descriptor have bp[0] < bp[1], i.e. the LOR end
+    # module bp[1] is the first module of the pair in the PETSIRD convention
+    mp_eff = module_pair_effs[module_offset(int(bp[1]), int(bp[0]), num_blocks)]
     start_crystal_eff = det_el_efficiencies[bp[0], start_el_arr]
     end_crystal_eff = det_el_efficiencies[bp[1], end_el_arr]
-    nontof_sens_histo[i, ...] = sg_eff * start_crystal_eff * end_crystal_eff
+    nontof_sens_histo[i, ...] = (
+        mp_eff[end_el_arr, start_el_arr] * start_crystal_eff * end_crystal_eff
+    )
 
 # %%
 # attenuation factors exp(-int mu) of all LORs (non-TOF line integrals)
@@ -749,28 +792,25 @@ assert scanner_geometry.number_of_module_types() == 1
 
 module_pair_sgid_lut = construct_lower_triangular_matrix(num_blocks, dtype=int, value=-1)
 
+# one symmetry group (SGID) per module offset (see module_offset())
+sgid_of_offset = {d: sgid for sgid, d in enumerate(sorted(module_pair_effs))}
+
 for bp in proj.lor_descriptor.all_block_pairs:
+    # lower triangular: first module index >= second module index
     # (PETSIRD tables are plain python lists -> use python ints, not numpy ints)
-    i_mod_1, i_mod_2 = int(bp[0]), int(bp[1])
-    sgid = sgid_from_module_pair(i_mod_1, i_mod_2, num_blocks)
-    # lower triangular: first index >= second index
-    module_pair_sgid_lut[max(i_mod_1, i_mod_2)][min(i_mod_1, i_mod_2)] = sgid
-
-num_SGIDs = max(max(row) for row in module_pair_sgid_lut) + 1
-
-num_el_per_module = proj.lor_descriptor.scanner.num_lor_endpoints_per_module[0]
-
-module_pair_efficiencies_shape = (
-    num_el_per_module * num_energy_bins,
-    num_el_per_module * num_energy_bins,
-)
+    i_mod_1, i_mod_2 = int(max(bp)), int(min(bp))
+    module_pair_sgid_lut[i_mod_1][i_mod_2] = sgid_of_offset[
+        module_offset(i_mod_1, i_mod_2, num_blocks)
+    ]
 
 module_pair_efficiencies_vector = []
 
-for sgid in range(num_SGIDs):
-    eff = module_pair_eff_from_sgd(sgid, uniform=uniform_sg_eff)
-    vals = np.full(module_pair_efficiencies_shape, eff, dtype="float32")
-
+for d, sgid in sgid_of_offset.items():
+    # values[detection bin in first module][detection bin in second module]
+    # (the detection bin index runs over (element, energy bin) with energy as the fastest index)
+    vals = np.kron(
+        module_pair_effs[d], np.ones((num_energy_bins, num_energy_bins), dtype="float32")
+    )
     module_pair_efficiencies_vector.append(
         petsird.ModulePairEfficiencies(values=vals.tolist(), sgid=sgid)
     )
