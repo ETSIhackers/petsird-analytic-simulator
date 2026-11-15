@@ -2,7 +2,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 import parallelproj
-from parallelproj.operators import GaussianFilterOperator
+from parallelproj.functions import NegPoissonLogLListmode
+from parallelproj.operators import (
+    CompositeLinearOperator,
+    ElementwiseMultiplicationOperator,
+    GaussianFilterOperator,
+)
 from parallelproj.projectors import ListmodePETProjector
 import petsird
 import hashlib
@@ -21,6 +26,7 @@ from utils import (
     FWHM_PER_SIGMA,
     check_header_support,
     get_all_detector_centers,
+    get_num_data_bins,
     get_tof_parameters,
     lm_file_fingerprint,
     read_listmode_prompt_events,
@@ -419,51 +425,92 @@ if effs.min() == 0:
 
 # %%
 ################################################################################
-### PARALLELRPOJ LM OSEM RECONSTRUCTION WITHOUT ATTENUATION MODEL ##############
+### PARALLELRPOJ LM OSEM RECONSTRUCTION ########################################
 ################################################################################
 
-# NOTE: since we don't model additive contamination, the attenuation only enters
-#       the sensitivity image calculation
+# forward model of the expected counts of an event e:
+#   ybar_e = eff_e * att_e * (P G x)_e (+ eps)
+# with the detection efficiency eff_e, the attenuation factor att_e, the (TOF) LM
+# projector P and the image-based resolution model G.
+# Without additive contamination (randoms, scatter), the multiplicative factors
+# cancel in the LM OSEM update, but they are needed for an additive term like eps
+# (and contaminations in the future).
+#
+# Since we do not model additive contamination, a detected event with zero expected
+# counts (e.g. when the image is 0 along its LOR) would lead to a division by 0.
+# We therefore use a small eps added to the expected counts of all events
+# (see parallelproj.functions.NegPoissonLogLListmode), as recommended:
+# 1e-6 times the mean number of counts per data bin.
 
-print("Starting parallelproj LM OSEM reconstruction ...")
+num_data_bins = get_num_data_bins(scanner_info, tof)
+eps = 1e-6 * coords0.shape[0] / num_data_bins
 
-lm_subset_projs = []
+print(f"Starting parallelproj LM OSEM reconstruction (eps = {eps:.2e}) ...")
+
 subset_slices = [slice(i, None, num_subsets) for i in range(num_subsets)]
 
-# init recon, sens and eff arrays and covert to xp (numpy or cupy) arrays
+# init recon and convert arrays to xp (numpy or cupy) arrays
 recon = xp.ones(img_shape, dtype="float32")
 effs = xp.asarray(effs, dtype="float32")
+if att_img is not None:
+    att_img_xp = xp.asarray(att_img, dtype=xp.float32)
+
+# negative Poisson log-likelihood of every subset
+subset_objectives: list[NegPoissonLogLListmode] = []
 
 for i_subset, sl in enumerate(subset_slices):
-    lm_subset_projs.append(
-        ListmodePETProjector(
-            xp.asarray(coords0[sl, :]).copy(),
-            xp.asarray(coords1[sl, :]).copy(),
-            img_shape,
-            voxel_size,
-            img_origin=img_origin,
+    lm_proj = ListmodePETProjector(
+        xp.asarray(coords0[sl, :]).copy(),
+        xp.asarray(coords1[sl, :]).copy(),
+        img_shape,
+        voxel_size,
+        img_origin=img_origin,
+    )
+
+    # multiplicative factors of all events: efficiencies x attenuation factors
+    # (non-TOF line integrals through the attenuation image)
+    mult_factors = effs[sl]
+    if att_img is not None:
+        mult_factors = mult_factors * xp.exp(-lm_proj(att_img_xp))
+
+    if tof:
+        lm_proj.tof_parameters = tof_params
+        lm_proj.event_tofbins = xp.asarray(tof_bins[sl], dtype=xp.int16).copy()
+        lm_proj.tof = True
+
+    num_subset_events = int(mult_factors.shape[0])
+    subset_objectives.append(
+        NegPoissonLogLListmode(
+            CompositeLinearOperator(
+                [
+                    ElementwiseMultiplicationOperator(mult_factors),
+                    lm_proj,
+                    res_model,
+                ]
+            ),
+            # the sensitivity image of a subset is (approx.) sens_img / num_subsets
+            sensitivity_image=sens_img / num_subsets,
+            contamination_list=xp.zeros(num_subset_events, dtype=xp.float32),
+            contamination_sinogram_sum=0.0,
+            eps=eps,
         )
     )
 
-    if tof:
-        lm_subset_projs[i_subset].tof_parameters = tof_params
-        lm_subset_projs[i_subset].event_tofbins = xp.asarray(
-            tof_bins[sl], dtype=xp.int16
-        ).copy()
-        lm_subset_projs[i_subset].tof = True
+# OSEM update x <- x - (x / sens_subset) * grad_subset(x)
+#                 = (x / sens_subset) * A_subset^T (1 / (A_subset x + eps))
+# voxels with zero sensitivity are not "seen" by the scanner and set to 0
+step_scale = xp.where(sens_img > 0, num_subsets / xp.where(sens_img > 0, sens_img, 1), 0)
+recon = xp.where(sens_img > 0, recon, 0)
 
 for i_epoch in range(num_epochs):
-    for i_subset, sl in enumerate(subset_slices):
+    for i_subset, objective in enumerate(subset_objectives):
         print(
             f"it {(i_epoch +1):03} / {num_epochs:03}, ss {(i_subset+1):03} / {num_subsets:03}",
             end="\r",
         )
-        lm_exp = effs[sl] * lm_subset_projs[i_subset](res_model(recon))
-
-        tmp = num_subsets * res_model.adjoint(
-            lm_subset_projs[i_subset].adjoint(effs[sl] / lm_exp)
-        )
-        recon *= tmp / sens_img
+        recon = recon - recon * step_scale * objective.gradient(recon)
+        # remove negative values due to floating point rounding
+        recon = xp.clip(recon, 0, None)
 
 opath = Path(fname).with_name(f"lm_osem_{num_epochs}_{num_subsets}_{params_hash}.npy")
 xp.save(opath, recon)

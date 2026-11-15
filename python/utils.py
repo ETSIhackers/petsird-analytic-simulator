@@ -327,6 +327,34 @@ def get_tof_parameters(
     )
 
 
+def get_num_data_bins(scanner_info: petsird.ScannerInformation, tof: bool) -> int:
+    """number of data bins (pairs of detection bins in coincidence, times TOF bins)
+
+    i.e. the number of bins of a (TOF) histogram of all possible coincidences
+    """
+    num_module_types = scanner_info.scanner_geometry.number_of_module_types()
+    num_bins = 0
+    for m1 in range(num_module_types):
+        _, num_det_els_1, num_energy_bins_1 = _module_type_info(scanner_info, m1)
+        for m2 in range(m1 + 1):
+            _, num_det_els_2, num_energy_bins_2 = _module_type_info(scanner_info, m2)
+            num_module_pairs = int(
+                np.count_nonzero(_get_module_pair_sgid_lut(scanner_info, m1, m2) >= 0)
+            )
+            num_tofbins = (
+                scanner_info.tof_bin_edges[m1][m2].number_of_bins() if tof else 1
+            )
+            num_bins += (
+                num_module_pairs
+                * num_det_els_1
+                * num_energy_bins_1
+                * num_det_els_2
+                * num_energy_bins_2
+                * num_tofbins
+            )
+    return num_bins
+
+
 def backproject_efficiencies(
     scanner_info: petsird.ScannerInformation,
     all_detector_centers: list[np.ndarray],
