@@ -9,3 +9,4 @@ dependencies:
   - parallelproj>=2.0.2,<3
   - petsird~=0.13.1
   - ipython
+  - pytest

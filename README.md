@@ -235,6 +235,31 @@ downloaded from the "Actions" tab of the repository (requires a GitHub login).
 Datasets with other phantoms / number of counts can be created by running the
 CI workflow manually ("Run workflow").
 
+## Code structure
+
+The scripts in `python/` only parse the command line and call functions of a few
+flat modules (no installation needed, the scripts import them directly):
+
+| module | content |
+|---|---|
+| `scanner.py` | definition of the simulated scanner (`ScannerConfig`), converted into the parallelproj geometry (used for simulating) and the PETSIRD `ScannerGeometry` (written) |
+| `phantoms.py` | activity and attenuation images of the phantoms (`PHANTOMS`) |
+| `efficiencies.py` | detection efficiency model, converted into the efficiencies of the simulated LORs and the PETSIRD `DetectionEfficiencies` |
+| `simulation.py` | forward model, histogram to listmode conversion, ordering of the coincidences, PETSIRD header and writing |
+| `petsird_reader.py` | reading and interpreting PETSIRD data (supported features, ADPs, efficiencies, TOF, events) |
+| `reconstruction.py` | image grid, sensitivity image and LM OSEM reconstruction |
+| `geometry_plots.py` | visualization of the PETSIRD geometry and of events |
+| `viewer.py` | interactive 3-axis viewer |
+| `utils.py` | small generic helpers (version check, FWHM / sigma, file fingerprint, caching) |
+
+## Tests
+
+Unit tests (using a tiny scanner, run in a few seconds) are in `tests/test_*.py`:
+
+```
+python -m pytest
+```
+
 ## Consistency checks
 
 `tests/check_simulation_and_recon.py` checks a simulated PETSIRD file (and its

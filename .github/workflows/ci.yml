@@ -49,6 +49,10 @@ jobs:
         run: |
           python -c "from importlib.metadata import version; print('petsird', version('petsird')); print('parallelproj', version('parallelproj'))"
 
+      - name: Unit tests
+        run: |
+          python -m pytest -v
+
       - name: Simulate PETSIRD listmode data
         working-directory: python
         run: |
