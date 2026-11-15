@@ -30,6 +30,7 @@ def get_params_hash(
     voxel_size: tuple[float, float, float],
     tof: bool,
     att_img: np.ndarray | None = None,
+    fwhm_mm: float | None = None,
 ) -> str:
     """Generate a hash string for all sensitivity image parameters."""
     # Create a hash based on all parameters that affect sensitivity image calculation
@@ -44,6 +45,10 @@ def get_params_hash(
 
     # Add TOF flag
     hash_obj.update(str(tof).encode())
+
+    # Add FWHM of the resolution model (applied to the cached sensitivity image)
+    if fwhm_mm is not None:
+        hash_obj.update(f"{fwhm_mm:.6f}".encode())
 
     # Add attenuation image data if present
     if att_img is not None:
@@ -241,13 +246,13 @@ if attenuation_image_fname is not None:
         )
 
 
+# Generate hash for all sensitivity parameters (also used to name the output files)
+params_hash = get_params_hash(img_shape, voxel_size, tof, att_img, fwhm_mm=fwhm_mm)
+
 if unity_sens_img:
     print("Using ones as sensitivity image ...")
     sens_img = xp.ones(img_shape, dtype="float32")
 else:
-    # Generate hash for all sensitivity parameters
-    params_hash = get_params_hash(img_shape, voxel_size, tof, att_img)
-
     sens_img_path = Path(fname).with_name(f"{Path(fname).stem}_sens_{params_hash}.npy")
 
     if sens_img_path.exists():
@@ -269,10 +274,11 @@ else:
             attenuation_image=att_img,
         )
 
-    # apply adjoint of image-based resolution model
-    sens_img = res_model.adjoint(sens_img)
+        # apply adjoint of image-based resolution model
+        # (only for newly calculated sens. images - cached ones already include it)
+        sens_img = res_model.adjoint(sens_img)
 
-    xp.save(sens_img_path, sens_img)
+        xp.save(sens_img_path, sens_img)
 
 ## %%
 #################################################################################
