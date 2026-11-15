@@ -18,6 +18,7 @@ import argparse
 print(f"Using {xp.__name__} for parallelproj reconstructions")
 
 from utils import (
+    FWHM_PER_SIGMA,
     check_header_support,
     get_all_detector_centers,
     get_tof_parameters,
@@ -93,9 +94,6 @@ parser.add_argument(
     default=2.5,
     help="FWHM in mm for Gaussian filter for resolution model",
 )
-parser.add_argument(
-    "--store_energy_bins", action="store_true", help="Whether to store energy bins"
-)
 parser.add_argument("--num_epochs", type=int, default=5, help="Number of OSEM epochs")
 parser.add_argument(
     "--num_subsets", type=int, default=20, help="Number of OSEM subsets"
@@ -107,11 +105,6 @@ parser.add_argument(
     "--unity_sens_img",
     action="store_true",
     help="Whether to skip sensitivity image calculation and use unity image",
-)
-parser.add_argument(
-    "--unity_effs",
-    action="store_true",
-    help="Whether to use unity efficiencies for LORs",
 )
 parser.add_argument(
     "--non-tof", action="store_true", help="Whether to disable TOF in recon"
@@ -126,12 +119,10 @@ fname = args.fname
 img_shape: list[int] | None = args.img_shape
 voxel_size = tuple(args.voxel_size)
 fwhm_mm = args.fwhm_mm
-store_energy_bins = args.store_energy_bins
 num_epochs = args.num_epochs
 num_subsets = args.num_subsets
 verbose = args.verbose
 unity_sens_img = args.unity_sens_img
-unity_effs = args.unity_effs
 tof = not args.non_tof
 attenuation_image_fname: str | None = args.attenuation_image
 
@@ -246,7 +237,7 @@ if verbose:
 ### CALCULATE THE SENSITIVTY IMAGE #############################################
 ################################################################################
 
-sig = fwhm_mm / (2.35 * np.asarray(voxel_size))
+sig = fwhm_mm / (FWHM_PER_SIGMA * np.asarray(voxel_size))
 res_model = GaussianFilterOperator(img_shape, sigma=sig)
 
 att_img: None | np.ndarray = None
@@ -335,7 +326,6 @@ if not preprocess_file.exists():
             all_detector_centers,
             store_energy_bins=True,
             verbose=verbose,
-            unity_effs=unity_effs,
         )
     )
 
@@ -423,10 +413,8 @@ if effs.min() == 0:
     coords1 = coords1[valid_events]
     tof_bins = tof_bins[valid_events]
     effs = effs[valid_events]
-
-    if store_energy_bins:
-        energy_idx0 = energy_idx0[valid_events]
-        energy_idx1 = energy_idx1[valid_events]
+    energy_idx0 = energy_idx0[valid_events]
+    energy_idx1 = energy_idx1[valid_events]
 
 
 # %%

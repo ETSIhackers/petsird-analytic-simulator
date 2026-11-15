@@ -49,7 +49,7 @@ from petsird.helpers.geometry import get_ADP
 from petsird.validate.geometry import validate_detecting_element
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
-from utils import lm_file_fingerprint  # noqa: E402
+from utils import FWHM_PER_SIGMA, lm_file_fingerprint  # noqa: E402
 
 parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
 parser.add_argument("output_dir", type=Path, help="output directory of the simulator")
@@ -174,7 +174,7 @@ lm_proj = ListmodePETProjector(
 lm_proj.tof_parameters = TOFParameters(
     num_tofbins=tof_bin_edges.size - 1,
     tofbin_width=float(tof_bin_edges[1] - tof_bin_edges[0]),
-    sigma_tof=float(scanner.tof_resolution[0][0]) / 2.35,
+    sigma_tof=float(scanner.tof_resolution[0][0]) / FWHM_PER_SIGMA,
 )
 lm_proj.event_tofbins = tof_idx.astype("int16")
 lm_proj.tof = True

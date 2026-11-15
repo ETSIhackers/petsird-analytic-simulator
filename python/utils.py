@@ -21,6 +21,9 @@ import petsird
 from petsird.helpers.geometry import mult_transforms, transform_BoxShape
 from petsird.helpers.plot_scanner import draw_BoxShape
 
+# ratio between the FWHM and the standard deviation of a Gaussian: 2 * sqrt(2 * ln(2))
+FWHM_PER_SIGMA = 2 * np.sqrt(2 * np.log(2))
+
 # NOTE on conventions used in this module (PETSIRD >= 0.13):
 # - a DetectionBin of a module type encodes
 #     energy_idx + (element_idx + module_idx * num_det_els) * num_energy_bins
@@ -320,7 +323,7 @@ def get_tof_parameters(
         tofbin_width=tofbin_width,
         # TOF resolution is stored as FWHM in mm
         sigma_tof=float(scanner_info.tof_resolution[module_type_1][module_type_2])
-        / 2.35,
+        / FWHM_PER_SIGMA,
     )
 
 
@@ -449,7 +452,6 @@ def read_listmode_prompt_events(
     header: petsird.Header,
     all_detector_centers: list[np.ndarray],
     store_energy_bins: bool = True,
-    unity_effs: bool = False,
     verbose: bool = False,
     with_calibration_factor: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -596,35 +598,32 @@ def read_listmode_prompt_events(
 
         tof_bins.append(tof_idx)
 
-        if unity_effs:
-            effs.append(np.ones(det_bin_0.size, dtype="float32"))
-        else:
-            det_bin_effs_1 = _get_detection_bin_efficiencies(scanner_info, m1).ravel()
-            det_bin_effs_2 = _get_detection_bin_efficiencies(scanner_info, m2).ravel()
-            sgid_lut = _get_module_pair_sgid_lut(scanner_info, m1, m2)
-            mp_effs = _get_module_pair_efficiencies(scanner_info, m1, m2)
+        det_bin_effs_1 = _get_detection_bin_efficiencies(scanner_info, m1).ravel()
+        det_bin_effs_2 = _get_detection_bin_efficiencies(scanner_info, m2).ravel()
+        sgid_lut = _get_module_pair_sgid_lut(scanner_info, m1, m2)
+        mp_effs = _get_module_pair_efficiencies(scanner_info, m1, m2)
 
-            sgid = sgid_lut[mod_0, mod_1]
-            in_coinc = sgid >= 0
+        sgid = sgid_lut[mod_0, mod_1]
+        in_coinc = sgid >= 0
 
-            if not np.all(in_coinc):
-                warnings.warn(
-                    f"{np.count_nonzero(~in_coinc)} events of module type pair ({m1}, {m2}) "
-                    "are in module pairs that are not in coincidence (efficiency set to 0)",
-                    UserWarning,
-                )
-
-            eff = (
-                calibration_factor
-                * det_bin_effs_1[det_bin_0]
-                * det_bin_effs_2[det_bin_1]
-                * mp_effs[
-                    np.where(in_coinc, sgid, 0),
-                    det_bin_0 % (num_det_els_1 * num_energy_bins_1),
-                    det_bin_1 % (num_det_els_2 * num_energy_bins_2),
-                ]
+        if not np.all(in_coinc):
+            warnings.warn(
+                f"{np.count_nonzero(~in_coinc)} events of module type pair ({m1}, {m2}) "
+                "are in module pairs that are not in coincidence (efficiency set to 0)",
+                UserWarning,
             )
-            effs.append(np.where(in_coinc, eff, 0).astype("float32"))
+
+        eff = (
+            calibration_factor
+            * det_bin_effs_1[det_bin_0]
+            * det_bin_effs_2[det_bin_1]
+            * mp_effs[
+                np.where(in_coinc, sgid, 0),
+                det_bin_0 % (num_det_els_1 * num_energy_bins_1),
+                det_bin_1 % (num_det_els_2 * num_energy_bins_2),
+            ]
+        )
+        effs.append(np.where(in_coinc, eff, 0).astype("float32"))
 
         if store_energy_bins:
             energy_idx0.append(en_0)

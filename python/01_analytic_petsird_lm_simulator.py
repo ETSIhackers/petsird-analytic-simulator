@@ -41,6 +41,8 @@ from pathlib import Path
 import petsird
 from petsird.helpers.create import construct_lower_triangular_matrix
 
+from utils import FWHM_PER_SIGMA
+
 
 # %%
 def circular_distance(i_mod_1: int, i_mod_2: int, num_modules: int) -> int:
@@ -407,7 +409,7 @@ np.save(output_dir / "attenuation_image.npy", att_img)
 # setup of a parallelproj TOF projector
 
 # TOF parameters
-sig_tof = tof_fwhm_mm / 2.35
+sig_tof = tof_fwhm_mm / FWHM_PER_SIGMA
 tof_bin_width = 0.8 * sig_tof
 # calculate the number of TOF bins
 # we set it to twice the image diagonal divided by the tof bin width
@@ -432,7 +434,7 @@ assert proj.adjointness_test(np, "cpu", dtype=np.float32, rtol=1e-4)
 # %%
 # setup a simple image space resolution model
 
-sig = fwhm_mm / (2.35 * np.asarray(voxel_size))
+sig = fwhm_mm / (FWHM_PER_SIGMA * np.asarray(voxel_size))
 res_model = GaussianFilterOperator(img_shape, sigma=sig)
 
 # %%
@@ -875,7 +877,7 @@ petsird_scanner = petsird.ScannerInformation(
     scanner_geometry=scanner_geometry,
     tof_bin_edges=[[tofBinEdges]],  # lower-triangular list of list for all module type pairs
     tof_resolution=[
-        [2.35 * proj.tof_parameters.sigma_tof]
+        [tof_fwhm_mm]
     ],  # FWHM in mm, lower-triangular list of list for all module type pairs
     event_energy_bin_edges=[energyBinEdges],  # list for all module types
     energy_resolution_at_511=[0.11],  # as fraction of 511, list for all module types
