@@ -4,7 +4,7 @@ Two kinds of reconstructions:
 - LM OSEM of PETSIRD data (the reference implementation of this repository):
   sensitivity_image() from the PETSIRD scanner information (geometry and detection
   efficiency tables) and lm_osem() of the prompt events read with
-  petsird_reader.read_listmode_prompt_events() (LOR end points, TOF bins, efficiencies)
+  petsird_reader.read_listmode_events() (LOR end points, TOF bins, efficiencies)
 - histogram_mlem(): MLEM of histogrammed (sinogram) data with a parallelproj forward
   operator, used by the simulator to create a reference reconstruction with the exact
   simulation model (independent of PETSIRD)
@@ -252,6 +252,20 @@ def sensitivity_image(
     )
 
 
+def constant_randoms_contamination(
+    randoms_per_lor_and_tof_bin: float, num_events: int, num_tofbins: int, tof: bool
+) -> np.ndarray:
+    """additive contamination of all events for randoms that are constant for all LORs
+    (with non-zero efficiency) and TOF bins
+
+    The expected counts of an event in a LM reconstruction refer to its TOF bin (TOF) or
+    its LOR (non-TOF), i.e. the randoms of a TOF bin or the sum of the randoms over all
+    TOF bins of the LOR.
+    """
+    randoms_per_event = randoms_per_lor_and_tof_bin * (1 if tof else num_tofbins)
+    return np.full(num_events, randoms_per_event, dtype=np.float32)
+
+
 def em_update(x: Array, objective: C1Function, sens_img: Array, mask: Array | None = None) -> Array:
     """one EM update written as preconditioned gradient step
 
@@ -291,7 +305,7 @@ def create_lm_subset_objectives(
 ) -> list[NegPoissonLogLListmode]:
     """negative Poisson log-likelihoods of subsets of (pre-read) PETSIRD listmode events
 
-    The events (from petsird_reader.read_listmode_prompt_events) are split into subsets
+    The events (from petsird_reader.read_listmode_events) are split into subsets
     by taking every num_subsets-th event. The forward model of the expected counts of
     an event e is
       ybar_e = eff_e * att_e * (P G x)_e + s_e
@@ -300,16 +314,21 @@ def create_lm_subset_objectives(
     model G and the additive contamination s_e (e.g. randoms, scatter; 0 if not given).
     The sensitivity image of a subset is approximated by sens_img / num_subsets.
 
-    If the contamination is not strictly positive, eps is added to the expected counts
-    of all events to avoid divisions by zero for events with zero expected counts
-    (see parallelproj.functions.NegPoissonLogLListmode).
+    eps is added to the expected counts of all events (see
+    parallelproj.functions.NegPoissonLogLListmode). It is only needed if the
+    contamination is not strictly positive, to avoid divisions by zero for events with
+    zero expected counts (e.g. when the image is 0 along their LOR); otherwise use
+    eps = 0 (exact log-likelihood).
     """
     num_events = coords0.shape[0]
     if contamination_list is None:
         contamination_list = np.zeros(num_events, dtype=np.float32)
     contamination_list = xp.asarray(contamination_list, dtype=xp.float32)
-    if float(xp.min(contamination_list)) > 0:
-        eps = 0.0
+    if eps <= 0 and float(xp.min(contamination_list)) <= 0:
+        raise ValueError(
+            "eps > 0 is required if the contamination is not strictly positive "
+            "(expected counts of events can be 0)"
+        )
 
     effs = xp.asarray(effs, dtype="float32")
     if att_img is not None:

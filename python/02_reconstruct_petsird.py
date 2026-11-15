@@ -8,6 +8,8 @@ with a fingerprint of the listmode file and a hash of the reconstruction paramet
 """
 
 import argparse
+import json
+import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -23,9 +25,11 @@ from petsird_reader import (
     get_all_detector_centers,
     get_num_data_bins,
     get_tof_parameters,
-    read_listmode_prompt_events,
+    EVENT_ARRAYS,
+    read_listmode_events,
 )
 from reconstruction import (
+    constant_randoms_contamination,
     create_lm_subset_objectives,
     default_image_grid,
     lm_osem,
@@ -75,6 +79,13 @@ parser.add_argument(
 parser.add_argument("--non-tof", action="store_true", help="Whether to disable TOF in recon")
 parser.add_argument(
     "--attenuation_image", type=str, default=None, help="Path to attenuation image"
+)
+parser.add_argument(
+    "--randoms_expectation",
+    type=str,
+    default=None,
+    help="Path to the (true) randoms expectation written by the simulator "
+    "(randoms_expectation.json) used for randoms correction",
 )
 args = parser.parse_args()
 
@@ -185,23 +196,29 @@ else:
     )
 
 # %%
-# prompt events (LOR end points, TOF bins, efficiencies)
+# prompt and delayed events (LOR end points, TOF bins, efficiencies)
 
-event_arrays = ("coords0", "coords1", "tof_bins", "effs", "energy_idx0", "energy_idx1")
-events = load_or_compute(
+streams = ("prompts", "delayeds")
+# cached as flat dictionary with keys "<stream>_<array>"
+flat_events = load_or_compute(
     output_path("preprocessed_events", ".npz"),
-    compute=lambda: dict(
-        zip(
-            event_arrays,
-            read_listmode_prompt_events(
-                reader, header, all_detector_centers, verbose=args.verbose
-            ),
-        )
-    ),
+    compute=lambda: {
+        f"{stream}_{k}": v
+        for stream, arrays in read_listmode_events(
+            reader, header, all_detector_centers, verbose=args.verbose
+        ).items()
+        for k, v in arrays.items()
+    },
     save=lambda path, x: np.savez_compressed(path, **x),
     load=load_npz_dict,
     description="preprocessed events",
 )
+all_events = {
+    stream: {k: flat_events[f"{stream}_{k}"] for k in EVENT_ARRAYS} for stream in streams
+}
+events = all_events["prompts"]
+num_delayeds = all_events["delayeds"]["coords0"].shape[0]
+print(f"{events['coords0'].shape[0]} prompts, {num_delayeds} delayeds")
 
 # TOF parameters (check_header_support() made sure that all module type pairs have
 # the same TOF parameters)
@@ -236,11 +253,42 @@ if not np.all(valid):
     print(f"Filtering out {np.count_nonzero(~valid)} events with zero efficiency ...")
     events = {k: v[valid] for k, v in events.items()}
 
-# eps added to the expected counts of all events: 1e-6 x mean counts per data bin
-eps = 1e-6 * events["coords0"].shape[0] / get_num_data_bins(scanner_info, tof)
+# additive contamination (randoms) of all events
+contamination_list, contamination_sum = None, 0.0
+if args.randoms_expectation is not None:
+    # "oracle" randoms correction using the true randoms expectation of the simulator:
+    # constant expectation per LOR (with non-zero efficiency) and TOF bin
+    with open(args.randoms_expectation, encoding="UTF-8") as f:
+        randoms_info = json.load(f)
+    num_tofbins = scanner_info.tof_bin_edges[0][0].number_of_bins()
+    if randoms_info["num_tofbins"] != num_tofbins:
+        raise ValueError("number of TOF bins of the randoms expectation and the data differ")
+    contamination_list = constant_randoms_contamination(
+        randoms_info["expected_randoms_per_lor_and_tof_bin"],
+        events["coords0"].shape[0],
+        num_tofbins,
+        tof,
+    )
+    # sum over all data bins (only needed for the value of the log-likelihood)
+    contamination_sum = randoms_info["expected_randoms"]
+    print(f"Randoms correction with {contamination_list[0]:.3e} expected randoms per event")
+elif num_delayeds > 0:
+    warnings.warn(
+        f"The file contains {num_delayeds} delayed coincidences, but randoms are not "
+        "corrected (see --randoms_expectation): the reconstruction is biased.",
+        UserWarning,
+    )
+
+# eps added to the expected counts of all events: only needed if the contamination is
+# not strictly positive (e.g. without randoms correction) to avoid divisions by zero,
+# then 1e-6 x mean counts per data bin (as recommended by parallelproj)
+if contamination_list is not None and np.min(contamination_list) > 0:
+    eps = 0.0
+else:
+    eps = 1e-6 * events["coords0"].shape[0] / get_num_data_bins(scanner_info, tof)
 print(f"Starting parallelproj LM OSEM reconstruction (eps = {eps:.2e}) ...")
 
-# negative Poisson log-likelihoods of all subsets (no additive contamination yet)
+# negative Poisson log-likelihoods of all subsets
 subset_objectives = create_lm_subset_objectives(
     events["coords0"],
     events["coords1"],
@@ -255,11 +303,16 @@ subset_objectives = create_lm_subset_objectives(
     eps,
     tof_params=tof_params,
     att_img=att_img,
+    contamination_list=contamination_list,
+    contamination_sum=contamination_sum,
     xp=xp,
 )
 recon = lm_osem(subset_objectives, sens_img, args.num_epochs, xp=xp)
 
-opath = fname.with_name(f"lm_osem_{args.num_epochs}_{args.num_subsets}_{params_tag}.npy")
+randoms_tag = "_randoms_corrected" if contamination_list is not None else ""
+opath = fname.with_name(
+    f"lm_osem_{args.num_epochs}_{args.num_subsets}_{params_tag}{randoms_tag}.npy"
+)
 xp.save(opath, recon)
 print(f"LM OSEM recon saved to {opath}")
 

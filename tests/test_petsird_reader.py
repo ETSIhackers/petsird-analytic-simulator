@@ -34,11 +34,11 @@ def test_ignored_features_warn(tiny_header):
     h.scanner.gantry_alignment = petsird.RigidTransformation(
         matrix=np.array([[1, 0, 0, 5], [0, 1, 0, 0], [0, 0, 1, 0]], dtype="float32")
     )
-    h.scanner.delayed_event_policy = petsird.CoincidencePolicy.REJECT_HIGHER_MULTIPLES
+    h.scanner.triple_event_policy = petsird.TripleEventPolicy.REJECT_HIGHER_MULTIPLES
     with pytest.warns(UserWarning) as record:
         check_header_support(h)
     messages = " ".join(str(r.message) for r in record)
-    assert "gantry alignment" in messages and "delayed" in messages
+    assert "gantry alignment" in messages and "triple events" in messages
 
 
 def test_num_data_bins(tiny_config, tiny_header, tiny_tof_params):

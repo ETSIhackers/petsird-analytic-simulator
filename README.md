@@ -1,15 +1,15 @@
-# Analytic simulation of PETSIRD v0.13.1 data using parallelproj
+# Analytic simulation of PETSIRD v0.13.2 data using parallelproj
 
 This tool allows to "quickly" simulate and reconstruct PETSIRD TOF listmode data
-using a simplified physics model (true unscattered coincidences only, including
-attenuation) and non-trivial
+using a simplified physics model (true unscattered coincidences including
+attenuation, and random coincidences) and non-trivial
 detection efficiencies.
 
 One of its aims is to be able to generate data that can be used to test implementations
 of software supporting the PETSIRD standard for listmode data.
 
 Requirements:
-- [PETSIRD](https://github.com/ETSInitiative/PETSIRD) v0.13.x
+- [PETSIRD](https://github.com/ETSInitiative/PETSIRD) v0.13.x (>= 0.13.2)
 - [parallelproj](https://github.com/gschramm/parallelproj) v2.x (requires python >= 3.12)
 - matplotlib (plots and the interactive 3-axis viewer in `python/viewer.py`)
 
@@ -39,6 +39,7 @@ data/sim_uniform_cylinder_4000000_0
 |-- ground_truth_image.npy
 |-- petsird_geometry_and_events.png
 |-- petsird_summary.txt
+|-- randoms_expectation.json
 |-- reference_sensitivity_image.npy
 |-- sim_parameters.json
 `-- simulated_petsird_lm_file.bin
@@ -51,12 +52,21 @@ data/sim_uniform_cylinder_4000000_0
 | `ground_truth_image.npy` | ground truth activity image, i.e. **before** the image-based resolution model (`--fwhm_mm`) which is part of the forward model of the simulation |
 | `attenuation_image.npy` | attenuation image (1 / mm) of the water body of the phantom, to be used for attenuation correction |
 | `reference_sensitivity_image.npy` | sensitivity image of the forward model of the simulation (efficiencies, attenuation, image-based resolution model) |
+| `randoms_expectation.json` | true (noise-free) expectation of the randoms: random fraction, expected trues and randoms, expected randoms per LOR and TOF bin (to test randoms corrections) |
 | `petsird_summary.txt` | human-readable summary of the PETSIRD file (output of `petsird.helpers.analysis`) |
 | `petsird_geometry_and_events.png` | visualization of the PETSIRD geometry and the first events (see below) |
 | `lm_backprojection_tof.npy` | (only with `--save_lm_backprojection`) TOF LM backprojection of the events before writing them to PETSIRD |
 | `reference_histogram_mlem_<n>_epochs.npy` | (only with `--num_epochs_mlem n`) MLEM reconstruction of the histogrammed data with the exact forward model of the simulation |
 
 All images are centered at (0,0,0) and use the voxel size `--voxel_size`.
+
+**Randoms:** the prompts contain true coincidences and random coincidences with an
+expected random fraction R / (T + R) given by `--random_fraction` (default 0.1, where
+T are the (attenuated) trues and R the randoms). The randoms are constant for all LORs
+(pairs of detection bins of modules in coincidence) and TOF bins, except for LORs with a
+"dead" detecting element (zero efficiency) where they are 0. An independent Poisson
+realization of the randoms is stored as delayed coincidences. With
+`--random_fraction 0`, no randoms and no delayeds are simulated.
 
 `petsird_geometry_and_events.png` visualizes (transaxial, sagittal and 3D views) the PETSIRD scanner geometry as written
 to the file (detecting element boxes with front faces and box axes, average detection
@@ -105,7 +115,12 @@ Physics / simulation parameters:
   --tof_fwhm_mm TOF_FWHM_MM
                         FWHM of the TOF resolution model in mm (default: 10.0)
   --num_true_counts NUM_TRUE_COUNTS
-                        number of true coincidences to simulate (default: 4000000)
+                        (expected) number of true coincidences to simulate (default: 4000000)
+  --random_fraction RANDOM_FRACTION
+                        (expected) random fraction R / (T + R) of the prompts, where R / T are the
+                        total randoms / (attenuated) trues; the randoms are also stored as
+                        independent realization in the delayed coincidences (0 means no randoms
+                        and no delayeds) (default: 0.1)
 
 Detection Efficiency Parameters:
   --uniform_crystal_eff
@@ -174,7 +189,7 @@ features that would lead to wrong reconstructions:
 and warns about information that is ignored:
 
 - gantry alignment (the image is reconstructed in the PET gantry coordinate system)
-- delayed events (no randoms correction) and dead time time blocks (no dead time correction)
+- delayed events, if no randoms correction is used, and dead time time blocks (no dead time correction)
 - single, triple and quadruple events, singles histograms, external signals and
   non-detecting volumes
 
@@ -232,6 +247,18 @@ For data created by the simulator, use the simulated attenuation image
 (`attenuation_image.npy` in the output directory) for a quantitatively correct
 attenuation correction. The 2-class attenuation image created by
 `03_create_two_class_att_img.py` is only an approximation of it.
+
+### Randoms correction
+
+```
+python 02_reconstruct_petsird.py my_petsird_file.bin --attenuation_image my_att_img.npy --randoms_expectation randoms_expectation.json
+```
+
+uses the true randoms expectation written by the simulator (`randoms_expectation.json`)
+as additive contamination in the LM OSEM reconstruction ("oracle" randoms correction,
+only possible for simulated data). An estimation of the randoms from the delayed
+coincidences stored in the PETSIRD file is not implemented yet. Without randoms
+correction, the reconstruction of data with randoms is biased (a warning is shown).
 Reconstructions without attenuation correction are expected to be biased low
 (and to show "cupping").
 
@@ -282,7 +309,7 @@ These checks are run in the CI:
 cd python
 python 01_analytic_petsird_lm_simulator.py --output_dir ../ci_output --phantom offcenter_cylinder --num_true_counts 200000 --save_lm_backprojection --skip_plots
 python 02_reconstruct_petsird.py ../ci_output/simulated_petsird_lm_file.bin --img_shape 55 55 19 --num_epochs 1
-python 02_reconstruct_petsird.py ../ci_output/simulated_petsird_lm_file.bin --img_shape 55 55 19 --num_epochs 1 --attenuation_image ../ci_output/attenuation_image.npy
+python 02_reconstruct_petsird.py ../ci_output/simulated_petsird_lm_file.bin --img_shape 55 55 19 --num_epochs 1 --attenuation_image ../ci_output/attenuation_image.npy --randoms_expectation ../ci_output/randoms_expectation.json
 cd ..
 python tests/check_simulation_and_recon.py ci_output
 ```

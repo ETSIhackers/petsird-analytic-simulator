@@ -12,7 +12,8 @@ reconstruction code:
 - the detecting element box satisfies the PETSIRD constraints
 - all materials referenced by the scanner geometry are defined in bulk_materials
 - all tables over module (type) pairs are lower-triangular
-- all coincidences are ordered (detection_bins[0] >= detection_bins[1])
+- all prompt and delayed coincidences are ordered (detection_bins[0] >= detection_bins[1])
+- the numbers of prompts (trues + randoms) and delayeds (randoms) match their expectation
 - a TOF LM back projection of the events in the PETSIRD file matches the one
   calculated by the simulator before writing (checks detection bin swapping and
   TOF bin mirroring)
@@ -127,9 +128,15 @@ check(
     f"referenced materials {sorted(referenced_materials)} are defined in bulk_materials "
     f"({', '.join(m.name for m in materials.values())})",
 )
+random_fraction = sim_params.get("random_fraction", 0.0)
+expected_delayed_policy = (
+    petsird.CoincidencePolicy.MULTIPLES_AS_ALL_COINCIDENCES
+    if random_fraction > 0
+    else petsird.CoincidencePolicy.NONE
+)
 check(
-    scanner.prompt_event_policy == petsird.CoincidencePolicy.REJECT_HIGHER_MULTIPLES
-    and scanner.delayed_event_policy == petsird.CoincidencePolicy.NONE,
+    scanner.prompt_event_policy == petsird.CoincidencePolicy.MULTIPLES_AS_ALL_COINCIDENCES
+    and scanner.delayed_event_policy == expected_delayed_policy,
     "event policies",
 )
 
@@ -137,12 +144,18 @@ check(
 # read all events
 
 det_bin_0, det_bin_1, tof_idx = [], [], []
+delayeds = []
 for time_block in reader.read_time_blocks():
     if isinstance(time_block, petsird.TimeBlock.EventTimeBlock):
         for event in time_block.value.prompt_events[0][0]:
             det_bin_0.append(event.detection_bins[0])
             det_bin_1.append(event.detection_bins[1])
             tof_idx.append(event.tof_idx)
+        if len(time_block.value.delayed_events) > 0:
+            delayeds += [
+                (e.detection_bins[0], e.detection_bins[1])
+                for e in time_block.value.delayed_events[0][0]
+            ]
 det_bin_0, det_bin_1, tof_idx = map(np.asarray, (det_bin_0, det_bin_1, tof_idx))
 num_events = det_bin_0.size
 
@@ -153,7 +166,24 @@ check(
         are_detections_ordered(type_pair, int(b0), int(b1))
         for b0, b1 in zip(det_bin_0, det_bin_1)
     ),
-    f"all {num_events} coincidences are ordered",
+    f"all {num_events} prompt coincidences are ordered",
+)
+check(
+    all(are_detections_ordered(type_pair, int(b0), int(b1)) for b0, b1 in delayeds),
+    f"all {len(delayeds)} delayed coincidences are ordered",
+)
+
+# number of prompts (trues + randoms) and delayeds (randoms) vs. their expectation
+randoms_info = json.loads((out_dir / "randoms_expectation.json").read_text())
+expected_prompts = randoms_info["expected_trues"] + randoms_info["expected_randoms"]
+expected_delayeds = randoms_info["expected_randoms"]
+check(
+    abs(num_events - expected_prompts) < 5 * np.sqrt(expected_prompts),
+    f"number of prompts {num_events} matches the expectation {expected_prompts:.0f}",
+)
+check(
+    abs(len(delayeds) - expected_delayeds) < 5 * np.sqrt(expected_delayeds) + 1,
+    f"number of delayeds {len(delayeds)} matches the expectation {expected_delayeds:.0f}",
 )
 
 # %%
@@ -231,8 +261,9 @@ act = np.where(inside, gt_img[vox[..., 0], vox[..., 1], vox[..., 2]], 0)
 has_act = act.sum(1) > 0
 expected_pos = (act * t).sum(1)[has_act] / act.sum(1)[has_act]
 slope = np.polyfit(expected_pos, decoded_pos[has_act], 1)[0]
+# (randoms have uniformly distributed TOF bins, which reduces the slope by ~ (1 - f))
 check(
-    0.5 < slope < 1.5,
+    0.5 * (1 - random_fraction) < slope < 1.5,
     f"TOF bins follow the PETSIRD convention: slope of decoded vs expected emission "
     f"positions {slope:+.2f} (flipped convention: -1)",
 )

@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 
 
-def check_petsird_version(min_version: tuple[int, int, int] = (0, 13, 1)) -> None:
+def check_petsird_version(min_version: tuple[int, int, int] = (0, 13, 2)) -> None:
     """raise an ImportError if the installed petsird version is too old"""
     petsird_version = tuple(map(int, version("petsird").split(".")))
     if petsird_version < min_version:
