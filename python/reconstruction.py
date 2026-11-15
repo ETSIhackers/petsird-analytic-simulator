@@ -1,11 +1,31 @@
-"""listmode OSEM reconstruction of PETSIRD data with parallelproj"""
+"""reconstruction with parallelproj
+
+Two kinds of reconstructions:
+- LM OSEM of PETSIRD data (the reference implementation of this repository):
+  sensitivity_image() from the PETSIRD scanner information (geometry and detection
+  efficiency tables) and lm_osem() of the prompt events read with
+  petsird_reader.read_listmode_prompt_events() (LOR end points, TOF bins, efficiencies)
+- histogram_mlem(): MLEM of histogrammed (sinogram) data with a parallelproj forward
+  operator, used by the simulator to create a reference reconstruction with the exact
+  simulation model (independent of PETSIRD)
+
+Both use the same EM update (em_update) written as a preconditioned gradient step of
+the negative Poisson log-likelihood (as in the parallelproj examples).
+"""
 
 import hashlib
 from types import ModuleType
 
 import numpy as np
 import petsird
-from parallelproj.functions import NegPoissonLogLListmode
+from array_api_compat import array_namespace
+from parallelproj import Array
+from parallelproj.functions import (
+    C1Function,
+    C2AffineObjective,
+    NegPoissonLogL,
+    NegPoissonLogLListmode,
+)
 from parallelproj.operators import (
     CompositeLinearOperator,
     ElementwiseMultiplicationOperator,
@@ -34,8 +54,10 @@ def backproject_efficiencies(
     attenuation_image: np.ndarray | None = None,
     with_calibration_factor: bool = True,
 ) -> np.ndarray:
-    """sensitivity image: back projection of the detection efficiencies of all LORs
+    """back projection of the detection efficiencies of all LORs of a PETSIRD scanner
 
+    The LORs and their efficiencies are derived from the PETSIRD scanner information
+    (ADPs of the detecting elements and detection efficiency tables).
     All module pairs (of all module type pairs) that are in coincidence (SGID >= 0)
     are back projected exactly once. For TOF, all TOF bins are back projected.
     The efficiencies of all energy bin combinations of a LOR are summed, since the
@@ -209,7 +231,12 @@ def sensitivity_image(
     attenuation_image: np.ndarray | None = None,
     verbose: bool = False,
 ):
-    """sensitivity image G^T B^T (effs x att) incl. the adjoint of the resolution model G"""
+    """sensitivity image of a LM reconstruction of PETSIRD data
+
+    G^T B^T (effs x att): back projection B^T of the efficiencies (and attenuation
+    factors) of all LORs of the PETSIRD scanner (see backproject_efficiencies) followed
+    by the adjoint of the image-based resolution model G.
+    """
     return res_model.adjoint(
         backproject_efficiencies(
             scanner_info,
@@ -225,7 +252,26 @@ def sensitivity_image(
     )
 
 
-def lm_osem(
+def em_update(x: Array, objective: C1Function, sens_img: Array, mask: Array | None = None) -> Array:
+    """one EM update written as preconditioned gradient step
+
+    x_new = x - (x / sens_img) * grad f(x)
+          = (x / sens_img) * A^T (y / (A x + s))     for a negative Poisson log-likelihood f
+
+    Works for any objective providing a gradient, e.g. NegPoissonLogLListmode (listmode)
+    or C2AffineObjective(NegPoissonLogL) (histogrammed data).
+    Voxels outside the mask (e.g. zero sensitivity) are set to 0.
+    """
+    xp = array_namespace(x)
+    if mask is None:
+        d = x / sens_img
+    else:
+        d = xp.where(mask, x / xp.where(mask, sens_img, 1), 0)
+    # clip removes negative values due to floating point rounding
+    return xp.clip(x - d * objective.gradient(x), 0, None)
+
+
+def create_lm_subset_objectives(
     coords0: np.ndarray,
     coords1: np.ndarray,
     tof_bins: np.ndarray,
@@ -235,39 +281,43 @@ def lm_osem(
     img_origin,
     res_model: GaussianFilterOperator,
     sens_img,
-    num_epochs: int,
     num_subsets: int,
     eps: float,
     tof_params: TOFParameters | None = None,
     att_img: np.ndarray | None = None,
+    contamination_list: np.ndarray | None = None,
+    contamination_sum: float = 0.0,
     xp: ModuleType = np,
-):
-    """listmode OSEM reconstruction
+) -> list[NegPoissonLogLListmode]:
+    """negative Poisson log-likelihoods of subsets of (pre-read) PETSIRD listmode events
 
-    Forward model of the expected counts of an event e:
-      ybar_e = eff_e * att_e * (P G x)_e + eps
-    with the detection efficiency eff_e, the attenuation factor att_e, the (TOF) LM
-    projector P and the image-based resolution model G.
-    Without additive contamination (randoms, scatter), the multiplicative factors
-    cancel in the OSEM update, but they are needed for an additive term like eps
-    (and contaminations in the future). eps avoids divisions by zero for events with
-    zero expected counts (e.g. when the image is 0 along their LOR), see
-    parallelproj.functions.NegPoissonLogLListmode.
+    The events (from petsird_reader.read_listmode_prompt_events) are split into subsets
+    by taking every num_subsets-th event. The forward model of the expected counts of
+    an event e is
+      ybar_e = eff_e * att_e * (P G x)_e + s_e
+    with the detection efficiency eff_e, the attenuation factor att_e (non-TOF line
+    integral through att_img), the (TOF) LM projector P, the image-based resolution
+    model G and the additive contamination s_e (e.g. randoms, scatter; 0 if not given).
+    The sensitivity image of a subset is approximated by sens_img / num_subsets.
 
-    The events are split into subsets by taking every num_subsets-th event.
-    OSEM update: x <- x - (x / sens_subset) * grad_subset(x)
-                    = (x / sens_subset) * A_subset^T (1 / (A_subset x + eps))
-    Voxels with zero sensitivity are not "seen" by the scanner and set to 0.
+    If the contamination is not strictly positive, eps is added to the expected counts
+    of all events to avoid divisions by zero for events with zero expected counts
+    (see parallelproj.functions.NegPoissonLogLListmode).
     """
-    subset_slices = [slice(i, None, num_subsets) for i in range(num_subsets)]
+    num_events = coords0.shape[0]
+    if contamination_list is None:
+        contamination_list = np.zeros(num_events, dtype=np.float32)
+    contamination_list = xp.asarray(contamination_list, dtype=xp.float32)
+    if float(xp.min(contamination_list)) > 0:
+        eps = 0.0
 
     effs = xp.asarray(effs, dtype="float32")
     if att_img is not None:
         att_img = xp.asarray(att_img, dtype=xp.float32)
 
-    # negative Poisson log-likelihood of every subset
-    subset_objectives: list[NegPoissonLogLListmode] = []
-    for sl in subset_slices:
+    objectives = []
+    for k in range(num_subsets):
+        sl = slice(k, None, num_subsets)
         lm_proj = ListmodePETProjector(
             xp.asarray(coords0[sl, :]).copy(),
             xp.asarray(coords1[sl, :]).copy(),
@@ -277,7 +327,7 @@ def lm_osem(
         )
 
         # multiplicative factors of all events: efficiencies x attenuation factors
-        # (non-TOF line integrals through the attenuation image)
+        # (non-TOF line integrals, i.e. computed before enabling TOF)
         mult_factors = effs[sl]
         if att_img is not None:
             mult_factors = mult_factors * xp.exp(-lm_proj(att_img))
@@ -287,21 +337,36 @@ def lm_osem(
             lm_proj.event_tofbins = xp.asarray(tof_bins[sl], dtype=xp.int16).copy()
             lm_proj.tof = True
 
-        subset_objectives.append(
+        objectives.append(
             NegPoissonLogLListmode(
                 CompositeLinearOperator(
                     [ElementwiseMultiplicationOperator(mult_factors), lm_proj, res_model]
                 ),
-                # the sensitivity image of a subset is (approx.) sens_img / num_subsets
                 sensitivity_image=sens_img / num_subsets,
-                contamination_list=xp.zeros(int(mult_factors.shape[0]), dtype=xp.float32),
-                contamination_sinogram_sum=0.0,
+                contamination_list=contamination_list[sl],
+                contamination_sinogram_sum=contamination_sum / num_subsets,
                 eps=eps,
             )
         )
+    return objectives
 
-    step_scale = xp.where(sens_img > 0, num_subsets / xp.where(sens_img > 0, sens_img, 1), 0)
-    recon = xp.where(sens_img > 0, xp.ones(img_shape, dtype="float32"), 0)
+
+def lm_osem(
+    subset_objectives: list[NegPoissonLogLListmode],
+    sens_img,
+    num_epochs: int,
+    xp: ModuleType = np,
+):
+    """LM OSEM reconstruction of PETSIRD data (see create_lm_subset_objectives)
+
+    Starts from a uniform image (0 outside the voxels with non-zero sensitivity)
+    and cycles num_epochs times through all subsets using em_update with the
+    subset sensitivity image sens_img / num_subsets.
+    """
+    num_subsets = len(subset_objectives)
+    mask = sens_img > 0
+    sens_subset = sens_img / num_subsets
+    recon = xp.where(mask, xp.ones(sens_img.shape, dtype="float32"), 0)
 
     for i_epoch in range(num_epochs):
         for i_subset, objective in enumerate(subset_objectives):
@@ -309,8 +374,31 @@ def lm_osem(
                 f"it {(i_epoch + 1):03} / {num_epochs:03}, ss {(i_subset + 1):03} / {num_subsets:03}",
                 end="\r",
             )
-            recon = recon - recon * step_scale * objective.gradient(recon)
-            # remove negative values due to floating point rounding
-            recon = xp.clip(recon, 0, None)
+            recon = em_update(recon, objective, sens_subset, mask)
+    print("")
+    return recon
+
+
+def histogram_mlem(
+    fwd_op,
+    data: np.ndarray,
+    sens_img: np.ndarray,
+    num_epochs: int,
+    contamination: np.ndarray | None = None,
+) -> np.ndarray:
+    """MLEM of histogrammed (sinogram) data with a parallelproj forward operator
+
+    Used by the simulator as reference reconstruction with the exact simulation model
+    (independent of PETSIRD). Uses the "safe epsilon" mode of NegPoissonLogL to handle
+    bins with counts but zero expectation.
+    """
+    objective = C2AffineObjective(
+        NegPoissonLogL(np.asarray(data, dtype=np.float32)), fwd_op, contamination
+    )
+    mask = sens_img > 0
+    recon = np.where(mask, np.ones(fwd_op.in_shape, dtype=np.float32), 0)
+    for i in range(num_epochs):
+        print(f"MLEM epoch {(i + 1):03} / {num_epochs:03}", end="\r")
+        recon = em_update(recon, objective, sens_img, mask)
     print("")
     return recon

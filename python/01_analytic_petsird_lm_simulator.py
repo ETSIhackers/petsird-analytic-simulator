@@ -15,28 +15,31 @@ The building blocks are defined in
 
 import argparse
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from parallelproj.operators import GaussianFilterOperator
 from parallelproj.projectors import ListmodePETProjector
 
 from efficiencies import generate_efficiency_model, lor_efficiencies
 from geometry_plots import plot_petsird_geometry
 from phantoms import PHANTOMS, create_phantom
 from scanner import ScannerConfig, create_parallelproj_lor_descriptor
+from reconstruction import histogram_mlem
 from simulation import (
+    attenuation_factors,
     create_forward_model,
     create_petsird_header,
     create_tof_projector,
-    histogram_mlem,
     histogram_to_listmode,
-    plot_sensitivity_and_tof_profile,
     tof_parameters,
     to_petsird_coincidences,
     write_petsird_file,
 )
-from utils import check_petsird_version
+from utils import FWHM_PER_SIGMA, check_petsird_version
 
 check_petsird_version()
 
@@ -135,14 +138,15 @@ recon_group.add_argument(
     help="number of epochs for MLEM reconstruction of histogrammed data, 0 means no MLEM reconstruction",
 )
 recon_group.add_argument(
-    "--check_backprojection",
+    "--save_lm_backprojection",
     action="store_true",
-    help="save TOF histogram and (TOF and non-TOF) LM backprojections of the simulated data",
+    help="save the TOF LM backprojection of the simulated events (before writing them to "
+    "PETSIRD, used to check the written events)",
 )
 
 visual_group = parser.add_argument_group("Visualization and Debugging")
 visual_group.add_argument(
-    "--skip_plots", action="store_true", help="skip plotting the scanner geometry and TOF profile"
+    "--skip_plots", action="store_true", help="skip plotting the PETSIRD scanner geometry and events"
 )
 
 general_group = parser.add_argument_group("General Options")
@@ -181,32 +185,37 @@ efficiency_model = generate_efficiency_model(
     scanner_config, args.uniform_crystal_eff, args.uniform_sg_eff
 )
 
-fwd_model = create_forward_model(
-    tof_proj, args.fwhm_mm, lor_efficiencies(efficiency_model, lor_desc), att_img
+res_model = GaussianFilterOperator(
+    img_shape, sigma=args.fwhm_mm / (FWHM_PER_SIGMA * np.asarray(voxel_size))
 )
 
-# sensitivity images: of the forward model of the data (with attenuation) and of a
-# recon without attenuation correction
-sens_img = fwd_model.sensitivity_image(with_attenuation=True)
-np.save(output_dir / "reference_sensitivity_image.npy", sens_img)
-np.save(
-    output_dir / "reference_sensitivity_image_no_attenuation.npy",
-    fwd_model.sensitivity_image(with_attenuation=False),
+# forward model of the data: diag(efficiencies x attenuation factors) P G
+fwd_op = create_forward_model(
+    tof_proj,
+    res_model,
+    lor_efficiencies(efficiency_model, lor_desc)
+    * attenuation_factors(lor_desc, img_shape, voxel_size, att_img),
 )
+
+# sensitivity image of the forward model (incl. attenuation)
+sens_img = fwd_op.adjoint(np.ones(fwd_op.out_shape, dtype=np.float32))
+np.save(output_dir / "reference_sensitivity_image.npy", sens_img)
 
 # %%
 # expected and noisy TOF histogram (scaled to the requested number of counts)
 
-expected_counts = fwd_model.op(img)
+expected_counts = fwd_op(img)
 scale_fac = args.num_true_counts / expected_counts.sum()
 img *= scale_fac
 expected_counts *= scale_fac
 emission_data = np.random.poisson(expected_counts)
 
+# ground truth activity image (before the image-based resolution model, which is part
+# of the forward model), scaled such that the forward model yields the expected counts
 np.save(output_dir / "ground_truth_image.npy", img)
 
 if args.num_epochs_mlem > 0:
-    recon = histogram_mlem(fwd_model.op, emission_data, sens_img, args.num_epochs_mlem)
+    recon = histogram_mlem(fwd_op, emission_data, sens_img, args.num_epochs_mlem)
     np.save(output_dir / f"reference_histogram_mlem_{args.num_epochs_mlem}_epochs.npy", recon)
 
 # %%
@@ -214,33 +223,24 @@ if args.num_epochs_mlem > 0:
 
 events = histogram_to_listmode(emission_data, lor_desc, tof_params.num_tofbins)
 
-if not args.skip_plots:
-    fig = plot_sensitivity_and_tof_profile(sens_img, expected_counts, lor_desc, voxel_size)
-    fig.savefig(output_dir / "tof_profile_and_sensitivity_image.png", dpi=300)
-    fig.show()
-
-if args.check_backprojection:
-    np.save(
-        output_dir / "histogram_backprojection_tof.npy",
-        fwd_model.proj.adjoint(emission_data.astype(np.float32)),
-    )
-
+if args.save_lm_backprojection:
+    # TOF LM backprojection of the events before writing them to PETSIRD
+    # (parallelproj uses unsigned TOF bins 0 ... num_tofbins - 1)
     scanner = lor_desc.scanner
     lm_proj = ListmodePETProjector(
         scanner.get_lor_endpoints(events.start_module, events.start_el),
         scanner.get_lor_endpoints(events.end_module, events.end_el),
         img_shape,
-        fwd_model.proj.voxel_size,
-        img_origin=fwd_model.proj.img_origin,
+        tof_proj.voxel_size,
+        img_origin=tof_proj.img_origin,
     )
-    ones = np.ones(events.num_events, dtype=np.float32)
-    np.save(output_dir / "lm_backprojection_non_tof.npy", lm_proj.adjoint(ones))
-
-    # parallelproj uses unsigned TOF bins (0 ... num_tofbins - 1)
     lm_proj.tof_parameters = tof_params
     lm_proj.event_tofbins = events.tof_bin.astype(np.int16)
     lm_proj.tof = True
-    np.save(output_dir / "lm_backprojection_tof.npy", lm_proj.adjoint(ones))
+    np.save(
+        output_dir / "lm_backprojection_tof.npy",
+        lm_proj.adjoint(np.ones(events.num_events, dtype=np.float32)),
+    )
 
 # %%
 # PETSIRD header and coincidences
@@ -284,6 +284,15 @@ if not args.skip_writing:
         args.num_time_blocks,
         args.event_block_duration,
     )
+
+    # human-readable summary of the written file (output of petsird.helpers.analysis)
+    summary = subprocess.run(
+        [sys.executable, "-m", "petsird.helpers.analysis", "-i", str(output_dir / args.fname)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    (output_dir / "petsird_summary.txt").write_text(summary)
 
 if not args.skip_plots:
     plt.show()

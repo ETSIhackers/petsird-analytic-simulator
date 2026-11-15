@@ -26,6 +26,7 @@ from petsird_reader import (
     read_listmode_prompt_events,
 )
 from reconstruction import (
+    create_lm_subset_objectives,
     default_image_grid,
     lm_osem,
     recon_params_hash,
@@ -239,7 +240,8 @@ if not np.all(valid):
 eps = 1e-6 * events["coords0"].shape[0] / get_num_data_bins(scanner_info, tof)
 print(f"Starting parallelproj LM OSEM reconstruction (eps = {eps:.2e}) ...")
 
-recon = lm_osem(
+# negative Poisson log-likelihoods of all subsets (no additive contamination yet)
+subset_objectives = create_lm_subset_objectives(
     events["coords0"],
     events["coords1"],
     events["tof_bins"],
@@ -249,13 +251,13 @@ recon = lm_osem(
     img_origin,
     res_model,
     sens_img,
-    args.num_epochs,
     args.num_subsets,
     eps,
     tof_params=tof_params,
     att_img=att_img,
     xp=xp,
 )
+recon = lm_osem(subset_objectives, sens_img, args.num_epochs, xp=xp)
 
 opath = fname.with_name(f"lm_osem_{args.num_epochs}_{args.num_subsets}_{params_tag}.npy")
 xp.save(opath, recon)

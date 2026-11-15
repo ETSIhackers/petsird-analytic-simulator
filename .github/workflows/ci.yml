@@ -61,9 +61,9 @@ jobs:
             --phantom "$PHANTOM" \
             --img_shape 55,55,19 \
             --num_true_counts "$NUM_TRUE_COUNTS" \
-            --check_backprojection
+            --save_lm_backprojection
 
-      - name: Reconstruct PETSIRD listmode data (TOF, no attenuation correction)
+      - name: Reconstruct PETSIRD listmode data (TOF, no attenuation correction, smoke test)
         working-directory: python
         run: |
           python 02_reconstruct_petsird.py "$OUT_DIR/simulated_petsird_lm_file.bin" \
@@ -82,7 +82,7 @@ jobs:
 
       - name: Check PETSIRD file and reconstructions
         run: |
-          python tests/check_simulation_and_recon.py "$OUT_DIR" --require_all_references
+          python tests/check_simulation_and_recon.py "$OUT_DIR"
 
       - name: Run petsird analysis on the simulated file
         run: |

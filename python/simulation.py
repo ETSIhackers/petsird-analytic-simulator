@@ -33,33 +33,6 @@ def tof_parameters(
     )
 
 
-@dataclass
-class ForwardModel:
-    """expected TOF histogram of an activity image: diag(effs x att) P G
-
-    G: image-based resolution model, P: TOF projector, effs: LOR efficiencies,
-    att: attenuation factors exp(-int mu) of the LORs
-    """
-
-    proj: EqualBlockPETProjector
-    res_model: GaussianFilterOperator
-    lor_effs: np.ndarray
-    att_factors: np.ndarray
-    op: CompositeLinearOperator
-
-    def sensitivity_image(self, with_attenuation: bool = True) -> np.ndarray:
-        """back projection of ones (with or without the attenuation factors)"""
-        if with_attenuation:
-            return self.op.adjoint(np.ones(self.op.out_shape, dtype=np.float32))
-        return self.res_model.adjoint(
-            self.proj.adjoint(
-                np.broadcast_to(self.lor_effs[..., None], self.proj.out_shape).astype(
-                    np.float32
-                )
-            )
-        )
-
-
 def create_tof_projector(
     lor_desc: EqualBlockPETLORDescriptor,
     img_shape: tuple[int, int, int],
@@ -73,52 +46,46 @@ def create_tof_projector(
     proj = EqualBlockPETProjector(lor_desc, img_shape, voxel_size)
     proj.tof_parameters = tof_params
     # the projectors require float32 arrays
-    assert proj.adjointness_test(np, "cpu", dtype=np.float32, rtol=1e-4)
+    assert proj.adjointness_test(dtype=np.float32, rtol=1e-4)
     return proj
+
+
+def attenuation_factors(
+    lor_desc: EqualBlockPETLORDescriptor,
+    img_shape: tuple[int, int, int],
+    voxel_size: tuple[float, float, float],
+    att_img: np.ndarray,
+) -> np.ndarray:
+    """attenuation factors exp(-int mu) of all LORs (non-TOF line integrals through the
+    attenuation image in 1/mm, image centered at (0,0,0))
+
+    Returns an array of shape (num_block_pairs, num_lors_per_block_pair).
+    """
+    return np.exp(-EqualBlockPETProjector(lor_desc, img_shape, voxel_size)(att_img))
 
 
 def create_forward_model(
     proj: EqualBlockPETProjector,
-    fwhm_mm: float,
-    lor_effs: np.ndarray,
-    att_img: np.ndarray,
-) -> ForwardModel:
-    """forward model of the simulation for a TOF projector (see create_tof_projector)"""
-    lor_desc = proj.lor_descriptor
-    img_shape = proj.in_shape
-    voxel_size = tuple(float(v) for v in np.asarray(proj.voxel_size))
+    res_model: GaussianFilterOperator,
+    mult_factors: np.ndarray,
+) -> CompositeLinearOperator:
+    """forward model diag(m) P G of the expected TOF histogram of an activity image
 
-    res_model = GaussianFilterOperator(
-        img_shape, sigma=fwhm_mm / (FWHM_PER_SIGMA * np.asarray(voxel_size))
-    )
-
-    # attenuation factors exp(-int mu) of all LORs (non-TOF line integrals)
-    att_factors = np.exp(-EqualBlockPETProjector(lor_desc, img_shape, voxel_size)(att_img))
-
-    # the non-TOF multiplicative factors are broadcasted along the TOF axis (zero-copy view)
-    op = CompositeLinearOperator(
+    G: image-based resolution model, P: (TOF) sinogram projector, m: non-TOF
+    multiplicative factors of all LORs (e.g. efficiencies x attenuation factors),
+    shape (num_block_pairs, num_lors_per_block_pair), which are broadcasted along the
+    TOF axis (zero-copy view).
+    The sensitivity image is the back projection of ones: op.adjoint(ones).
+    """
+    return CompositeLinearOperator(
         [
             ElementwiseMultiplicationOperator(
-                np.broadcast_to((lor_effs * att_factors)[..., None], proj.out_shape)
+                np.broadcast_to(mult_factors[..., None], proj.out_shape)
             ),
             proj,
             res_model,
         ]
     )
-    return ForwardModel(proj, res_model, lor_effs, att_factors, op)
-
-
-def histogram_mlem(fwd_op, data: np.ndarray, sens_img: np.ndarray, num_epochs: int) -> np.ndarray:
-    """MLEM reconstruction of histogrammed data (reference for LM reconstructions)"""
-    recon = np.ones(fwd_op.in_shape, dtype=np.float32)
-    for i in range(num_epochs):
-        print(f"{(i+1):03}/{num_epochs:03}", end="\r")
-        exp = np.clip(fwd_op(recon), 1e-6, None)
-        # data contains int64 Poisson counts -> cast back to float32
-        grad = fwd_op.adjoint(((exp - data) / exp).astype(np.float32))
-        recon -= (recon / sens_img) * grad
-    print("")
-    return recon
 
 
 @dataclass
@@ -281,49 +248,3 @@ def write_petsird_file(
                     ),
                 )
             )
-
-
-def plot_sensitivity_and_tof_profile(
-    sens_img: np.ndarray,
-    expected_counts: np.ndarray,
-    lor_desc: EqualBlockPETLORDescriptor,
-    voxel_size: tuple[float, float, float],
-):
-    """3 transaxial slices of the sensitivity image and the TOF profile of the LOR
-    with the most expected counts (image centered at (0,0,0))"""
-    import matplotlib.pyplot as plt
-
-    img_shape = sens_img.shape
-    origin = -(np.asarray(img_shape) - 1) / 2 * np.asarray(voxel_size)
-    extent = [
-        origin[0] - 0.5 * voxel_size[0],
-        origin[0] + (img_shape[0] - 0.5) * voxel_size[0],
-        origin[1] - 0.5 * voxel_size[1],
-        origin[1] + (img_shape[1] - 0.5) * voxel_size[1],
-    ]
-
-    fig, ax = plt.subplots(1, 4, figsize=(14, 3.5), layout="constrained")
-    vmin, vmax = float(np.min(sens_img)), float(np.max(sens_img))
-    for i, sl in enumerate([img_shape[2] // 4, img_shape[2] // 2, 3 * img_shape[2] // 4]):
-        im = ax[i].imshow(
-            sens_img[:, :, sl].T, origin="lower", extent=extent, vmin=vmin, vmax=vmax, cmap="Greys"
-        )
-        ax[i].set_title(
-            f"sensitivity image, z = {origin[2] + sl * voxel_size[2]:.1f} mm", fontsize="small"
-        )
-        ax[i].set_xlabel("x (mm)")
-        ax[i].set_ylabel("y (mm)")
-    fig.colorbar(im, ax=ax[:3], shrink=0.8)
-
-    i_bp, i_lor = np.unravel_index(
-        np.argmax(expected_counts.sum(-1)), expected_counts.shape[:-1]
-    )
-    ax[-1].plot(expected_counts[i_bp, i_lor, :], ".-")
-    ax[-1].set_xlabel("TOF bin (parallelproj convention)")
-    ax[-1].set_ylabel("expected counts")
-    ax[-1].set_title(
-        f"TOF profile of the LOR with the most counts\n"
-        f"(block pair {tuple(int(b) for b in lor_desc.all_block_pairs[i_bp])}, LOR {i_lor})",
-        fontsize="small",
-    )
-    return fig

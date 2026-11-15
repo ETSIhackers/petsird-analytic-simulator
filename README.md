@@ -27,9 +27,9 @@ cd python
 python 01_analytic_petsird_lm_simulator.py
 ```
 
-The simulation script creates a binary PETSIRD LM file, but also many other
-files (e.g. a reference sensitivity image) that are all stored in the output
-directory (by default `data/sim_{phantom}_{num_true_counts}_{seed}`)
+The simulation script creates a binary PETSIRD LM file and reference files for
+testing readers / reconstructions of PETSIRD data, which are all stored in the
+output directory (by default `data/sim_{phantom}_{num_true_counts}_{seed}`)
 
 ```
 tree --charset=ascii data/sim_uniform_cylinder_4000000_0
@@ -38,12 +38,25 @@ data/sim_uniform_cylinder_4000000_0
 |-- attenuation_image.npy
 |-- ground_truth_image.npy
 |-- petsird_geometry_and_events.png
+|-- petsird_summary.txt
 |-- reference_sensitivity_image.npy
-|-- reference_sensitivity_image_no_attenuation.npy
 |-- sim_parameters.json
-|-- simulated_petsird_lm_file.bin
-`-- tof_profile_and_sensitivity_image.png
+`-- simulated_petsird_lm_file.bin
 ```
+
+| file | content |
+|---|---|
+| `simulated_petsird_lm_file.bin` | the PETSIRD listmode file |
+| `sim_parameters.json` | the parameters of the simulation |
+| `ground_truth_image.npy` | ground truth activity image, i.e. **before** the image-based resolution model (`--fwhm_mm`) which is part of the forward model of the simulation |
+| `attenuation_image.npy` | attenuation image (1 / mm) of the water body of the phantom, to be used for attenuation correction |
+| `reference_sensitivity_image.npy` | sensitivity image of the forward model of the simulation (efficiencies, attenuation, image-based resolution model) |
+| `petsird_summary.txt` | human-readable summary of the PETSIRD file (output of `petsird.helpers.analysis`) |
+| `petsird_geometry_and_events.png` | visualization of the PETSIRD geometry and the first events (see below) |
+| `lm_backprojection_tof.npy` | (only with `--save_lm_backprojection`) TOF LM backprojection of the events before writing them to PETSIRD |
+| `reference_histogram_mlem_<n>_epochs.npy` | (only with `--num_epochs_mlem n`) MLEM reconstruction of the histogrammed data with the exact forward model of the simulation |
+
+All images are centered at (0,0,0) and use the voxel size `--voxel_size`.
 
 `petsird_geometry_and_events.png` visualizes (transaxial, sagittal and 3D views) the PETSIRD scanner geometry as written
 to the file (detecting element boxes with front faces and box axes, average detection
@@ -64,10 +77,6 @@ All phantoms are embedded in a water body (linear attenuation coefficient
 0.0096 / mm) whose attenuation is included in the simulated data. The attenuation
 image (in 1 / mm) is saved as `attenuation_image.npy` and can be used for
 attenuation correction in the reconstruction (see below).
-`reference_sensitivity_image.npy` is the sensitivity image of the forward model
-used for the simulation (including attenuation);
-`reference_sensitivity_image_no_attenuation.npy` the one without attenuation
-(i.e. the one of a reconstruction without attenuation correction).
 
 The simulation can be customized in many ways (number of counts to simulate,
 uniform or non-uniform efficiencies ...) via command line options.
@@ -115,11 +124,12 @@ Reconstruction and Analysis:
   --num_epochs_mlem NUM_EPOCHS_MLEM
                         number of epochs for MLEM reconstruction of histogrammed data, 0 means no
                         MLEM reconstruction (default: 0)
-  --check_backprojection
-                        check the backprojection of the TOF histogram and LM data (default: False)
+  --save_lm_backprojection
+                        save the TOF LM backprojection of the simulated events (before writing them
+                        to PETSIRD, used to check the written events) (default: False)
 
 Visualization and Debugging:
-  --skip_plots          skip plotting the scanner geometry and TOF profile (default: False)
+  --skip_plots          skip plotting the PETSIRD scanner geometry and events (default: False)
 
 General Options:
   --seed SEED           random seed for reproducibility (default: 0)
@@ -269,9 +279,9 @@ These checks are run in the CI:
 
 ```
 cd python
-python 01_analytic_petsird_lm_simulator.py --output_dir ../ci_output --phantom offcenter_cylinder --num_true_counts 200000 --check_backprojection --skip_plots
+python 01_analytic_petsird_lm_simulator.py --output_dir ../ci_output --phantom offcenter_cylinder --num_true_counts 200000 --save_lm_backprojection --skip_plots
 python 02_reconstruct_petsird.py ../ci_output/simulated_petsird_lm_file.bin --img_shape 55 55 19 --num_epochs 1
 python 02_reconstruct_petsird.py ../ci_output/simulated_petsird_lm_file.bin --img_shape 55 55 19 --num_epochs 1 --attenuation_image ../ci_output/attenuation_image.npy
 cd ..
-python tests/check_simulation_and_recon.py ci_output --require_all_references
+python tests/check_simulation_and_recon.py ci_output
 ```
