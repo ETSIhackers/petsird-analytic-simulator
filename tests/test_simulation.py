@@ -93,7 +93,7 @@ def test_randoms_expectation():
     from simulation import randoms_expectation
 
     lor_effs = np.array([[1.0, 0.0, 2.0], [0.5, 0.3, 0.0]], dtype="float32")
-    randoms, per_bin = randoms_expectation(lor_effs, num_tofbins=5, num_randoms=100.0)
+    randoms, per_bin = randoms_expectation(lor_effs, num_tofbins=5, total_expected_randoms=100.0)
     assert randoms.shape == (2, 3, 5)
     np.testing.assert_allclose(randoms.sum(), 100.0, rtol=1e-5)
     np.testing.assert_allclose(randoms[lor_effs > 0], per_bin)

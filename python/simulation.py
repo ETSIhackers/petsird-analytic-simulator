@@ -89,9 +89,9 @@ def create_forward_model(
 
 
 def randoms_expectation(
-    lor_effs: np.ndarray, num_tofbins: int, num_randoms: float
+    lor_effs: np.ndarray, num_tofbins: int, total_expected_randoms: float
 ) -> tuple[np.ndarray, float]:
-    """noise-free randoms TOF histogram with an (expected) total of num_randoms
+    """noise-free randoms TOF histogram with an (expected) total of total_expected_randoms
 
     The randoms are constant for all LORs and TOF bins, except for LORs with a detecting
     element with zero efficiency ("dead" crystal, which can not detect any single) where
@@ -101,18 +101,18 @@ def randoms_expectation(
     ----------
     lor_effs : efficiencies of all LORs, shape (num_block_pairs, num_lors_per_block_pair)
     num_tofbins : number of TOF bins
-    num_randoms : expected total number of randoms
+    total_expected_randoms : expected total number of randoms
 
     Returns
     -------
-    randoms : array of shape (num_block_pairs, num_lors_per_block_pair, num_tofbins)
-    randoms_per_bin : expected randoms per LOR (with non-zero efficiency) and TOF bin
+    expected_randoms : array of shape (num_block_pairs, num_lors_per_block_pair, num_tofbins)
+    expected_randoms_per_bin : expected randoms per LOR (with non-zero efficiency) and TOF bin
     """
     valid = lor_effs > 0
-    randoms_per_bin = float(num_randoms) / (np.count_nonzero(valid) * num_tofbins)
-    randoms = np.zeros(lor_effs.shape + (num_tofbins,), dtype=np.float32)
-    randoms[valid] = randoms_per_bin
-    return randoms, randoms_per_bin
+    expected_randoms_per_bin = float(total_expected_randoms) / (np.count_nonzero(valid) * num_tofbins)
+    expected_randoms = np.zeros(lor_effs.shape + (num_tofbins,), dtype=np.float32)
+    expected_randoms[valid] = expected_randoms_per_bin
+    return expected_randoms, expected_randoms_per_bin
 
 
 @dataclass
@@ -132,7 +132,7 @@ class ListmodeEvents:
 
 
 def histogram_to_listmode(
-    emission_data: np.ndarray, lor_desc: EqualBlockPETLORDescriptor, num_tofbins: int
+    counts_histogram: np.ndarray, lor_desc: EqualBlockPETLORDescriptor, num_tofbins: int
 ) -> ListmodeEvents:
     """convert a TOF histogram (num_block_pairs, num_lors_per_block_pair, num_tofbins)
     of counts into (randomly shuffled) listmode events"""
@@ -142,7 +142,7 @@ def histogram_to_listmode(
     )
     start_el_arr, end_el_arr = start_el_arr.ravel(), end_el_arr.ravel()
 
-    num_events = emission_data.sum()
+    num_events = counts_histogram.sum()
     start_module = np.zeros(num_events, dtype="uint32")
     start_el = np.zeros(num_events, dtype="uint32")
     end_module = np.zeros(num_events, dtype="uint32")
@@ -152,7 +152,7 @@ def histogram_to_listmode(
     i_event = 0
     for ibp, block_pair in enumerate(lor_desc.all_block_pairs):
         for it, tof_bin in enumerate(np.arange(num_tofbins) - num_tofbins // 2):
-            counts = emission_data[ibp, :, it]
+            counts = counts_histogram[ibp, :, it]
             n = counts.sum()
             inds = np.repeat(np.arange(counts.shape[0]), counts)
             sl = slice(i_event, i_event + n)
