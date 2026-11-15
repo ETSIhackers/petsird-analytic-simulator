@@ -45,7 +45,7 @@ data/sim_uniform_cylinder_4000000_0
 `-- tof_profile_and_sensitivity_image.png
 ```
 
-`petsird_geometry_and_events.png` visualizes the PETSIRD scanner geometry as written
+`petsird_geometry_and_events.png` visualizes (transaxial, sagittal and 3D views) the PETSIRD scanner geometry as written
 to the file (detecting element boxes with front faces and box axes, average detection
 points, module and detecting element indices) and the first events (detection bins and
 the emission position decoded from the TOF bin following the PETSIRD definition) on top

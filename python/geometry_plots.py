@@ -119,15 +119,133 @@ def _decode_events(
     return decoded
 
 
+def _draw_boxes(
+    ax,
+    g: dict[str, np.ndarray],
+    i_mod: int,
+    els: np.ndarray,
+    axes: tuple[int, int],
+    color,
+    arrow_width: float = 0.002,
+) -> None:
+    """draw detecting element boxes projected onto 2 coordinate axes
+
+    boxes (convex hull of the projected corners), front faces (black lines),
+    ADPs (dots) and box axes (arrows)
+    """
+    polys, front_faces = [], []
+    for i_el in els:
+        c = g["corners"][i_mod, i_el][:, axes]
+        polys.append(c[ConvexHull(c).vertices])
+        # projected front face (first 4 corners): its 2 most distant points
+        f = c[:4]
+        dist = np.linalg.norm(f[:, None] - f[None], axis=-1)
+        i, j = np.unravel_index(np.argmax(dist), dist.shape)
+        front_faces.append([f[i], f[j]])
+    ax.add_collection(
+        PolyCollection(polys, facecolors=[(*color[:3], 0.25)], edgecolors=[color], linewidths=0.6)
+    )
+    ax.add_collection(LineCollection(front_faces, colors="k", linewidths=1.2))
+    adp = g["adp"][i_mod, els][:, axes]
+    box_axis = g["box_axis"][i_mod, els][:, axes]
+    ax.plot(adp[:, 0], adp[:, 1], ".", color="k", ms=2)
+    ax.quiver(
+        adp[:, 0],
+        adp[:, 1],
+        box_axis[:, 0],
+        box_axis[:, 1],
+        angles="xy",
+        scale_units="xy",
+        scale=0.25,
+        width=arrow_width,
+        color="k",
+    )
+
+
+def _plot_plane_view(
+    fig,
+    ax,
+    geom: list[dict[str, np.ndarray]],
+    decoded: list[dict[str, np.ndarray]],
+    normal: int,
+    background,
+    background_label: str,
+    cmap,
+) -> float:
+    """2D view of the detecting elements whose ADPs lie in a plane perpendicular to
+    the coordinate axis `normal` (the plane through the ADP closest to 0), of the
+    (projected) events and of the corresponding slice of a background image
+
+    Returns the position of the plane along the normal axis.
+    """
+    h, v = [a for a in range(3) if a != normal]
+    names = "xyz"
+    all_adps = np.concatenate([g["adp"].reshape(-1, 3) for g in geom])
+    plane = all_adps[np.argmin(np.abs(all_adps[:, normal])), normal]
+
+    if background is not None:
+        bg_img, bg_voxel_size, bg_origin = background
+        bg_img = np.asarray(bg_img)
+        bg_origin = np.asarray(bg_origin, dtype="float64")
+        idx = int(round((plane - bg_origin[normal]) / bg_voxel_size[normal]))
+        idx = min(max(idx, 0), bg_img.shape[normal] - 1)
+        extent = [
+            bg_origin[h] - 0.5 * bg_voxel_size[h],
+            bg_origin[h] + (bg_img.shape[h] - 0.5) * bg_voxel_size[h],
+            bg_origin[v] - 0.5 * bg_voxel_size[v],
+            bg_origin[v] + (bg_img.shape[v] - 0.5) * bg_voxel_size[v],
+        ]
+        im = ax.imshow(
+            np.take(bg_img, idx, axis=normal).T,
+            origin="lower",
+            extent=extent,
+            cmap="Greys",
+            alpha=0.8,
+        )
+        fig.colorbar(
+            im, ax=ax, shrink=0.6, label=f"{background_label}\n({names[normal]} = {plane:.1f} mm)"
+        )
+
+    for i_type, g in enumerate(geom):
+        in_plane = np.isclose(g["adp"][..., normal], plane, atol=1e-3)
+        for i_mod in range(g["adp"].shape[0]):
+            els = np.nonzero(in_plane[i_mod])[0]
+            if els.size == 0:
+                continue
+            color = cmap((i_mod + 3 * i_type) % 20)
+            _draw_boxes(ax, g, i_mod, els, (h, v), color)
+            # module number outside of the module (in-plane direction from the center)
+            mc = g["adp"][i_mod, els][:, (h, v)].mean(0)
+            pos = mc * (1 + 22 / np.linalg.norm(mc)) if np.linalg.norm(mc) > 0 else mc
+            ax.text(*pos, f"m{i_mod}", ha="center", va="center", fontsize="small", color=color, fontweight="bold")
+
+    for i, ev in enumerate(decoded):
+        color = plt.get_cmap("tab10")(i % 10)
+        ax.plot([ev["p0"][h], ev["p1"][h]], [ev["p0"][v], ev["p1"][v]], "-", color=color, lw=0.8)
+        ax.plot(ev["p0"][h], ev["p0"][v], "o", color=color, ms=5, mfc="none")
+        ax.plot(ev["tof_interval"][:, h], ev["tof_interval"][:, v], "-", color=color, lw=3, alpha=0.6)
+        ax.plot(ev["tof_pos"][h], ev["tof_pos"][v], "o", color=color, ms=4)
+
+    all_corners = np.concatenate([g["corners"].reshape(-1, 3) for g in geom])
+    lim_h = 1.25 * np.abs(all_corners[:, h]).max()
+    lim_v = np.abs(all_corners[:, v]).max() + 0.1 * lim_h
+    ax.set_xlim(-lim_h, lim_h)
+    ax.set_ylim(-lim_v, lim_v)
+    ax.set_aspect("equal")
+    ax.set_xlabel(f"{names[h]} (mm)")
+    ax.set_ylabel(f"{names[v]} (mm)")
+    return float(plane)
+
+
 def plot_petsird_geometry(
     scanner: petsird.ScannerInformation,
     events: np.ndarray | None = None,
     background: tuple[np.ndarray, tuple[float, float, float], np.ndarray] | None = None,
     background_label: str = "",
     title: str | None = None,
-    figsize: tuple[float, float] = (15, 12),
+    figsize: tuple[float, float] = (15, 15),
 ):
-    """transaxial and 3D view of the PETSIRD scanner geometry and of coincidence events
+    """transaxial, sagittal and 3D view of the PETSIRD scanner geometry and of coincidence events
 
     Parameters
     ----------
@@ -136,8 +254,9 @@ def plot_petsird_geometry(
         (module type 0, module type 1, detection bin 0, detection bin 1, tof_idx)
         e.g. from read_first_events()
     background : (image, voxel_size, image_origin), optional
-        3D image (e.g. activity) shown in the transaxial view (slice at the axial
-        position of the shown crystal ring); image_origin is the center of voxel [0,0,0]
+        3D image (e.g. activity) shown in the transaxial and sagittal views (slices
+        through the planes of the shown detecting elements); image_origin is the
+        center of voxel [0,0,0]
     background_label : str
         label of the background image
     """
@@ -145,11 +264,12 @@ def plot_petsird_geometry(
     decoded = _decode_events(scanner, geom, events) if events is not None else []
 
     fig = plt.figure(figsize=figsize, layout="constrained")
-    gs = fig.add_gridspec(2, 2, height_ratios=[1.7, 1])
-    ax2d = fig.add_subplot(gs[0, 0])
+    gs = fig.add_gridspec(3, 2, height_ratios=[1.7, 0.75, 1])
+    ax_trans = fig.add_subplot(gs[0, 0])
     ax3d = fig.add_subplot(gs[0, 1], projection="3d")
-    ax_zoom = fig.add_subplot(gs[1, 0])
-    gs_layers = gs[1, 1]
+    ax_sag = fig.add_subplot(gs[1, :])
+    ax_zoom = fig.add_subplot(gs[2, 0])
+    gs_layers = gs[2, 1]
     if title is not None:
         fig.suptitle(title)
 
@@ -157,106 +277,48 @@ def plot_petsird_geometry(
     all_adps = np.concatenate([g["adp"].reshape(-1, 3) for g in geom])
 
     # ---------------------------------------------------------------------------
-    # transaxial view of the crystal ring closest to z = 0
-    z_ring = all_adps[np.argmin(np.abs(all_adps[:, 2])), 2]
-
-    if background is not None:
-        bg_img, bg_voxel_size, bg_origin = background
-        bg_img = np.asarray(bg_img)
-        bg_origin = np.asarray(bg_origin, dtype="float64")
-        iz = int(round((z_ring - bg_origin[2]) / bg_voxel_size[2]))
-        iz = min(max(iz, 0), bg_img.shape[2] - 1)
-        extent = [
-            bg_origin[0] - 0.5 * bg_voxel_size[0],
-            bg_origin[0] + (bg_img.shape[0] - 0.5) * bg_voxel_size[0],
-            bg_origin[1] - 0.5 * bg_voxel_size[1],
-            bg_origin[1] + (bg_img.shape[1] - 0.5) * bg_voxel_size[1],
-        ]
-        im = ax2d.imshow(
-            bg_img[:, :, iz].T, origin="lower", extent=extent, cmap="Greys", alpha=0.8
-        )
-        fig.colorbar(
-            im, ax=ax2d, shrink=0.6, label=f"{background_label} (z = {z_ring:.1f} mm)"
-        )
-
-    for i_type, g in enumerate(geom):
-        num_modules, num_det_els = g["adp"].shape[:2]
-        in_ring = np.isclose(g["adp"][..., 2], z_ring, atol=1e-3)
-
-        for i_mod in range(num_modules):
-            color = cmap((i_mod + 3 * i_type) % 20)
-            els = np.nonzero(in_ring[i_mod])[0]
-            if els.size == 0:
-                continue
-            polys, front_faces = [], []
-            for i_el in els:
-                c = g["corners"][i_mod, i_el, :, :2]
-                polys.append(c[ConvexHull(c).vertices])
-                # front face (first 4 corners) seen from the top: its 2 most distant points
-                f = c[:4]
-                dist = np.linalg.norm(f[:, None] - f[None], axis=-1)
-                i, j = np.unravel_index(np.argmax(dist), dist.shape)
-                front_faces.append([f[i], f[j]])
-            adp = g["adp"][i_mod, els]
-            axes = [ax2d, ax_zoom] if (i_type == 0 and i_mod == 0) else [ax2d]
-            for ax in axes:
-                ax.add_collection(
-                    PolyCollection(polys, facecolors=[(*color[:3], 0.25)], edgecolors=[color], linewidths=0.6)
-                )
-                ax.add_collection(LineCollection(front_faces, colors="k", linewidths=1.2))
-                ax.plot(adp[:, 0], adp[:, 1], ".", color="k", ms=2)
-                ax.quiver(
-                    adp[:, 0],
-                    adp[:, 1],
-                    g["box_axis"][i_mod, els, 0],
-                    g["box_axis"][i_mod, els, 1],
-                    angles="xy",
-                    scale_units="xy",
-                    scale=0.25,
-                    width=0.002 if ax is ax2d else 0.004,
-                    color="k",
-                )
-            # module number outside of the module
-            mc = g["adp"][i_mod].mean(0)
-            pos = mc[:2] * (1 + 22 / np.linalg.norm(mc[:2]))
-            ax2d.text(*pos, f"m{i_mod}", ha="center", va="center", fontsize="small", color=color, fontweight="bold")
-
-            # element numbers of the first module of the first type (zoom)
-            if i_type == 0 and i_mod == 0:
-                for i_el in els:
-                    p = g["adp"][i_mod, i_el, :2] - 1.5 * g["box_axis"][i_mod, i_el, :2]
-                    ax_zoom.text(*p, str(i_el), ha="center", va="center", fontsize=7)
-                c = g["corners"][0][els][..., :2].reshape(-1, 2)
-                margin = 3
-                ax_zoom.set_xlim(c[:, 0].min() - margin, c[:, 0].max() + margin)
-                ax_zoom.set_ylim(c[:, 1].min() - margin, c[:, 1].max() + margin)
-                ax_zoom.set_aspect("equal")
-                ax_zoom.set_xlabel("x (mm)")
-                ax_zoom.set_ylabel("y (mm)")
-                ax_zoom.set_title(
-                    f"module 0 (transaxial, z = {z_ring:.1f} mm): detecting element indices,\n"
-                    "front faces (black), box axes (arrows), ADPs (dots)",
-                    fontsize="small",
-                )
-
-    for i, ev in enumerate(decoded):
-        color = plt.get_cmap("tab10")(i % 10)
-        ax2d.plot([ev["p0"][0], ev["p1"][0]], [ev["p0"][1], ev["p1"][1]], "-", color=color, lw=0.8)
-        ax2d.plot(*ev["p0"][:2], "o", color=color, ms=5, mfc="none")
-        ax2d.plot(*ev["tof_interval"][:, :2].T, "-", color=color, lw=3, alpha=0.6)
-        ax2d.plot(*ev["tof_pos"][:2], "o", color=color, ms=4)
-
-    ax2d.set_aspect("equal")
-    lim = 1.25 * np.abs(all_adps[:, :2]).max()
-    ax2d.set_xlim(-lim, lim)
-    ax2d.set_ylim(-lim, lim)
-    ax2d.set_xlabel("x (mm)")
-    ax2d.set_ylabel("y (mm)")
-    ax2d.set_title(
-        f"transaxial view of the crystal ring at z = {z_ring:.1f} mm\n"
+    # transaxial view (plane z = const) and sagittal view (plane x = const)
+    events_text = (
+        "events (3D, projected): line from detection bin 0 (open circle) to 1, "
+        "filled circle + thick line: center of TOF bin +/- FWHM/2"
+    )
+    z_ring = _plot_plane_view(
+        fig, ax_trans, geom, decoded, 2, background, background_label, cmap
+    )
+    ax_trans.set_title(
+        f"transaxial view of the detecting elements with ADPs at z = {z_ring:.1f} mm\n"
         "boxes (black line: front face, arrow: box axis), dots: ADPs, m<i>: module index\n"
-        "events (3D, projected): line from detection bin 0 (open circle) to 1,\n"
-        "filled circle + thick line: center of TOF bin +/- FWHM/2",
+        + events_text.replace(", filled", ",\nfilled"),
+        fontsize="small",
+    )
+    x_plane = _plot_plane_view(
+        fig, ax_sag, geom, decoded, 0, background, background_label, cmap
+    )
+    ax_sag.set_title(
+        f"sagittal view of the detecting elements with ADPs at x = {x_plane:.1f} mm "
+        "(same symbols as in the transaxial view)",
+        fontsize="small",
+    )
+
+    # ---------------------------------------------------------------------------
+    # transaxial zoom on module 0 (of the first module type) with element indices
+    g = geom[0]
+    els = np.nonzero(np.isclose(g["adp"][0, :, 2], z_ring, atol=1e-3))[0]
+    if els.size > 0:
+        _draw_boxes(ax_zoom, g, 0, els, (0, 1), cmap(0), arrow_width=0.004)
+        for i_el in els:
+            p = g["adp"][0, i_el, :2] - 1.5 * g["box_axis"][0, i_el, :2]
+            ax_zoom.text(*p, str(i_el), ha="center", va="center", fontsize=7)
+        c = g["corners"][0][els][..., :2].reshape(-1, 2)
+        margin = 3
+        ax_zoom.set_xlim(c[:, 0].min() - margin, c[:, 0].max() + margin)
+        ax_zoom.set_ylim(c[:, 1].min() - margin, c[:, 1].max() + margin)
+    ax_zoom.set_aspect("equal")
+    ax_zoom.set_xlabel("x (mm)")
+    ax_zoom.set_ylabel("y (mm)")
+    ax_zoom.set_title(
+        f"module 0 (transaxial, z = {z_ring:.1f} mm): detecting element indices,\n"
+        "front faces (black), box axes (arrows), ADPs (dots)",
         fontsize="small",
     )
 
