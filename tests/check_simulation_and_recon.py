@@ -17,8 +17,11 @@ reconstruction code:
   TOF bin mirroring)
 - vectorized efficiencies match petsird.helpers.get_detection_efficiency
 
-If the reconstruction outputs exist, the sensitivity image and the LM back projections
-calculated from the PETSIRD file are compared to the ones of the simulator.
+If the reconstruction outputs exist, the sensitivity images and the LM back projections
+calculated from the PETSIRD file are compared to the ones of the simulator
+(a TOF recon without attenuation correction has to match the simulator's sensitivity
+image without attenuation, a TOF recon with attenuation correction using the simulated
+attenuation image the one with attenuation).
 
 The script exits with a non-zero exit code if any check fails.
 """
@@ -47,6 +50,13 @@ from utils import lm_file_fingerprint  # noqa: E402
 
 parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
 parser.add_argument("output_dir", type=Path, help="output directory of the simulator")
+parser.add_argument(
+    "--require_all_references",
+    action="store_true",
+    help="require that both reference sensitivity images (with and without attenuation) "
+    "are matched by a recon, i.e. that a TOF recon without AC and a TOF recon with AC "
+    "(using the simulated attenuation image) were run",
+)
 args = parser.parse_args()
 
 out_dir: Path = args.output_dir
@@ -228,16 +238,35 @@ recon_tof_back = sorted(out_dir.glob(f"{stem}_tof_backproj_{fingerprint}_*.npy")
 if recon_sens and recon_tof_back:
     # there can be multiple recon outputs (e.g. TOF / non-TOF, with / without attenuation)
     # - the (unweighted) TOF LM back projections all have to match
-    # - at least one sensitivity image (TOF without attenuation) has to match the
-    #   simulator's. The simulator's sensitivity image uses a TOF sinogram projector,
+    # - the sensitivity images of TOF recons without AC / with AC (using the simulated
+    #   attenuation image) have to match the simulator's sensitivity image without / with
+    #   attenuation. The simulator's sensitivity images use a TOF sinogram projector,
     #   the reconstruction a TOF LM projector, which differ slightly in the normalization
     #   of the TOF kernels.
-    ref_sens = np.load(out_dir / "reference_sensitivity_image.npy")
-    sens_diffs = {f.name: rel_diff(ref_sens, np.load(f)) for f in recon_sens}
-    for name, d in sens_diffs.items():
-        print(f"       {name}: rel. diff to simulator sensitivity image {d:.1e}")
-    d = min(sens_diffs.values())
-    check(d < 2e-3, f"a recon sensitivity image matches the simulator's ({d:.1e})")
+    references = {
+        "without attenuation": np.load(
+            out_dir / "reference_sensitivity_image_no_attenuation.npy"
+        ),
+        "with attenuation": np.load(out_dir / "reference_sensitivity_image.npy"),
+    }
+    recon_sens_imgs = {f.name: np.load(f) for f in recon_sens}
+    num_matched_refs = 0
+    for ref_name, ref in references.items():
+        diffs = {name: rel_diff(ref, x) for name, x in recon_sens_imgs.items()}
+        best = min(diffs, key=diffs.get)
+        matched = diffs[best] < 2e-3
+        num_matched_refs += matched
+        print(
+            f"       simulator sensitivity image {ref_name}: best matching recon "
+            f"sensitivity image {best} ({diffs[best]:.1e})"
+        )
+        if args.require_all_references:
+            check(matched, f"a recon sensitivity image matches the simulator's {ref_name}")
+    if not args.require_all_references:
+        check(
+            num_matched_refs > 0,
+            "a recon sensitivity image matches one of the simulator's",
+        )
     for f in recon_tof_back:
         d = rel_diff(lm_back_tof, np.load(f))
         check(d < 1e-4, f"recon TOF LM back projection {f.name} matches PETSIRD events ({d:.1e})")

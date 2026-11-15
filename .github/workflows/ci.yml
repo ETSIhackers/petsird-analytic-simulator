@@ -47,7 +47,7 @@ jobs:
             --check_backprojection \
             --skip_plots
 
-      - name: Reconstruct PETSIRD listmode data
+      - name: Reconstruct PETSIRD listmode data (TOF, no attenuation correction)
         working-directory: python
         run: |
           python 02_reconstruct_petsird.py "$OUT_DIR/simulated_petsird_lm_file.bin" \
@@ -55,9 +55,18 @@ jobs:
             --num_epochs 1 \
             --num_subsets 5
 
-      - name: Check PETSIRD file and reconstruction
+      - name: Reconstruct PETSIRD listmode data (TOF, attenuation correction)
+        working-directory: python
         run: |
-          python tests/check_simulation_and_recon.py "$OUT_DIR"
+          python 02_reconstruct_petsird.py "$OUT_DIR/simulated_petsird_lm_file.bin" \
+            --img_shape 55 55 19 \
+            --num_epochs 1 \
+            --num_subsets 5 \
+            --attenuation_image "$OUT_DIR/attenuation_image.npy"
+
+      - name: Check PETSIRD file and reconstructions
+        run: |
+          python tests/check_simulation_and_recon.py "$OUT_DIR" --require_all_references
 
       - name: Run petsird analysis on the simulated file
         run: |

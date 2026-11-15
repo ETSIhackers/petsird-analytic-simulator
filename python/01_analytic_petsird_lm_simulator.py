@@ -1,6 +1,6 @@
 """analytic simulation of petsird v0.13.1 listmode data for a block PET scanner
-we only simulate true events and ignore the effect of attenuation
-however, we simulate the effect of crystal efficiencies and LOR symmetry group efficiencies
+we only simulate true (unscattered) events including the effect of attenuation
+(of a water cylinder), crystal efficiencies and LOR symmetry group efficiencies
 """
 
 # %%
@@ -315,12 +315,15 @@ lor_desc = EqualBlockPETLORDescriptor(
 # %%
 # setup of the ground truth image used for the data simulation
 
+# transaxial disk with a radius of 70% of the image half-width
+# (used for the uniform cylinder phantom and the attenuating water cylinder)
+tmp = np.linspace(-1, 1, img_shape[0])
+X0, X1 = np.meshgrid(tmp, tmp, indexing="ij")
+disk = np.astype(np.sqrt(X0**2 + X1**2) < 0.7, "float32")
+
 img = np.zeros(img_shape, dtype=np.float32)
 
 if phantom == "uniform_cylinder":
-    tmp = np.linspace(-1, 1, img_shape[0])
-    X0, X1 = np.meshgrid(tmp, tmp, indexing="ij")
-    disk = np.astype(np.sqrt(X0**2 + X1**2) < 0.7, "float32")
     for i in range(2, img_shape[2] - 2):
         img[..., i] = disk
 elif phantom == "squares":
@@ -339,6 +342,17 @@ elif phantom == "points":
 
 else:
     raise ValueError(f"Invalid phantom {phantom}")
+
+# %%
+# setup of the attenuation image (linear attenuation coefficients in mm^-1)
+# all phantoms are embedded in a water cylinder covering all slices
+
+mu_water = 0.0096  # linear attenuation coefficient of water at 511 keV (mm^-1)
+att_img = np.zeros(img_shape, dtype=np.float32)
+att_img[...] = mu_water * disk[..., None]
+
+# save the attenuation image (can be used for attenuation correction in the recon)
+np.save(output_dir / "attenuation_image.npy", att_img)
 
 # %%
 # setup of a parallelproj TOF projector
@@ -409,6 +423,16 @@ for i, bp in enumerate(proj.lor_descriptor.all_block_pairs):
     nontof_sens_histo[i, ...] = sg_eff * start_crystal_eff * end_crystal_eff
 
 # %%
+# attenuation factors exp(-int mu) of all LORs (non-TOF line integrals)
+nontof_proj = EqualBlockPETProjector(lor_desc, img_shape, voxel_size)
+att_factors = np.exp(-nontof_proj(att_img))
+
+# sensitivity histogram without attenuation (only used for reference outputs)
+nontof_sens_histo_no_att = nontof_sens_histo.copy()
+# multiplicative correction factors of the data: efficiencies x attenuation
+nontof_sens_histo *= att_factors
+
+# %%
 # setup the complete forward operator consisting of diag(s) P G
 # where G is the image-based resolution model
 # P is the (TOF) forward projector
@@ -433,8 +457,19 @@ img_fwd_tof = fwd_op(img)
 # %%
 # calculate the sensitivity image
 
+# (including attenuation, i.e. the sensitivity image of the forward model of the data)
 sens_img = fwd_op.adjoint(np.ones(fwd_op.out_shape, dtype=np.float32))
 np.save(output_dir / "reference_sensitivity_image.npy", sens_img)
+
+# sensitivity image without attenuation (= sensitivity image of a recon without AC)
+sens_img_no_att = res_model.adjoint(
+    proj.adjoint(
+        np.broadcast_to(nontof_sens_histo_no_att[..., None], proj.out_shape).astype(
+            np.float32
+        )
+    )
+)
+np.save(output_dir / "reference_sensitivity_image_no_attenuation.npy", sens_img_no_att)
 
 # %%
 # add poisson noise on the forward projection

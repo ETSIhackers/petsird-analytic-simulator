@@ -1,7 +1,8 @@
 # Analytic simulation of PETSIRD v0.13.1 data using parallelproj
 
 This tool allows to "quickly" simulate and reconstruct PETSIRD TOF listmode data
-using a simplified physics model (true coincidences only) and non-trivial
+using a simplified physics model (true unscattered coincidences only, including
+attenuation) and non-trivial
 detection efficiencies.
 
 One of its aims is to be able to generate data that can be used to test implementations
@@ -34,13 +35,24 @@ directory (by default `data/sim_{phantom}_{num_true_counts}_{seed}`)
 tree --charset=ascii data/sim_uniform_cylinder_4000000_0
 
 data/sim_uniform_cylinder_4000000_0
+|-- attenuation_image.npy
 |-- ground_truth_image.npy
 |-- reference_sensitivity_image.npy
+|-- reference_sensitivity_image_no_attenuation.npy
 |-- scanner_geometry.png
 |-- sim_parameters.json
 |-- simulated_petsird_lm_file.bin
 `-- tof_profile_and_sensitivity_image.png
 ```
+
+All phantoms are embedded in a water cylinder (linear attenuation coefficient
+0.0096 / mm) whose attenuation is included in the simulated data. The attenuation
+image (in 1 / mm) is saved as `attenuation_image.npy` and can be used for
+attenuation correction in the reconstruction (see below).
+`reference_sensitivity_image.npy` is the sensitivity image of the forward model
+used for the simulation (including attenuation);
+`reference_sensitivity_image_no_attenuation.npy` the one without attenuation
+(i.e. the one of a reconstruction without attenuation correction).
 
 The simulation can be customized in many ways (number of counts to simulate,
 uniform or non-uniform efficiencies ...) via command line options.
@@ -162,6 +174,13 @@ python 02_reconstruct_petsird.py my_petsird_file.bin --non-tof --attenuation_ima
 python 02_reconstruct_petsird.py my_petsird_file.bin --attenuation_image my_att_img.npy
 ```
 
+For data created by the simulator, use the simulated attenuation image
+(`attenuation_image.npy` in the output directory) for a quantitatively correct
+attenuation correction. The 2-class attenuation image created by
+`03_create_two_class_att_img.py` is only an approximation of it.
+Reconstructions without attenuation correction are expected to be biased low
+(and to show "cupping").
+
 ## Consistency checks
 
 `tests/check_simulation_and_recon.py` checks a simulated PETSIRD file (and its
@@ -173,6 +192,7 @@ These checks are run in the CI:
 cd python
 python 01_analytic_petsird_lm_simulator.py --output_dir ../ci_output --phantom squares --num_true_counts 200000 --check_backprojection --skip_plots
 python 02_reconstruct_petsird.py ../ci_output/simulated_petsird_lm_file.bin --img_shape 55 55 19 --num_epochs 1
+python 02_reconstruct_petsird.py ../ci_output/simulated_petsird_lm_file.bin --img_shape 55 55 19 --num_epochs 1 --attenuation_image ../ci_output/attenuation_image.npy
 cd ..
-python tests/check_simulation_and_recon.py ci_output
+python tests/check_simulation_and_recon.py ci_output --require_all_references
 ```
