@@ -41,7 +41,7 @@ def check_header_support(header: petsird.Header) -> None:
 
     Raises UnsupportedPETSIRDFeatureError for features that would lead to wrong
     reconstructions and warns about information that is ignored.
-    Features of the time blocks are checked in read_listmode_prompt_events().
+    Features of the time blocks are checked in read_listmode_events().
     """
     scanner: petsird.ScannerInformation = header.scanner
     num_module_types = scanner.scanner_geometry.number_of_module_types()
@@ -76,13 +76,6 @@ def check_header_support(header: petsird.Header) -> None:
         warnings.warn(
             "The gantry alignment of the scanner is ignored: the reconstructed image "
             "(and an attenuation image) are in the PET gantry coordinate system.",
-            UserWarning,
-        )
-
-    if scanner.delayed_event_policy != petsird.CoincidencePolicy.NONE:
-        warnings.warn(
-            "The file contains delayed coincidences, but randoms are not corrected "
-            "for in the reconstruction (prompts are assumed to be true coincidences).",
             UserWarning,
         )
 
@@ -309,18 +302,24 @@ def get_num_data_bins(scanner_info: petsird.ScannerInformation, tof: bool) -> in
     return num_bins
 
 
-def read_listmode_prompt_events(
+# names of the arrays describing listmode events (see read_listmode_events)
+EVENT_ARRAYS = ("coords0", "coords1", "tof_bins", "effs", "energy_idx0", "energy_idx1")
+
+
+def read_listmode_events(
     reader: petsird.BinaryPETSIRDReader,
     header: petsird.Header,
     all_detector_centers: list[np.ndarray],
     store_energy_bins: bool = True,
     verbose: bool = False,
     with_calibration_factor: bool = True,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """read all prompt events and convert them to LOR coordinates, TOF bins and efficiencies
+) -> dict[str, dict[str, np.ndarray]]:
+    """read all prompt and delayed events and convert them to LOR coordinates, TOF bins
+    and efficiencies
 
     Returns
     -------
+    {"prompts": events, "delayeds": events} where events is a dictionary with
     coords0, coords1 : (num_events, 3) float32 arrays with the ADPs of the two detection bins
     tof_bins : (num_events,) int16 array with the unsigned TOF bins (= PETSIRD tof_idx)
     effs : (num_events,) float32 array with the detection efficiencies
@@ -339,13 +338,14 @@ def read_listmode_prompt_events(
         get_calibration_factor(scanner_info) if with_calibration_factor else 1.0
     )
 
-    # collect the raw detection bins and TOF indices for all module type pairs
-    raw_events: dict[tuple[int, int], list[np.ndarray]] = {
-        (m1, m2): [] for m1 in range(num_module_types) for m2 in range(m1 + 1)
+    # raw detection bins and TOF indices for all streams and module type pairs
+    raw_events: dict[str, dict[tuple[int, int], list[np.ndarray]]] = {
+        stream: {(m1, m2): [] for m1 in range(num_module_types) for m2 in range(m1 + 1)}
+        for stream in ("prompts", "delayeds")
     }
 
     if verbose:
-        print("\nReading prompt events from time blocks ...")
+        print("\nReading prompt and delayed events from time blocks ...")
 
     # number of time blocks / events that are ignored
     num_ignored: dict[str, int] = {}
@@ -390,10 +390,6 @@ def read_listmode_prompt_events(
             _count_ignored(f"time blocks of type {type(time_block).__name__}")
             continue
 
-        _count_ignored(
-            "delayed events (randoms are not corrected)",
-            _num_events(time_block.value.delayed_events),
-        )
         _count_ignored("single events", _num_events(time_block.value.single_events))
         _count_ignored("triple events", _num_events(time_block.value.triple_events))
         _count_ignored(
@@ -406,29 +402,50 @@ def read_listmode_prompt_events(
                 f"Processing time block {i_t} with time interval {interval.start} ... {interval.stop}"
             )
 
-        prompt_events = time_block.value.prompt_events
-        if len(prompt_events) == 0:
-            continue
-        for m1, m2 in raw_events:
-            events = prompt_events[m1][m2]
-            if len(events) == 0:
+        for stream, nested_events in (
+            ("prompts", time_block.value.prompt_events),
+            ("delayeds", time_block.value.delayed_events),
+        ):
+            if len(nested_events) == 0:
                 continue
-            raw_events[(m1, m2)].append(
-                np.array(
-                    [(e.detection_bins[0], e.detection_bins[1], e.tof_idx) for e in events],
-                    dtype=np.int64,
+            for m1, m2 in raw_events[stream]:
+                events = nested_events[m1][m2]
+                if len(events) == 0:
+                    continue
+                raw_events[stream][(m1, m2)].append(
+                    np.array(
+                        [(e.detection_bins[0], e.detection_bins[1], e.tof_idx) for e in events],
+                        dtype=np.int64,
+                    )
                 )
-            )
 
     for name, num in num_ignored.items():
         warnings.warn(f"Ignored {num} {name}.", UserWarning)
 
-    coords0 = []
-    coords1 = []
-    tof_bins = []
-    effs = []
-    energy_idx0 = []
-    energy_idx1 = []
+    return {
+        stream: _convert_events(
+            raw_events[stream],
+            scanner_info,
+            all_detector_centers,
+            calibration_factor,
+            store_energy_bins,
+            stream,
+        )
+        for stream in raw_events
+    }
+
+
+def _convert_events(
+    raw_events: dict[tuple[int, int], list[np.ndarray]],
+    scanner_info: petsird.ScannerInformation,
+    all_detector_centers: list[np.ndarray],
+    calibration_factor: float,
+    store_energy_bins: bool,
+    stream: str,
+) -> dict[str, np.ndarray]:
+    """convert raw (detection bin 0, detection bin 1, tof_idx) events of all module type
+    pairs to LOR coordinates, TOF bins, efficiencies and energy bin indices"""
+    out: dict[str, list[np.ndarray]] = {name: [] for name in EVENT_ARRAYS}
 
     for (m1, m2), chunks in raw_events.items():
         if len(chunks) == 0:
@@ -439,7 +456,7 @@ def read_listmode_prompt_events(
 
         if m1 == m2 and np.any(det_bin_0 < det_bin_1):
             warnings.warn(
-                f"{np.count_nonzero(det_bin_0 < det_bin_1)} events of module type pair "
+                f"{np.count_nonzero(det_bin_0 < det_bin_1)} {stream} of module type pair "
                 f"({m1}, {m2}) are not ordered (detection_bins[0] < detection_bins[1])",
                 UserWarning,
             )
@@ -455,10 +472,9 @@ def read_listmode_prompt_events(
         el_1 = (det_bin_1 // num_energy_bins_2) % num_det_els_2
         en_1 = det_bin_1 % num_energy_bins_2
 
-        coords0.append(all_detector_centers[m1][mod_0, el_0])
-        coords1.append(all_detector_centers[m2][mod_1, el_1])
-
-        tof_bins.append(tof_idx)
+        out["coords0"].append(all_detector_centers[m1][mod_0, el_0])
+        out["coords1"].append(all_detector_centers[m2][mod_1, el_1])
+        out["tof_bins"].append(tof_idx)
 
         det_bin_effs_1 = get_detection_bin_efficiencies(scanner_info, m1).ravel()
         det_bin_effs_2 = get_detection_bin_efficiencies(scanner_info, m2).ravel()
@@ -470,7 +486,7 @@ def read_listmode_prompt_events(
 
         if not np.all(in_coinc):
             warnings.warn(
-                f"{np.count_nonzero(~in_coinc)} events of module type pair ({m1}, {m2}) "
+                f"{np.count_nonzero(~in_coinc)} {stream} of module type pair ({m1}, {m2}) "
                 "are in module pairs that are not in coincidence (efficiency set to 0)",
                 UserWarning,
             )
@@ -485,22 +501,24 @@ def read_listmode_prompt_events(
                 det_bin_1 % (num_det_els_2 * num_energy_bins_2),
             ]
         )
-        effs.append(np.where(in_coinc, eff, 0).astype("float32"))
+        out["effs"].append(np.where(in_coinc, eff, 0).astype("float32"))
 
         if store_energy_bins:
-            energy_idx0.append(en_0)
-            energy_idx1.append(en_1)
+            out["energy_idx0"].append(en_0)
+            out["energy_idx1"].append(en_1)
 
-    def _concat(x: list[np.ndarray], shape: tuple, dtype: str) -> np.ndarray:
-        if len(x) == 0:
-            return np.zeros(shape, dtype=dtype)
-        return np.concatenate(x).astype(dtype)
-
-    return (
-        _concat(coords0, (0, 3), "float32"),
-        _concat(coords1, (0, 3), "float32"),
-        _concat(tof_bins, (0,), "int16"),
-        _concat(effs, (0,), "float32"),
-        _concat(energy_idx0, (0,), "uint16"),
-        _concat(energy_idx1, (0,), "uint16"),
-    )
+    shapes = {"coords0": (0, 3), "coords1": (0, 3)}
+    dtypes = {
+        "coords0": "float32",
+        "coords1": "float32",
+        "tof_bins": "int16",
+        "effs": "float32",
+        "energy_idx0": "uint16",
+        "energy_idx1": "uint16",
+    }
+    return {
+        name: np.concatenate(x).astype(dtypes[name])
+        if len(x) > 0
+        else np.zeros(shapes.get(name, (0,)), dtype=dtypes[name])
+        for name, x in out.items()
+    }

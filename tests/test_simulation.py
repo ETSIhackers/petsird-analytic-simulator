@@ -2,7 +2,7 @@ import numpy as np
 import petsird
 
 from efficiencies import lor_efficiencies
-from petsird_reader import get_all_detector_centers, read_listmode_prompt_events
+from petsird_reader import get_all_detector_centers, read_listmode_events
 from scanner import create_parallelproj_lor_descriptor
 from simulation import ListmodeEvents, to_petsird_coincidences, write_petsird_file
 
@@ -54,7 +54,10 @@ def test_write_read_roundtrip(tmp_path, tiny_config, tiny_efficiency_model, tiny
     reader = petsird.BinaryPETSIRDReader(str(fname))
     header = reader.read_header()
     centers = get_all_detector_centers(header.scanner.scanner_geometry)
-    coords0, coords1, tof_bins, effs, _, _ = read_listmode_prompt_events(reader, header, centers)
+    prompts = read_listmode_events(reader, header, centers)["prompts"]
+    coords0, coords1, tof_bins, effs = (
+        prompts[k] for k in ("coords0", "coords1", "tof_bins", "effs")
+    )
 
     # PETSIRD first detection bin = parallelproj end point (end module has the higher index)
     scanner = lor_desc.scanner
@@ -83,3 +86,37 @@ def test_referenced_materials_are_defined(tiny_header):
         assert len(m.atoms) == len(m.mass_fractions)
         assert abs(sum(m.mass_fractions) - 1) < 1e-6
         assert m.density > 0
+
+
+def test_randoms_expectation():
+    """randoms are constant for LORs with non-zero efficiency and all TOF bins"""
+    from simulation import randoms_expectation
+
+    lor_effs = np.array([[1.0, 0.0, 2.0], [0.5, 0.3, 0.0]], dtype="float32")
+    randoms, per_bin = randoms_expectation(lor_effs, num_tofbins=5, num_randoms=100.0)
+    assert randoms.shape == (2, 3, 5)
+    np.testing.assert_allclose(randoms.sum(), 100.0, rtol=1e-5)
+    np.testing.assert_allclose(randoms[lor_effs > 0], per_bin)
+    assert np.all(randoms[lor_effs == 0] == 0)
+    np.testing.assert_allclose(per_bin, 100.0 / (4 * 5))
+
+
+def test_write_read_delayeds(tmp_path, tiny_config, tiny_efficiency_model, tiny_tof_params):
+    """delayed coincidences are written (with the delayed policy) and read back"""
+    from simulation import create_petsird_header
+
+    header = create_petsird_header(
+        tiny_config, tiny_efficiency_model, tiny_tof_params, 20.0, store_delayeds=True
+    )
+    assert header.scanner.delayed_event_policy == petsird.CoincidencePolicy.MULTIPLES_AS_ALL_COINCIDENCES
+    prompts = (np.array([30, 40]), np.array([1, 2]), np.array([3, 4]))
+    delayeds = (np.array([35, 41, 50]), np.array([5, 6, 7]), np.array([0, 1, 2]))
+    fname = tmp_path / "delayeds.bin"
+    write_petsird_file(fname, header, *prompts, 2, 50, delayeds=delayeds)
+
+    reader = petsird.BinaryPETSIRDReader(str(fname))
+    h = reader.read_header()
+    events = read_listmode_events(reader, h, get_all_detector_centers(h.scanner.scanner_geometry))
+    assert events["prompts"]["coords0"].shape[0] == 2
+    assert events["delayeds"]["coords0"].shape[0] == 3
+    np.testing.assert_array_equal(np.sort(events["delayeds"]["tof_bins"]), [0, 1, 2])
