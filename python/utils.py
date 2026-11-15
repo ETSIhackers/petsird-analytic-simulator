@@ -1,11 +1,17 @@
 from importlib.metadata import version
 
-# raise an error if petsird version is not at least 0.13.1
-petsird_version = tuple(map(int, version("petsird").split(".")))
-if petsird_version < (0, 13, 1):
-    raise ImportError(
-        f"petsird version {petsird_version} is not supported, please install petsird >= 0.13.1"
-    )
+
+def check_petsird_version(min_version: tuple[int, int, int] = (0, 13, 1)) -> None:
+    """raise an ImportError if the installed petsird version is too old"""
+    petsird_version = tuple(map(int, version("petsird").split(".")))
+    if petsird_version < min_version:
+        raise ImportError(
+            f"petsird version {petsird_version} is not supported, please install "
+            f"petsird >= {'.'.join(map(str, min_version))}"
+        )
+
+
+check_petsird_version()
 
 
 import hashlib
