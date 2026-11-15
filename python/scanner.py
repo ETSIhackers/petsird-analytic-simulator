@@ -16,6 +16,33 @@ from parallelproj.pet_lors import EqualBlockPETLORDescriptor
 from parallelproj.pet_scanners import BlockPETScannerModule, ModularizedPETScannerGeometry
 
 
+# material of the detecting elements (id in ScannerInformation.bulk_materials)
+CRYSTAL_MATERIAL_ID = 1
+
+
+def crystal_bulk_material() -> petsird.BulkMaterial:
+    """LYSO (Lu1.8 Y0.2 Si O5, density 7.1 g/cc) as PETSIRD bulk material
+
+    Atoms are given by the mass number of their most abundant isotope, the mass
+    fractions are calculated from the standard atomic weights.
+    """
+    # (name, mass number A, atomic number Z, standard atomic weight, atoms per formula unit)
+    elements = [
+        ("Lu", 175, 71, 174.967, 1.8),
+        ("Y", 89, 39, 88.906, 0.2),
+        ("Si", 28, 14, 28.086, 1.0),
+        ("O", 16, 8, 15.999, 5.0),
+    ]
+    masses = np.array([weight * n for *_, weight, n in elements])
+    return petsird.BulkMaterial(
+        id=CRYSTAL_MATERIAL_ID,
+        name="LYSO",
+        density=7.1,
+        atoms=[petsird.Atom(mass_number=a, atomic_number=z) for _, a, z, _, _ in elements],
+        mass_fractions=(masses / masses.sum()).tolist(),
+    )
+
+
 @dataclass(frozen=True)
 class ScannerConfig:
     """block modules (cuboids of detecting elements) arranged on a circle"""
@@ -137,7 +164,7 @@ def create_petsird_scanner_geometry(config: ScannerConfig) -> petsird.ScannerGeo
         ]
     )
     rep_volume = petsird.ReplicatedBoxSolidVolume(
-        object=petsird.BoxSolidVolume(shape=box_shape, material_id=1)
+        object=petsird.BoxSolidVolume(shape=box_shape, material_id=CRYSTAL_MATERIAL_ID)
     )
 
     # rotation that maps the local box axis (x) onto the radial direction of the module (y)

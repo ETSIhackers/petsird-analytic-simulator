@@ -10,6 +10,7 @@ but not the readers in python/utils.py, such that they are independent of the
 reconstruction code:
 
 - the detecting element box satisfies the PETSIRD constraints
+- all materials referenced by the scanner geometry are defined in bulk_materials
 - all tables over module (type) pairs are lower-triangular
 - all coincidences are ordered (detection_bins[0] >= detection_bins[1])
 - a TOF LM back projection of the events in the PETSIRD file matches the one
@@ -112,6 +113,20 @@ check(
     "one detection bin efficiency per detection bin",
 )
 check(det_effs.calibration_factor == 1.0, "calibration factor is 1")
+
+materials = {m.id: m for m in scanner.bulk_materials}
+referenced_materials = {
+    rm.object.detecting_elements.object.material_id for rm in geom.replicated_modules
+} | {v.material_id for v in (geom.non_detecting_volumes or [])}
+check(
+    referenced_materials <= set(materials)
+    and all(
+        len(m.atoms) == len(m.mass_fractions) and abs(sum(m.mass_fractions) - 1) < 1e-6
+        for m in materials.values()
+    ),
+    f"referenced materials {sorted(referenced_materials)} are defined in bulk_materials "
+    f"({', '.join(m.name for m in materials.values())})",
+)
 check(
     scanner.prompt_event_policy == petsird.CoincidencePolicy.REJECT_HIGHER_MULTIPLES
     and scanner.delayed_event_policy == petsird.CoincidencePolicy.NONE,

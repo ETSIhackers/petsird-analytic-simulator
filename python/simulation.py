@@ -15,7 +15,7 @@ from parallelproj.projectors import EqualBlockPETProjector
 from parallelproj.tof import TOFParameters
 
 from efficiencies import EfficiencyModel, to_petsird_detection_efficiencies
-from scanner import ScannerConfig, create_petsird_scanner_geometry
+from scanner import ScannerConfig, create_petsird_scanner_geometry, crystal_bulk_material
 from utils import FWHM_PER_SIGMA
 
 
@@ -197,6 +197,8 @@ def create_petsird_header(
     scanner = petsird.ScannerInformation(
         model_name="PETSIRD_TEST",
         scanner_geometry=create_petsird_scanner_geometry(config),
+        # materials referenced by the (detecting) volumes of the scanner geometry
+        bulk_materials=[crystal_bulk_material()],
         tof_bin_edges=[[tof_bin_edges]],
         tof_resolution=[[tof_fwhm_mm]],  # FWHM in mm
         event_energy_bin_edges=[energy_bin_edges],

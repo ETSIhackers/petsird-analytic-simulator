@@ -148,6 +148,7 @@ time.
   module pair SGID LUT, module pair efficiencies) are lower-triangular.
 - The detecting elements are boxes oriented along their local x-axis (pointing away
   from the scanner center) with the average detection point at the crystal center.
+  Their material (LYSO, `material_id` 1) is defined in `ScannerInformation.bulk_materials`.
 - The detection efficiencies consist of detection bin (crystal) efficiencies,
   module pair (symmetry group) efficiencies and a calibration factor of 1.
   The crystal efficiencies are random (including some "dead" crystals).

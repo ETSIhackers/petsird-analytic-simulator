@@ -69,3 +69,17 @@ def test_write_read_roundtrip(tmp_path, tiny_config, tiny_efficiency_model, tiny
     np.testing.assert_allclose(
         effs, lor_efficiencies(tiny_efficiency_model, lor_desc)[i_bp, i_lor], rtol=1e-6
     )
+
+
+def test_referenced_materials_are_defined(tiny_header):
+    """all material ids of the scanner geometry exist in bulk_materials (PETSIRD constraint)"""
+    scanner = tiny_header.scanner
+    materials = {m.id: m for m in scanner.bulk_materials}
+    geom = scanner.scanner_geometry
+    referenced = {rm.object.detecting_elements.object.material_id for rm in geom.replicated_modules}
+    referenced |= {v.material_id for v in (geom.non_detecting_volumes or [])}
+    assert referenced <= set(materials)
+    for m in materials.values():
+        assert len(m.atoms) == len(m.mass_fractions)
+        assert abs(sum(m.mass_fractions) - 1) < 1e-6
+        assert m.density > 0
