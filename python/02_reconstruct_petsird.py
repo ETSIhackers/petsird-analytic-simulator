@@ -2,9 +2,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 import parallelproj
-from parallelproj.operators import GaussianFilterOperator
+from parallelproj.functions import NegPoissonLogLListmode
+from parallelproj.operators import (
+    CompositeLinearOperator,
+    ElementwiseMultiplicationOperator,
+    GaussianFilterOperator,
+)
 from parallelproj.projectors import ListmodePETProjector
-from parallelproj.tof import TOFParameters
 import petsird
 import hashlib
 
@@ -19,7 +23,12 @@ import argparse
 print(f"Using {xp.__name__} for parallelproj reconstructions")
 
 from utils import (
+    FWHM_PER_SIGMA,
+    check_header_support,
     get_all_detector_centers,
+    get_num_data_bins,
+    get_tof_parameters,
+    lm_file_fingerprint,
     read_listmode_prompt_events,
     backproject_efficiencies,
 )
@@ -91,9 +100,6 @@ parser.add_argument(
     default=2.5,
     help="FWHM in mm for Gaussian filter for resolution model",
 )
-parser.add_argument(
-    "--store_energy_bins", action="store_true", help="Whether to store energy bins"
-)
 parser.add_argument("--num_epochs", type=int, default=5, help="Number of OSEM epochs")
 parser.add_argument(
     "--num_subsets", type=int, default=20, help="Number of OSEM subsets"
@@ -105,11 +111,6 @@ parser.add_argument(
     "--unity_sens_img",
     action="store_true",
     help="Whether to skip sensitivity image calculation and use unity image",
-)
-parser.add_argument(
-    "--unity_effs",
-    action="store_true",
-    help="Whether to use unity efficiencies for LORs",
 )
 parser.add_argument(
     "--non-tof", action="store_true", help="Whether to disable TOF in recon"
@@ -124,12 +125,10 @@ fname = args.fname
 img_shape: list[int] | None = args.img_shape
 voxel_size = tuple(args.voxel_size)
 fwhm_mm = args.fwhm_mm
-store_energy_bins = args.store_energy_bins
 num_epochs = args.num_epochs
 num_subsets = args.num_subsets
 verbose = args.verbose
 unity_sens_img = args.unity_sens_img
-unity_effs = args.unity_effs
 tof = not args.non_tof
 attenuation_image_fname: str | None = args.attenuation_image
 
@@ -140,6 +139,8 @@ attenuation_image_fname: str | None = args.attenuation_image
 
 reader = petsird.BinaryPETSIRDReader(fname)
 header: petsird.Header = reader.read_header()
+# raise errors / warnings for PETSIRD features that are not supported
+check_header_support(header)
 scanner_info: petsird.ScannerInformation = header.scanner
 scanner_geom: petsird.ScannerGeometry = scanner_info.scanner_geometry
 
@@ -155,7 +156,15 @@ print(f"Scanner with {num_replicated_modules} types of replicated modules.")
 fig = plt.figure()
 ax = fig.add_subplot(111, projection="3d")
 
-all_detector_centers_file = Path(fname).with_suffix(".detector_centers.npz")
+# all cached / derived files are tagged with a fingerprint of the listmode file
+# such that they are not reused for a different file with the same name
+lm_fingerprint = lm_file_fingerprint(fname)
+lm_stem = Path(fname).stem
+print(f"Listmode file fingerprint: {lm_fingerprint}")
+
+all_detector_centers_file = Path(fname).with_name(
+    f"{lm_stem}_detector_centers_{lm_fingerprint}.npz"
+)
 
 if not all_detector_centers_file.exists():
     print("Calculating all detector centers ...")
@@ -234,7 +243,7 @@ if verbose:
 ### CALCULATE THE SENSITIVTY IMAGE #############################################
 ################################################################################
 
-sig = fwhm_mm / (2.35 * np.asarray(voxel_size))
+sig = fwhm_mm / (FWHM_PER_SIGMA * np.asarray(voxel_size))
 res_model = GaussianFilterOperator(img_shape, sigma=sig)
 
 att_img: None | np.ndarray = None
@@ -248,7 +257,11 @@ if attenuation_image_fname is not None:
 
 
 # Generate hash for all sensitivity parameters (also used to name the output files)
-params_hash = get_params_hash(img_shape, voxel_size, tof, att_img, fwhm_mm=fwhm_mm)
+# (prefixed with the fingerprint of the listmode file)
+params_hash = (
+    f"{lm_fingerprint}_"
+    f"{get_params_hash(img_shape, voxel_size, tof, att_img, fwhm_mm=fwhm_mm)}"
+)
 
 if unity_sens_img:
     print("Using ones as sensitivity image ...")
@@ -306,7 +319,9 @@ else:
 ### READ THE LM PROMPT EVENTS AND CONVERT TO COODINATES ########################
 ################################################################################
 
-preprocess_file = Path(fname).with_suffix(".preprocessed_events.npz")
+preprocess_file = Path(fname).with_name(
+    f"{lm_stem}_preprocessed_events_{lm_fingerprint}.npz"
+)
 
 if not preprocess_file.exists():
     print("Reading prompt events from listmode file ...")
@@ -317,7 +332,6 @@ if not preprocess_file.exists():
             all_detector_centers,
             store_energy_bins=True,
             verbose=verbose,
-            unity_effs=unity_effs,
         )
     )
 
@@ -376,16 +390,9 @@ non_tof_backproj_path = Path(fname).with_name(
 )
 xp.save(non_tof_backproj_path, non_tof_backproj)
 
-#### HACK assumes same TOF parameters for all module type pairs
+# (check_header_support() made sure that all module type pairs have the same TOF parameters)
 if tof:
-    sigma_tof = scanner_info.tof_resolution[0][0] / 2.35
-    tof_bin_edges = scanner_info.tof_bin_edges[0][0].edges
-    num_tofbins = tof_bin_edges.size - 1
-    tofbin_width = float(tof_bin_edges[1] - tof_bin_edges[0])
-
-    tof_params = TOFParameters(
-        num_tofbins=num_tofbins, tofbin_width=tofbin_width, sigma_tof=sigma_tof
-    )
+    tof_params = get_tof_parameters(scanner_info, 0, 0)
 
     proj.tof_parameters = tof_params
     proj.event_tofbins = xp.asarray(tof_bins, dtype=xp.int16).copy()
@@ -412,60 +419,98 @@ if effs.min() == 0:
     coords1 = coords1[valid_events]
     tof_bins = tof_bins[valid_events]
     effs = effs[valid_events]
-
-    if store_energy_bins:
-        energy_idx0 = energy_idx0[valid_events]
-        energy_idx1 = energy_idx1[valid_events]
+    energy_idx0 = energy_idx0[valid_events]
+    energy_idx1 = energy_idx1[valid_events]
 
 
 # %%
 ################################################################################
-### PARALLELRPOJ LM OSEM RECONSTRUCTION WITHOUT ATTENUATION MODEL ##############
+### PARALLELRPOJ LM OSEM RECONSTRUCTION ########################################
 ################################################################################
 
-# NOTE: since we don't model additive contamination, the attenuation only enters
-#       the sensitivity image calculation
+# forward model of the expected counts of an event e:
+#   ybar_e = eff_e * att_e * (P G x)_e (+ eps)
+# with the detection efficiency eff_e, the attenuation factor att_e, the (TOF) LM
+# projector P and the image-based resolution model G.
+# Without additive contamination (randoms, scatter), the multiplicative factors
+# cancel in the LM OSEM update, but they are needed for an additive term like eps
+# (and contaminations in the future).
+#
+# Since we do not model additive contamination, a detected event with zero expected
+# counts (e.g. when the image is 0 along its LOR) would lead to a division by 0.
+# We therefore use a small eps added to the expected counts of all events
+# (see parallelproj.functions.NegPoissonLogLListmode), as recommended:
+# 1e-6 times the mean number of counts per data bin.
 
-print("Starting parallelproj LM OSEM reconstruction ...")
+num_data_bins = get_num_data_bins(scanner_info, tof)
+eps = 1e-6 * coords0.shape[0] / num_data_bins
 
-lm_subset_projs = []
+print(f"Starting parallelproj LM OSEM reconstruction (eps = {eps:.2e}) ...")
+
 subset_slices = [slice(i, None, num_subsets) for i in range(num_subsets)]
 
-# init recon, sens and eff arrays and covert to xp (numpy or cupy) arrays
+# init recon and convert arrays to xp (numpy or cupy) arrays
 recon = xp.ones(img_shape, dtype="float32")
 effs = xp.asarray(effs, dtype="float32")
+if att_img is not None:
+    att_img_xp = xp.asarray(att_img, dtype=xp.float32)
+
+# negative Poisson log-likelihood of every subset
+subset_objectives: list[NegPoissonLogLListmode] = []
 
 for i_subset, sl in enumerate(subset_slices):
-    lm_subset_projs.append(
-        ListmodePETProjector(
-            xp.asarray(coords0[sl, :]).copy(),
-            xp.asarray(coords1[sl, :]).copy(),
-            img_shape,
-            voxel_size,
-            img_origin=img_origin,
+    lm_proj = ListmodePETProjector(
+        xp.asarray(coords0[sl, :]).copy(),
+        xp.asarray(coords1[sl, :]).copy(),
+        img_shape,
+        voxel_size,
+        img_origin=img_origin,
+    )
+
+    # multiplicative factors of all events: efficiencies x attenuation factors
+    # (non-TOF line integrals through the attenuation image)
+    mult_factors = effs[sl]
+    if att_img is not None:
+        mult_factors = mult_factors * xp.exp(-lm_proj(att_img_xp))
+
+    if tof:
+        lm_proj.tof_parameters = tof_params
+        lm_proj.event_tofbins = xp.asarray(tof_bins[sl], dtype=xp.int16).copy()
+        lm_proj.tof = True
+
+    num_subset_events = int(mult_factors.shape[0])
+    subset_objectives.append(
+        NegPoissonLogLListmode(
+            CompositeLinearOperator(
+                [
+                    ElementwiseMultiplicationOperator(mult_factors),
+                    lm_proj,
+                    res_model,
+                ]
+            ),
+            # the sensitivity image of a subset is (approx.) sens_img / num_subsets
+            sensitivity_image=sens_img / num_subsets,
+            contamination_list=xp.zeros(num_subset_events, dtype=xp.float32),
+            contamination_sinogram_sum=0.0,
+            eps=eps,
         )
     )
 
-    #### HACK assumes same TOF parameters for all module type pairs
-    if tof:
-        lm_subset_projs[i_subset].tof_parameters = tof_params
-        lm_subset_projs[i_subset].event_tofbins = xp.asarray(
-            tof_bins[sl], dtype=xp.int16
-        ).copy()
-        lm_subset_projs[i_subset].tof = True
+# OSEM update x <- x - (x / sens_subset) * grad_subset(x)
+#                 = (x / sens_subset) * A_subset^T (1 / (A_subset x + eps))
+# voxels with zero sensitivity are not "seen" by the scanner and set to 0
+step_scale = xp.where(sens_img > 0, num_subsets / xp.where(sens_img > 0, sens_img, 1), 0)
+recon = xp.where(sens_img > 0, recon, 0)
 
 for i_epoch in range(num_epochs):
-    for i_subset, sl in enumerate(subset_slices):
+    for i_subset, objective in enumerate(subset_objectives):
         print(
             f"it {(i_epoch +1):03} / {num_epochs:03}, ss {(i_subset+1):03} / {num_subsets:03}",
             end="\r",
         )
-        lm_exp = effs[sl] * lm_subset_projs[i_subset](res_model(recon))
-
-        tmp = num_subsets * res_model.adjoint(
-            lm_subset_projs[i_subset].adjoint(effs[sl] / lm_exp)
-        )
-        recon *= tmp / sens_img
+        recon = recon - recon * step_scale * objective.gradient(recon)
+        # remove negative values due to floating point rounding
+        recon = xp.clip(recon, 0, None)
 
 opath = Path(fname).with_name(f"lm_osem_{num_epochs}_{num_subsets}_{params_hash}.npy")
 xp.save(opath, recon)

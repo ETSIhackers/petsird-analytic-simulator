@@ -15,10 +15,16 @@ reconstruction code:
 - a TOF LM back projection of the events in the PETSIRD file matches the one
   calculated by the simulator before writing (checks detection bin swapping and
   TOF bin mirroring)
+- the TOF information follows the PETSIRD definition: the emission positions decoded
+  from the TOF bins (only using the PETSIRD specification, no parallelproj) agree with
+  the positions expected from the ground truth activity along the LORs
 - vectorized efficiencies match petsird.helpers.get_detection_efficiency
 
-If the reconstruction outputs exist, the sensitivity image and the LM back projections
-calculated from the PETSIRD file are compared to the ones of the simulator.
+If the reconstruction outputs exist, the sensitivity images and the LM back projections
+calculated from the PETSIRD file are compared to the ones of the simulator
+(a TOF recon without attenuation correction has to match the simulator's sensitivity
+image without attenuation, a TOF recon with attenuation correction using the simulated
+attenuation image the one with attenuation).
 
 The script exits with a non-zero exit code if any check fails.
 """
@@ -27,6 +33,7 @@ import argparse
 import contextlib
 import io
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -41,8 +48,18 @@ from petsird.helpers import (
 from petsird.helpers.geometry import get_ADP
 from petsird.validate.geometry import validate_detecting_element
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
+from utils import FWHM_PER_SIGMA, lm_file_fingerprint  # noqa: E402
+
 parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
 parser.add_argument("output_dir", type=Path, help="output directory of the simulator")
+parser.add_argument(
+    "--require_all_references",
+    action="store_true",
+    help="require that both reference sensitivity images (with and without attenuation) "
+    "are matched by a recon, i.e. that a TOF recon without AC and a TOF recon with AC "
+    "(using the simulated attenuation image) were run",
+)
 args = parser.parse_args()
 
 out_dir: Path = args.output_dir
@@ -157,7 +174,7 @@ lm_proj = ListmodePETProjector(
 lm_proj.tof_parameters = TOFParameters(
     num_tofbins=tof_bin_edges.size - 1,
     tofbin_width=float(tof_bin_edges[1] - tof_bin_edges[0]),
-    sigma_tof=float(scanner.tof_resolution[0][0]) / 2.35,
+    sigma_tof=float(scanner.tof_resolution[0][0]) / FWHM_PER_SIGMA,
 )
 lm_proj.event_tofbins = tof_idx.astype("int16")
 lm_proj.tof = True
@@ -169,6 +186,49 @@ if sim_lm_back_tof_file.exists():
     check(d < 1e-4, f"TOF LM back projection of PETSIRD events matches simulator ({d:.1e})")
 else:
     check(False, "simulator TOF LM back projection exists (run with --check_backprojection)")
+
+# %%
+# TOF sign / scale following the PETSIRD specification (independent of parallelproj)
+#
+# PETSIRD stores (t1 - t2) * c / 2 where t1 / t2 are the arrival times at the first /
+# second detection bin. A positive value means that the photon arrived first at the
+# second detection bin, i.e. that the emission happened closer to the second detection
+# bin. We decode the emission position along each LOR (relative to the LOR center,
+# positive towards the second detection bin) from the center of its TOF bin and compare
+# it to the position expected from the ground truth activity along the LOR.
+# (Attenuation and detection efficiencies are constant along a LOR and do not change
+# the expected position.) For the correct convention, the slope of the regression of
+# decoded vs expected positions is close to +1, for a flipped one close to -1.
+
+rng = np.random.default_rng(0)
+idx = rng.choice(num_events, min(20000, num_events), replace=False)
+
+tof_bin_centers = 0.5 * (tof_bin_edges[1:] + tof_bin_edges[:-1]).astype("float64")
+decoded_pos = tof_bin_centers[tof_idx[idx]]
+
+p1 = adp[det_bin_0[idx]].astype("float64")
+p2 = adp[det_bin_1[idx]].astype("float64")
+lor_length = np.linalg.norm(p2 - p1, axis=1)
+lor_dir = (p2 - p1) / lor_length[:, None]
+lor_center = 0.5 * (p1 + p2)
+
+gt_img = np.load(out_dir / "ground_truth_image.npy")
+# sample the ground truth image (nearest voxel) at 401 points along every LOR
+t = np.linspace(-0.5, 0.5, 401)[None, :] * lor_length[:, None]
+sample_pos = lor_center[:, None, :] + t[..., None] * lor_dir[:, None, :]
+vox = np.rint(sample_pos / np.asarray(voxel_size) + (np.asarray(img_shape) - 1) / 2).astype(int)
+inside = np.all((vox >= 0) & (vox < np.asarray(img_shape)), axis=-1)
+vox = np.clip(vox, 0, np.asarray(img_shape) - 1)
+act = np.where(inside, gt_img[vox[..., 0], vox[..., 1], vox[..., 2]], 0)
+
+has_act = act.sum(1) > 0
+expected_pos = (act * t).sum(1)[has_act] / act.sum(1)[has_act]
+slope = np.polyfit(expected_pos, decoded_pos[has_act], 1)[0]
+check(
+    0.5 < slope < 1.5,
+    f"TOF bins follow the PETSIRD convention: slope of decoded vs expected emission "
+    f"positions {slope:+.2f} (flipped convention: -1)",
+)
 
 # %%
 # vectorized efficiencies vs petsird.helpers.get_detection_efficiency
@@ -188,7 +248,6 @@ sgid = np.array(
 )
 check(bool(np.all(sgid >= 0)), "all events are in module pairs in coincidence")
 
-rng = np.random.default_rng(0)
 idx = rng.choice(num_events, min(2000, num_events), replace=False)
 effs = (
     det_effs.calibration_factor
@@ -215,23 +274,44 @@ check(
 # %%
 # reconstruction outputs (if present)
 
+# only consider recon outputs of the current listmode file (tagged with its fingerprint)
 stem = lm_file.stem
-recon_sens = sorted(out_dir.glob(f"{stem}_sens_*.npy"))
-recon_tof_back = sorted(out_dir.glob(f"{stem}_tof_backproj_*.npy"))
+fingerprint = lm_file_fingerprint(lm_file)
+recon_sens = sorted(out_dir.glob(f"{stem}_sens_{fingerprint}_*.npy"))
+recon_tof_back = sorted(out_dir.glob(f"{stem}_tof_backproj_{fingerprint}_*.npy"))
 
 if recon_sens and recon_tof_back:
     # there can be multiple recon outputs (e.g. TOF / non-TOF, with / without attenuation)
     # - the (unweighted) TOF LM back projections all have to match
-    # - at least one sensitivity image (TOF without attenuation) has to match the
-    #   simulator's. The simulator's sensitivity image uses a TOF sinogram projector,
+    # - the sensitivity images of TOF recons without AC / with AC (using the simulated
+    #   attenuation image) have to match the simulator's sensitivity image without / with
+    #   attenuation. The simulator's sensitivity images use a TOF sinogram projector,
     #   the reconstruction a TOF LM projector, which differ slightly in the normalization
     #   of the TOF kernels.
-    ref_sens = np.load(out_dir / "reference_sensitivity_image.npy")
-    sens_diffs = {f.name: rel_diff(ref_sens, np.load(f)) for f in recon_sens}
-    for name, d in sens_diffs.items():
-        print(f"       {name}: rel. diff to simulator sensitivity image {d:.1e}")
-    d = min(sens_diffs.values())
-    check(d < 2e-3, f"a recon sensitivity image matches the simulator's ({d:.1e})")
+    references = {
+        "without attenuation": np.load(
+            out_dir / "reference_sensitivity_image_no_attenuation.npy"
+        ),
+        "with attenuation": np.load(out_dir / "reference_sensitivity_image.npy"),
+    }
+    recon_sens_imgs = {f.name: np.load(f) for f in recon_sens}
+    num_matched_refs = 0
+    for ref_name, ref in references.items():
+        diffs = {name: rel_diff(ref, x) for name, x in recon_sens_imgs.items()}
+        best = min(diffs, key=diffs.get)
+        matched = diffs[best] < 2e-3
+        num_matched_refs += matched
+        print(
+            f"       simulator sensitivity image {ref_name}: best matching recon "
+            f"sensitivity image {best} ({diffs[best]:.1e})"
+        )
+        if args.require_all_references:
+            check(matched, f"a recon sensitivity image matches the simulator's {ref_name}")
+    if not args.require_all_references:
+        check(
+            num_matched_refs > 0,
+            "a recon sensitivity image matches one of the simulator's",
+        )
     for f in recon_tof_back:
         d = rel_diff(lm_back_tof, np.load(f))
         check(d < 1e-4, f"recon TOF LM back projection {f.name} matches PETSIRD events ({d:.1e})")

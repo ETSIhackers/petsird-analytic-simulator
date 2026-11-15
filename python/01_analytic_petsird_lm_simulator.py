@@ -1,6 +1,6 @@
 """analytic simulation of petsird v0.13.1 listmode data for a block PET scanner
-we only simulate true events and ignore the effect of attenuation
-however, we simulate the effect of crystal efficiencies and LOR symmetry group efficiencies
+we only simulate true (unscattered) events including the effect of attenuation
+(of a water cylinder), crystal efficiencies and LOR symmetry group efficiencies
 """
 
 # %%
@@ -41,6 +41,8 @@ from pathlib import Path
 import petsird
 from petsird.helpers.create import construct_lower_triangular_matrix
 
+from utils import FWHM_PER_SIGMA
+
 
 # %%
 def circular_distance(i_mod_1: int, i_mod_2: int, num_modules: int) -> int:
@@ -51,21 +53,52 @@ def circular_distance(i_mod_1: int, i_mod_2: int, num_modules: int) -> int:
 
 
 # %%
-def sgid_from_module_pair(i_mod_1: int, i_mod_2: int, num_modules: int) -> int:
-    """a random mapping between two modules into a symmetry group"""
+def module_offset(i_mod_1: int, i_mod_2: int, num_modules: int) -> int:
+    """offset (i_mod_1 - i_mod_2) mod num_modules between the first and second module of a pair
 
-    return circular_distance(i_mod_1, i_mod_2, num_modules) % 3
+    For our scanner with rotationally symmetric modules, two module pairs with the
+    same offset are related by a rotation that maps the first (second) module of one
+    pair onto the first (second) module of the other pair. Therefore, all module pairs
+    with the same offset have the same module pair efficiencies, i.e. they form a
+    PETSIRD symmetry group.
+    Note: since PETSIRD stores module pairs (of the same type) in lower-triangular order
+    (first module index >= second module index), a rotation can swap the order of the
+    modules, which maps offset d to num_modules - d. The module pair efficiencies of
+    offset num_modules - d are therefore the transpose of the ones of offset d.
+    """
+    return (i_mod_1 - i_mod_2) % num_modules
 
 
-# %%
-def module_pair_eff_from_sgd(i_sgd: int, uniform: bool = False) -> float:
-    """a random mapping from symmetry group id (sgid) to efficiency"""
-    if uniform:
-        res = 1.0
-    else:
-        res = 1 + 0.5 * ((-1) ** i_sgd)
+def generate_module_pair_efficiencies(
+    offsets: list[int],
+    num_modules: int,
+    num_det_els: int,
+    uniform: bool = False,
+) -> dict[int, np.ndarray]:
+    """(non-physical) module pair efficiency matrices for all module offsets
 
-    return res
+    Returns a dictionary offset -> matrix of shape (num_det_els, num_det_els) where
+    matrix[i_el_1, i_el_2] is the efficiency for detecting element i_el_1 in the first
+    and i_el_2 in the second module of a pair.
+    The matrices are random and non-symmetric (to be able to detect transposition
+    errors when reading the data), but consistent with the rotational symmetry of the
+    scanner: matrix[num_modules - d] = matrix[d].T
+    """
+    effs = {}
+    for d in sorted(offsets):
+        if uniform:
+            effs[d] = np.ones((num_det_els, num_det_els), dtype="float32")
+        elif (num_modules - d) in effs:
+            effs[d] = effs[num_modules - d].T.copy()
+        else:
+            # level alternating between offsets (same level for d and num_modules - d)
+            level = 1 + 0.5 * (-1) ** d
+            m = np.random.uniform(0.5, 1.5, (num_det_els, num_det_els))
+            if 2 * d == num_modules:
+                # opposite modules: matrix has to be symmetric
+                m = 0.5 * (m + m.T)
+            effs[d] = (level * m).astype("float32")
+    return effs
 
 
 def parse_int_tuple(arg):
@@ -111,7 +144,7 @@ image_group.add_argument(
     "--phantom",
     type=str,
     default="uniform_cylinder",
-    choices=["uniform_cylinder", "squares", "points"],
+    choices=["uniform_cylinder", "offcenter_cylinder", "points"],
     help="phantom to simulate",
 )
 image_group.add_argument(
@@ -138,7 +171,7 @@ physics_group.add_argument(
 physics_group.add_argument(
     "--tof_fwhm_mm",
     type=float,
-    default=20.0,
+    default=10.0,
     help="FWHM of the TOF resolution model in mm",
 )
 physics_group.add_argument(
@@ -158,7 +191,7 @@ efficiency_group.add_argument(
 efficiency_group.add_argument(
     "--uniform_sg_eff",
     action="store_true",
-    help="use uniform symmetry group (module pair) efficiencies, otherwise pseudo random pattern is used",
+    help="use uniform symmetry group (module pair) efficiencies, otherwise random non-symmetric module pair efficiency matrices are used",
 )
 
 # Time block configuration group
@@ -315,19 +348,41 @@ lor_desc = EqualBlockPETLORDescriptor(
 # %%
 # setup of the ground truth image used for the data simulation
 
+# transaxial disk with a radius of 70% of the image half-width
+# (used for the uniform cylinder phantom and the attenuating water cylinder)
+tmp = np.linspace(-1, 1, img_shape[0])
+X0, X1 = np.meshgrid(tmp, tmp, indexing="ij")
+disk = np.astype(np.sqrt(X0**2 + X1**2) < 0.7, "float32")
+
+# coordinates (mm) of all voxel centers (the image is centered at (0,0,0))
+X, Y, Z = np.meshgrid(
+    *[(np.arange(n) - (n - 1) / 2) * vs for n, vs in zip(img_shape, voxel_size)],
+    indexing="ij",
+)
+
 img = np.zeros(img_shape, dtype=np.float32)
 
+# attenuating water body (as boolean mask)
+# (by default a centered water cylinder covering all slices)
+water_body = np.broadcast_to(disk[..., None].astype(bool), img_shape)
+
 if phantom == "uniform_cylinder":
-    tmp = np.linspace(-1, 1, img_shape[0])
-    X0, X1 = np.meshgrid(tmp, tmp, indexing="ij")
-    disk = np.astype(np.sqrt(X0**2 + X1**2) < 0.7, "float32")
     for i in range(2, img_shape[2] - 2):
         img[..., i] = disk
-elif phantom == "squares":
-    img[2:-12, 32:-20, 2:-1] = 3
-    img[24:-40, 36:-28, 4:-2] = 9
-    img[76:78, 68:72, :-2] = 18
-    img[14:20, 35:75, 5:-3] = 0
+elif phantom == "offcenter_cylinder":
+    # off-center (transaxially and axially) cylinder with 3 hot spheres of different
+    # size, contrast and position, such that axis flips, swaps and mirroring (e.g. in
+    # readers of the PETSIRD data) are visible in the reconstructions
+    cylinder = (np.hypot(X - 10, Y + 5) <= 30) & (Z >= -12) & (Z <= 16)
+    img[cylinder] = 1
+    # (center x, y, z in mm, radius in mm, activity)
+    for (cx, cy, cz), radius, activity in [
+        ((22, -5, 6), 8, 3),
+        ((5, 12, -4), 6, 2),
+        ((0, -18, 10), 4, 3),
+    ]:
+        img[np.sqrt((X - cx) ** 2 + (Y - cy) ** 2 + (Z - cz) ** 2) <= radius] = activity
+    water_body = cylinder
 elif phantom == "points":
     img[img_shape[0] // 2, img_shape[1] // 2, img_shape[2] // 2] = 8
     img[img_shape[0] // 2, img_shape[1] // 6, img_shape[2] // 2] = 4
@@ -341,10 +396,20 @@ else:
     raise ValueError(f"Invalid phantom {phantom}")
 
 # %%
+# setup of the attenuation image (linear attenuation coefficients in mm^-1)
+# all phantoms are embedded in a water body (see phantom setup)
+
+mu_water = 0.0096  # linear attenuation coefficient of water at 511 keV (mm^-1)
+att_img = np.where(water_body, mu_water, 0).astype(np.float32)
+
+# save the attenuation image (can be used for attenuation correction in the recon)
+np.save(output_dir / "attenuation_image.npy", att_img)
+
+# %%
 # setup of a parallelproj TOF projector
 
 # TOF parameters
-sig_tof = tof_fwhm_mm / 2.35
+sig_tof = tof_fwhm_mm / FWHM_PER_SIGMA
 tof_bin_width = 0.8 * sig_tof
 # calculate the number of TOF bins
 # we set it to twice the image diagonal divided by the tof bin width
@@ -369,7 +434,7 @@ assert proj.adjointness_test(np, "cpu", dtype=np.float32, rtol=1e-4)
 # %%
 # setup a simple image space resolution model
 
-sig = fwhm_mm / (2.35 * np.asarray(voxel_size))
+sig = fwhm_mm / (FWHM_PER_SIGMA * np.asarray(voxel_size))
 res_model = GaussianFilterOperator(img_shape, sigma=sig)
 
 # %%
@@ -401,12 +466,34 @@ else:
     # simulate a few dead crystals
     det_el_efficiencies[det_el_efficiencies < 0.21] = 0
 
+# module pair efficiency matrices for all offsets between modules in coincidence
+# (in the PETSIRD convention: first module = module with the higher index)
+module_pair_effs = generate_module_pair_efficiencies(
+    sorted({module_offset(max(bp), min(bp), num_blocks) for bp in block_pairs}),
+    num_blocks,
+    lor_desc.num_lorendpoints_per_block,
+    uniform=uniform_sg_eff,
+)
+
 for i, bp in enumerate(proj.lor_descriptor.all_block_pairs):
-    sgid = sgid_from_module_pair(bp[0], bp[1], num_blocks)
-    sg_eff = module_pair_eff_from_sgd(sgid, uniform=uniform_sg_eff)
+    # the block pairs of the LOR descriptor have bp[0] < bp[1], i.e. the LOR end
+    # module bp[1] is the first module of the pair in the PETSIRD convention
+    mp_eff = module_pair_effs[module_offset(int(bp[1]), int(bp[0]), num_blocks)]
     start_crystal_eff = det_el_efficiencies[bp[0], start_el_arr]
     end_crystal_eff = det_el_efficiencies[bp[1], end_el_arr]
-    nontof_sens_histo[i, ...] = sg_eff * start_crystal_eff * end_crystal_eff
+    nontof_sens_histo[i, ...] = (
+        mp_eff[end_el_arr, start_el_arr] * start_crystal_eff * end_crystal_eff
+    )
+
+# %%
+# attenuation factors exp(-int mu) of all LORs (non-TOF line integrals)
+nontof_proj = EqualBlockPETProjector(lor_desc, img_shape, voxel_size)
+att_factors = np.exp(-nontof_proj(att_img))
+
+# sensitivity histogram without attenuation (only used for reference outputs)
+nontof_sens_histo_no_att = nontof_sens_histo.copy()
+# multiplicative correction factors of the data: efficiencies x attenuation
+nontof_sens_histo *= att_factors
 
 # %%
 # setup the complete forward operator consisting of diag(s) P G
@@ -433,8 +520,19 @@ img_fwd_tof = fwd_op(img)
 # %%
 # calculate the sensitivity image
 
+# (including attenuation, i.e. the sensitivity image of the forward model of the data)
 sens_img = fwd_op.adjoint(np.ones(fwd_op.out_shape, dtype=np.float32))
 np.save(output_dir / "reference_sensitivity_image.npy", sens_img)
+
+# sensitivity image without attenuation (= sensitivity image of a recon without AC)
+sens_img_no_att = res_model.adjoint(
+    proj.adjoint(
+        np.broadcast_to(nontof_sens_histo_no_att[..., None], proj.out_shape).astype(
+            np.float32
+        )
+    )
+)
+np.save(output_dir / "reference_sensitivity_image_no_attenuation.npy", sens_img_no_att)
 
 # %%
 # add poisson noise on the forward projection
@@ -714,28 +812,25 @@ assert scanner_geometry.number_of_module_types() == 1
 
 module_pair_sgid_lut = construct_lower_triangular_matrix(num_blocks, dtype=int, value=-1)
 
+# one symmetry group (SGID) per module offset (see module_offset())
+sgid_of_offset = {d: sgid for sgid, d in enumerate(sorted(module_pair_effs))}
+
 for bp in proj.lor_descriptor.all_block_pairs:
+    # lower triangular: first module index >= second module index
     # (PETSIRD tables are plain python lists -> use python ints, not numpy ints)
-    i_mod_1, i_mod_2 = int(bp[0]), int(bp[1])
-    sgid = sgid_from_module_pair(i_mod_1, i_mod_2, num_blocks)
-    # lower triangular: first index >= second index
-    module_pair_sgid_lut[max(i_mod_1, i_mod_2)][min(i_mod_1, i_mod_2)] = sgid
-
-num_SGIDs = max(max(row) for row in module_pair_sgid_lut) + 1
-
-num_el_per_module = proj.lor_descriptor.scanner.num_lor_endpoints_per_module[0]
-
-module_pair_efficiencies_shape = (
-    num_el_per_module * num_energy_bins,
-    num_el_per_module * num_energy_bins,
-)
+    i_mod_1, i_mod_2 = int(max(bp)), int(min(bp))
+    module_pair_sgid_lut[i_mod_1][i_mod_2] = sgid_of_offset[
+        module_offset(i_mod_1, i_mod_2, num_blocks)
+    ]
 
 module_pair_efficiencies_vector = []
 
-for sgid in range(num_SGIDs):
-    eff = module_pair_eff_from_sgd(sgid, uniform=uniform_sg_eff)
-    vals = np.full(module_pair_efficiencies_shape, eff, dtype="float32")
-
+for d, sgid in sgid_of_offset.items():
+    # values[detection bin in first module][detection bin in second module]
+    # (the detection bin index runs over (element, energy bin) with energy as the fastest index)
+    vals = np.kron(
+        module_pair_effs[d], np.ones((num_energy_bins, num_energy_bins), dtype="float32")
+    )
     module_pair_efficiencies_vector.append(
         petsird.ModulePairEfficiencies(values=vals.tolist(), sgid=sgid)
     )
@@ -782,7 +877,7 @@ petsird_scanner = petsird.ScannerInformation(
     scanner_geometry=scanner_geometry,
     tof_bin_edges=[[tofBinEdges]],  # lower-triangular list of list for all module type pairs
     tof_resolution=[
-        [2.35 * proj.tof_parameters.sigma_tof]
+        [tof_fwhm_mm]
     ],  # FWHM in mm, lower-triangular list of list for all module type pairs
     event_energy_bin_edges=[energyBinEdges],  # list for all module types
     energy_resolution_at_511=[0.11],  # as fraction of 511, list for all module types
