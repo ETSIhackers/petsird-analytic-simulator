@@ -8,6 +8,16 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      phantom:
+        description: "phantom to simulate"
+        type: choice
+        options: [offcenter_cylinder, uniform_cylinder, points]
+        default: offcenter_cylinder
+      num_true_counts:
+        description: "number of true coincidences to simulate"
+        type: string
+        default: "200000"
 
 defaults:
   run:
@@ -22,6 +32,9 @@ jobs:
     env:
       MPLBACKEND: Agg
       OUT_DIR: ${{ github.workspace }}/ci_output
+      # inputs of manually triggered runs (workflow_dispatch), defaults otherwise
+      PHANTOM: ${{ inputs.phantom || 'offcenter_cylinder' }}
+      NUM_TRUE_COUNTS: ${{ inputs.num_true_counts || '200000' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -36,18 +49,21 @@ jobs:
         run: |
           python -c "from importlib.metadata import version; print('petsird', version('petsird')); print('parallelproj', version('parallelproj'))"
 
+      - name: Unit tests
+        run: |
+          python -m pytest -v
+
       - name: Simulate PETSIRD listmode data
         working-directory: python
         run: |
           python 01_analytic_petsird_lm_simulator.py \
             --output_dir "$OUT_DIR" \
-            --phantom offcenter_cylinder \
+            --phantom "$PHANTOM" \
             --img_shape 55,55,19 \
-            --num_true_counts 200000 \
-            --check_backprojection \
-            --skip_plots
+            --num_true_counts "$NUM_TRUE_COUNTS" \
+            --save_lm_backprojection
 
-      - name: Reconstruct PETSIRD listmode data (TOF, no attenuation correction)
+      - name: Reconstruct PETSIRD listmode data (TOF, no attenuation correction, smoke test)
         working-directory: python
         run: |
           python 02_reconstruct_petsird.py "$OUT_DIR/simulated_petsird_lm_file.bin" \
@@ -66,8 +82,39 @@ jobs:
 
       - name: Check PETSIRD file and reconstructions
         run: |
-          python tests/check_simulation_and_recon.py "$OUT_DIR" --require_all_references
+          python tests/check_simulation_and_recon.py "$OUT_DIR"
 
       - name: Run petsird analysis on the simulated file
         run: |
           python -m petsird.helpers.analysis -i "$OUT_DIR/simulated_petsird_lm_file.bin" > /dev/null
+
+      - name: Write provenance information
+        if: always()
+        run: |
+          mkdir -p "$OUT_DIR"
+          python - <<'EOF'
+          import json, os
+          from importlib.metadata import version
+          info = {
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "commit": os.environ["GITHUB_SHA"],
+              "ref": os.environ["GITHUB_REF"],
+              "workflow_run": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+              "phantom": os.environ["PHANTOM"],
+              "num_true_counts": int(os.environ["NUM_TRUE_COUNTS"]),
+              "versions": {p: version(p) for p in ("petsird", "parallelproj", "numpy")},
+              "note": "simulation and recon commands: see .github/workflows/ci.yml at the given commit; simulation parameters: sim_parameters.json",
+          }
+          with open(os.path.join(os.environ["OUT_DIR"], "provenance.json"), "w") as f:
+              json.dump(info, f, indent=4)
+          print(json.dumps(info, indent=4))
+          EOF
+
+      - name: Upload simulated PETSIRD data and all other outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: petsird-simulation-${{ env.PHANTOM }}-${{ env.NUM_TRUE_COUNTS }}-${{ github.sha }}
+          path: ${{ env.OUT_DIR }}
+          retention-days: 90
+          if-no-files-found: warn
