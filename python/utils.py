@@ -18,8 +18,6 @@ from parallelproj.projectors import ListmodePETProjector
 from parallelproj.tof import TOFParameters
 
 import petsird
-from petsird.helpers.geometry import mult_transforms, transform_BoxShape
-from petsird.helpers.plot_scanner import draw_BoxShape
 
 # ratio between the FWHM and the standard deviation of a Gaussian: 2 * sqrt(2 * ln(2))
 FWHM_PER_SIGMA = 2 * np.sqrt(2 * np.log(2))
@@ -139,7 +137,7 @@ def check_header_support(header: petsird.Header) -> None:
 
 
 def get_all_detector_centers(
-    scanner_geometry: petsird.ScannerGeometry, ax=None
+    scanner_geometry: petsird.ScannerGeometry,
 ) -> list[np.ndarray]:
     """average detection points (ADPs) of all detecting elements of all modules
 
@@ -151,8 +149,7 @@ def get_all_detector_centers(
     of its box shape, such that the ADP in scanner coordinates is given by the
     translation part of the combined module and detecting element transform.
     This is a vectorized version of petsird.helpers.geometry.get_ADP().
-
-    If a matplotlib 3D axis is given, the boxes of all detecting elements are drawn.
+    (see geometry_plots.py for a visualization of the detecting elements)
     """
 
     all_det_el_centers = []
@@ -170,17 +167,6 @@ def get_all_detector_centers(
             + mod_mats[:, None, :, 3]
         )
         all_det_el_centers.append(det_el_centers.astype("float32"))
-
-        if ax is not None:
-            for mod_transform in rep_module.transforms:
-                for transform in det_els.transforms:
-                    draw_BoxShape(
-                        ax,
-                        transform_BoxShape(
-                            mult_transforms([mod_transform, transform]),
-                            det_els.object.shape,
-                        ),
-                    )
 
     return all_det_el_centers
 
