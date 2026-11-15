@@ -1,4 +1,4 @@
-"""analytic simulation of petsird v0.7.2 listmode data for a block PET scanner
+"""analytic simulation of petsird v0.13.1 listmode data for a block PET scanner
 we only simulate true events and ignore the effect of attenuation
 however, we simulate the effect of crystal efficiencies and LOR symmetry group efficiencies
 """
@@ -6,11 +6,11 @@ however, we simulate the effect of crystal efficiencies and LOR symmetry group e
 # %%
 from importlib.metadata import version
 
-# raise an error if petsird version is not at least 0.7.2
+# raise an error if petsird version is not at least 0.13.1
 petsird_version = tuple(map(int, version("petsird").split(".")))
-if petsird_version < (0, 7, 2):
+if petsird_version < (0, 13, 1):
     raise ImportError(
-        f"petsird version {petsird_version} is not supported, please install petsird >= 0.7.2"
+        f"petsird version {petsird_version} is not supported, please install petsird >= 0.13.1"
     )
 
 
@@ -20,6 +20,18 @@ from array_api_compat import size
 from itertools import combinations
 
 import parallelproj
+from parallelproj.operators import (
+    CompositeLinearOperator,
+    ElementwiseMultiplicationOperator,
+    GaussianFilterOperator,
+)
+from parallelproj.pet_lors import EqualBlockPETLORDescriptor
+from parallelproj.pet_scanners import (
+    BlockPETScannerModule,
+    ModularizedPETScannerGeometry,
+)
+from parallelproj.projectors import EqualBlockPETProjector, ListmodePETProjector
+from parallelproj.tof import TOFParameters
 import matplotlib.pyplot as plt
 import math
 import json
@@ -27,6 +39,7 @@ import json
 from pathlib import Path
 
 import petsird
+from petsird.helpers.create import construct_lower_triangular_matrix
 
 
 # %%
@@ -70,7 +83,7 @@ def parse_float_tuple(arg):
 # %%
 # parse the command line for the input parameters below
 parser = argparse.ArgumentParser(
-    description="Analytic simulation of PETSIRD v0.7.2 listmode data for a block PET scanner",
+    description="Analytic simulation of PETSIRD v0.13.1 listmode data for a block PET scanner",
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
 
@@ -97,8 +110,8 @@ image_group = parser.add_argument_group("Image and Phantom Configuration")
 image_group.add_argument(
     "--phantom",
     type=str,
-    default="cylinder",
-    choices=["cylinder", "uniform_cylinder", "squares", "points"],
+    default="uniform_cylinder",
+    choices=["uniform_cylinder", "squares", "points"],
     help="phantom to simulate",
 )
 image_group.add_argument(
@@ -245,7 +258,7 @@ num_blocks = 12
 # %%
 # Setup of a modularized parallelproj PET scanner geometry
 
-modules: list[parallelproj.BlockPETScannerModule] = []
+modules: list[BlockPETScannerModule] = []
 
 # setup an affine transformation matrix to translate the block modules from the
 # center to the radius of the scanner
@@ -270,7 +283,7 @@ for i, phi in enumerate(np.linspace(0, 2 * np.pi, num_blocks, endpoint=False)):
     module_transforms.append(aff_mat_rot @ aff_mat_trans)
 
     modules.append(
-        parallelproj.BlockPETScannerModule(
+        BlockPETScannerModule(
             np,
             "cpu",
             block_shape,
@@ -281,7 +294,7 @@ for i, phi in enumerate(np.linspace(0, 2 * np.pi, num_blocks, endpoint=False)):
 
 # create the scanner geometry from a list of identical block modules at
 # different locations in space
-scanner = parallelproj.ModularizedPETScannerGeometry(tuple(modules))
+scanner = ModularizedPETScannerGeometry(tuple(modules))
 
 # %%
 # Setup of a parllelproj LOR descriptor that connectes LOR endpoints in modules
@@ -294,7 +307,7 @@ block_pairs = [
     (v1, v2) for v1, v2 in all_combinations if circular_distance(v1, v2, num_blocks) > 2
 ]
 
-lor_desc = parallelproj.EqualBlockPETLORDescriptor(
+lor_desc = EqualBlockPETLORDescriptor(
     scanner,
     np.asarray(block_pairs),
 )
@@ -340,8 +353,8 @@ num_tof_bins = int(np.sqrt(2) * img_shape[0] * voxel_size[0] / tof_bin_width)
 if num_tof_bins % 2 == 0:
     num_tof_bins += 1
 
-proj = parallelproj.EqualBlockPETProjector(lor_desc, img_shape, voxel_size)
-proj.tof_parameters = parallelproj.TOFParameters(
+proj = EqualBlockPETProjector(lor_desc, img_shape, voxel_size)
+proj.tof_parameters = TOFParameters(
     num_tofbins=num_tof_bins,
     tofbin_width=tof_bin_width,
     sigma_tof=sig_tof,
@@ -349,14 +362,15 @@ proj.tof_parameters = parallelproj.TOFParameters(
 )
 
 # check if the projector passes the adjointness test
-assert proj.adjointness_test(np, "cpu")
+# (the projectors require float32 arrays)
+assert proj.adjointness_test(np, "cpu", dtype=np.float32, rtol=1e-4)
 
 
 # %%
 # setup a simple image space resolution model
 
 sig = fwhm_mm / (2.35 * np.asarray(voxel_size))
-res_model = parallelproj.GaussianFilterOperator(img_shape, sigma=sig)
+res_model = GaussianFilterOperator(img_shape, sigma=sig)
 
 # %%
 # setup the sensitivity sinogram consisting of the crystal efficiencies factors
@@ -399,10 +413,11 @@ for i, bp in enumerate(proj.lor_descriptor.all_block_pairs):
 # where G is the image-based resolution model
 # P is the (TOF) forward projector
 # diag(s) is the elementwise multiplication with a non-TOF sensitivity histogram
-fwd_op = parallelproj.CompositeLinearOperator(
+# (the non-TOF sensitivities are broadcasted along the TOF axis - zero-copy view)
+fwd_op = CompositeLinearOperator(
     [
-        parallelproj.TOFNonTOFElementwiseMultiplicationOperator(
-            proj.out_shape, nontof_sens_histo
+        ElementwiseMultiplicationOperator(
+            np.broadcast_to(nontof_sens_histo[..., None], proj.out_shape)
         ),
         proj,
         res_model,
@@ -442,7 +457,8 @@ if num_epochs_mlem > 0:
         print(f"{(i+1):03}/{num_epochs_mlem:03}", end="\r")
 
         exp = np.clip(fwd_op(recon), 1e-6, None)
-        grad = fwd_op.adjoint((exp - emission_data) / exp)
+        # emission_data contains int64 Poisson counts -> cast back to float32
+        grad = fwd_op.adjoint(((exp - emission_data) / exp).astype(np.float32))
         step = recon / sens_img
         recon -= step * grad
 
@@ -569,33 +585,28 @@ if not skip_plots:
 # do a TOF histogram as well as TOF and nonTOF LM backprojection
 
 if check_backprojection and (num_true_counts > 0):
-    histo_back = proj.adjoint(emission_data)
+    histo_back = proj.adjoint(emission_data.astype(np.float32))
 
     np.save(output_dir / "histogram_backprojection_tof.npy", histo_back)
 
-    lm_back = parallelproj.joseph3d_back_tof_lm(
-        xstart=scanner.get_lor_endpoints(event_start_block, event_start_el),
-        xend=scanner.get_lor_endpoints(event_end_block, event_end_el),
-        img_shape=img_shape,
+    lm_proj = ListmodePETProjector(
+        scanner.get_lor_endpoints(event_start_block, event_start_el),
+        scanner.get_lor_endpoints(event_end_block, event_end_el),
+        img_shape,
+        proj.voxel_size,
         img_origin=proj.img_origin,
-        voxsize=proj.voxel_size,
-        img_fwd=np.ones(num_events, dtype=np.float32),
-        tofbin_width=proj.tof_parameters.tofbin_width,
-        sigma_tof=np.asarray([proj.tof_parameters.sigma_tof]),
-        tofcenter_offset=np.asarray([proj.tof_parameters.tofcenter_offset]),
-        nsigmas=proj.tof_parameters.num_sigmas,
-        tofbin=event_tof_bin,
     )
-    np.save(output_dir / "lm_backprojection_tof.npy", lm_back)
 
-    lm_back_non_tof = parallelproj.joseph3d_back(
-        xstart=scanner.get_lor_endpoints(event_start_block, event_start_el),
-        xend=scanner.get_lor_endpoints(event_end_block, event_end_el),
-        img_shape=img_shape,
-        img_origin=proj.img_origin,
-        voxsize=proj.voxel_size,
-        img_fwd=np.ones(num_events, dtype=np.float32),
-    )
+    # non-TOF LM backprojection
+    lm_back_non_tof = lm_proj.adjoint(np.ones(num_events, dtype=np.float32))
+
+    # TOF LM backprojection - parallelproj uses unsigned TOF bins (0 ... num_tofbins - 1)
+    lm_proj.tof_parameters = proj.tof_parameters
+    lm_proj.event_tofbins = unsigned_event_tof_bin.astype(np.int16)
+    lm_proj.tof = True
+    lm_back = lm_proj.adjoint(np.ones(num_events, dtype=np.float32))
+
+    np.save(output_dir / "lm_backprojection_tof.npy", lm_back)
     np.save(output_dir / "lm_backprojection_non_tof.npy", lm_back_non_tof)
 
 ################################################################################
@@ -613,25 +624,36 @@ if check_backprojection and (num_true_counts > 0):
 #   DetectorModule(ReplicatedBoxSolidVolume)
 #   ReplicatedBoxSolidVolume(list[RigidTransformation], BoxSolidVolume)
 
-crystal_centers = parallelproj.BlockPETScannerModule(
+crystal_centers = BlockPETScannerModule(
     np, "cpu", block_shape, block_spacing
 ).lor_endpoints
 
-# crystal widths in all dimensions
-cw0 = block_spacing[0]
-cw1 = block_spacing[1]
-cw2 = block_spacing[2]
+# PETSIRD (>= 0.13) requires that the box of a detecting element is oriented along
+# its local x-axis ("box axis", pointing away from the scanner center), that (0,0,0)
+# is the average detection point (ADP), and a fixed corner order (see petsird.BoxShape).
+# In the module frame of our block modules, the radial (depth) direction is the
+# y-axis (index 1 of block_shape). We therefore define the crystal box with its depth
+# along the local x-axis and rotate it into the module frame via the detecting element
+# transforms. We place the ADP at the crystal center (= LOR endpoints used in the
+# parallelproj simulation).
+
+# crystal size along the local box axes (depth, width, axial)
+crystal_size = (block_spacing[1], block_spacing[0], block_spacing[2])
+L0, L1, L2 = crystal_size
 
 crystal_shape = petsird.BoxShape(
     corners=[
-        petsird.Coordinate(c=np.array((-cw0 / 2, -cw1 / 2, -cw2 / 2), dtype="float32")),
-        petsird.Coordinate(c=np.array((-cw0 / 2, -cw1 / 2, cw2 / 2), dtype="float32")),
-        petsird.Coordinate(c=np.array((-cw0 / 2, cw1 / 2, cw2 / 2), dtype="float32")),
-        petsird.Coordinate(c=np.array((-cw0 / 2, cw1 / 2, -cw2 / 2), dtype="float32")),
-        petsird.Coordinate(c=np.array((cw0 / 2, -cw1 / 2, -cw2 / 2), dtype="float32")),
-        petsird.Coordinate(c=np.array((cw0 / 2, -cw1 / 2, cw2 / 2), dtype="float32")),
-        petsird.Coordinate(c=np.array((cw0 / 2, cw1 / 2, cw2 / 2), dtype="float32")),
-        petsird.Coordinate(c=np.array((cw0 / 2, cw1 / 2, -cw2 / 2), dtype="float32")),
+        petsird.Coordinate(c=np.array(c, dtype="float32") - 0.5 * np.array(crystal_size, dtype="float32"))
+        for c in (
+            (0, 0, 0),
+            (0, 0, L2),
+            (0, L1, L2),
+            (0, L1, 0),
+            (L0, 0, 0),
+            (L0, 0, L2),
+            (L0, L1, L2),
+            (L0, L1, 0),
+        )
     ]
 )
 crystal = petsird.BoxSolidVolume(shape=crystal_shape, material_id=1)
@@ -640,13 +662,21 @@ crystal = petsird.BoxSolidVolume(shape=crystal_shape, material_id=1)
 
 rep_volume = petsird.ReplicatedBoxSolidVolume(object=crystal)
 
-for i_c, crystal_center in enumerate(crystal_centers):
-    translation_matrix = np.eye(4, dtype="float32")[:-1, :]
-    for j in range(3):
-        translation_matrix[j, -1] = crystal_center[j]
-    transform = petsird.RigidTransformation(matrix=translation_matrix)
+# rotation that maps the local box axis (x) onto the radial direction of the module (y)
+crystal_rotation = np.array(
+    [
+        [0, -1, 0],
+        [1, 0, 0],
+        [0, 0, 1],
+    ],
+    dtype="float32",
+)
 
-    rep_volume.transforms.append(transform)
+for i_c, crystal_center in enumerate(crystal_centers):
+    crystal_matrix = np.zeros((3, 4), dtype="float32")
+    crystal_matrix[:, :3] = crystal_rotation
+    crystal_matrix[:, 3] = crystal_center
+    rep_volume.transforms.append(petsird.RigidTransformation(matrix=crystal_matrix))
 
 detector_module = petsird.DetectorModule(detecting_elements=rep_volume)
 
@@ -670,27 +700,28 @@ scanner_geometry = petsird.ScannerGeometry(replicated_modules=[rep_module])
 # setup of detection efficiencies
 
 # The top down hierarchy of the detection efficiencies is as follows:
-# petsird.DetectionEfficiencies(detection_bin_efficiencies = list[numpy.ndarray], -> one 2D table per module type
-#                               module_pair_sgidlut = list[list[numpy.ndarray]] -> one 2D table per module type combination
-#                               module_pair_efficiencies_vectors = list[list[list[ModulePairEfficiencies]]]) -> list of modulepair efficiency vectors per module type combination
+# petsird.DetectionEfficiencies(
+#    detection_bin_efficiencies = list[list[float]] -> one list (over all detection bins) per module type
+#    module_pair_sgidlut = list[list[list[list[int]]]] -> one (lower-triangular) table per module type pair
+#    module_pair_efficiencies_vectors = list[list[list[ModulePairEfficiencies]]]) -> one vector per module type pair
+# all "module type pair" tables are lower-triangular, i.e. [type1][type2] with type2 <= type1
 
 # the following only works for a scanner with one module type
-# if there are more module types, we need a list of DetectionEfficiencies
-# and list of list of module_pair_sgidlut and list of list of list of ModulePairEfficiencies
-assert scanner_geometry.number_of_replicated_modules() == 1
+assert scanner_geometry.number_of_module_types() == 1
 
-# setup the symmetry group ID LUT
-# we only create one symmetry group ID (1) and set the group ID to -1 for block
-# block pairs that are not in coincidence
+# setup the (lower-triangular) symmetry group ID LUT
+# module pairs that are not in coincidence get SGID -1
 
-module_pair_sgid_lut = np.full((num_blocks, num_blocks), -1, dtype="int32")
+module_pair_sgid_lut = construct_lower_triangular_matrix(num_blocks, dtype=int, value=-1)
 
 for bp in proj.lor_descriptor.all_block_pairs:
-    # generate a random sgd
-    sgid = sgid_from_module_pair(bp[0], bp[1], num_blocks)
-    module_pair_sgid_lut[bp[0], bp[1]] = sgid
+    # (PETSIRD tables are plain python lists -> use python ints, not numpy ints)
+    i_mod_1, i_mod_2 = int(bp[0]), int(bp[1])
+    sgid = sgid_from_module_pair(i_mod_1, i_mod_2, num_blocks)
+    # lower triangular: first index >= second index
+    module_pair_sgid_lut[max(i_mod_1, i_mod_2)][min(i_mod_1, i_mod_2)] = sgid
 
-num_SGIDs = module_pair_sgid_lut.max() + 1
+num_SGIDs = max(max(row) for row in module_pair_sgid_lut) + 1
 
 num_el_per_module = proj.lor_descriptor.scanner.num_lor_endpoints_per_module[0]
 
@@ -706,12 +737,17 @@ for sgid in range(num_SGIDs):
     vals = np.full(module_pair_efficiencies_shape, eff, dtype="float32")
 
     module_pair_efficiencies_vector.append(
-        petsird.ModulePairEfficiencies(values=vals, sgid=sgid)
+        petsird.ModulePairEfficiencies(values=vals.tolist(), sgid=sgid)
     )
 
-# only correct for scanner with one module type
+# detection bin efficiencies: the detection bin index runs over
+# (module, element, energy bin) with energy as the fastest index
+detection_bin_efficiencies = np.repeat(det_el_efficiencies.ravel(), num_energy_bins)
+
 det_effs = petsird.DetectionEfficiencies(
-    detection_bin_efficiencies=[det_el_efficiencies.ravel()],
+    method_description="simulated random crystal and symmetry group efficiencies (petsird-analytic-simulator)",
+    calibration_factor=1.0,
+    detection_bin_efficiencies=[detection_bin_efficiencies.tolist()],
     module_pair_sgidlut=[[module_pair_sgid_lut]],
     module_pair_efficiencies_vectors=[[module_pair_efficiencies_vector]],
 )
@@ -744,18 +780,18 @@ energyBinEdges = petsird.BinEdges(
 petsird_scanner = petsird.ScannerInformation(
     model_name="PETSIRD_TEST",
     scanner_geometry=scanner_geometry,
-    tof_bin_edges=[[tofBinEdges]],  # list of list for all module type combinations
+    tof_bin_edges=[[tofBinEdges]],  # lower-triangular list of list for all module type pairs
     tof_resolution=[
         [2.35 * proj.tof_parameters.sigma_tof]
-    ],  # FWHM in mm, list of list for all module type combinations
+    ],  # FWHM in mm, lower-triangular list of list for all module type pairs
     event_energy_bin_edges=[energyBinEdges],  # list for all module types
     energy_resolution_at_511=[0.11],  # as fraction of 511, list for all module types
     detection_efficiencies=det_effs,
 )
 
-petsird_scanner.coincidence_policy = petsird.CoincidencePolicy.REJECT_MULTIPLES
-petsird_scanner.delayed_coincidences_are_stored = False
-petsird_scanner.triple_events_are_stored = False
+# we only store prompt (true) coincidences
+# all other event types (singles, delayeds, triples, quadruples) keep the default policy NONE
+petsird_scanner.prompt_event_policy = petsird.CoincidencePolicy.REJECT_HIGHER_MULTIPLES
 
 ################################################################################
 ################################################################################
@@ -764,14 +800,13 @@ petsird_scanner.triple_events_are_stored = False
 # %%
 # create the petsird header
 
-subject = petsird.Subject(id="42")
-institution = petsird.Institution(
-    name="Ministry of Silly Walks",
-    address="42 Silly Walks Street, Silly Walks City",
+exam = petsird.ExamInformation(
+    modality="PT",
+    patient=petsird.DICOMPatientInformation(patient_id="42"),
 )
 
 header = petsird.Header(
-    exam=petsird.ExamInformation(subject=subject, institution=institution),
+    exam=exam,
     scanner=petsird_scanner,
 )
 
@@ -784,20 +819,32 @@ header = petsird.Header(
 # create petsird coincidence events - all in one timeblock without energy information
 
 num_el_per_block = proj.lor_descriptor.num_lorendpoints_per_block
+num_tof_bins_petsird = proj.tof_parameters.num_tofbins
+
+# PETSIRD detection bins: energy_idx + (element_idx + module_idx * num_el) * num_energy_bins
+# (all events are in energy bin 0)
+event_start_det_bin = (event_start_block * num_el_per_block + event_start_el) * num_energy_bins
+event_end_det_bin = (event_end_block * num_el_per_block + event_end_el) * num_energy_bins
+
+# PETSIRD requires ordered coincidences: detection_bins[0] >= detection_bins[1]
+# (for events within the same module type). For events where we have to swap the
+# detection bins, we also have to mirror the TOF bin, since PETSIRD stores
+# (t1 - t2) * c / 2 where t1/t2 are the arrival times at the first/second detection bin.
+swap = event_start_det_bin < event_end_det_bin
+
+det_bin_0 = np.where(swap, event_end_det_bin, event_start_det_bin)
+det_bin_1 = np.where(swap, event_start_det_bin, event_end_det_bin)
+petsird_tof_idx = np.where(
+    swap, num_tof_bins_petsird - 1 - unsigned_event_tof_bin, unsigned_event_tof_bin
+)
 
 # split the data into chuncks such that we loop over chunks (time blocks)
 # every chunk is an array of shape (num_events_per_chunk, 3)
-# the first column is the start detector ID, the second column is the end detector ID,
+# the first column is the first detection bin, the second column is the second detection bin,
 # and the third column is the unsigned TOF bin index
 
 chunked_data = np.array_split(
-    np.array(
-        [
-            event_start_block * num_el_per_block + event_start_el,
-            event_end_block * num_el_per_block + event_end_el,
-            unsigned_event_tof_bin,
-        ]
-    ).T,
+    np.array([det_bin_0, det_bin_1, petsird_tof_idx]).T,
     num_time_blocks,
 )
 
@@ -812,15 +859,15 @@ if not skip_writing:
 
             print(f"Writing time block {i_t + 1}/{len(chunked_data)}")
             print(
-                "First 5 events (start / stop detection element, unsigned tofbin number):"
+                "First 5 events (first / second detection bin, unsigned tofbin number):"
             )
             print(data_chunk[:5, :])
             print()
 
             time_block_prompt_events = [
                 petsird.CoincidenceEvent(
-                    detection_bins=[x[0], x[1]],
-                    tof_idx=x[2],
+                    detection_bins=[int(x[0]), int(x[1])],
+                    tof_idx=int(x[2]),
                 )
                 for x in data_chunk
             ]
