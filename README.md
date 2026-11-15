@@ -133,11 +133,14 @@ python 02_reconstruct_petsird.py my_petsird_file.bin
 To create a simple 2-class attenuation image, use
 
 ```
-python 03_create_two_class_att_img.py tof_back_proj_file.npy
+python 03_create_two_class_att_img.py my_petsird_file.bin
 ```
 
-which uses the TOF backprojection created by the TOF NAC recon script above.
+which uses the TOF backprojection (`my_petsird_file_tof_backproj_<hash>.npy`)
+created by the TOF NAC recon script above. If several reconstructions with different
+settings were run, pass the TOF backprojection `.npy` file of the TOF NAC recon instead.
 If no `--threshold` is given, Otsu's method is used for the segmentation.
+The attenuation image is saved as `my_petsird_file_att_img_<hash>.npy`.
 
 
 ### NON-TOF AC recon
