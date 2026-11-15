@@ -2,7 +2,8 @@
 
 We simulate true (unscattered) TOF coincidences including the effect of attenuation
 (of a water body), detecting element (crystal) efficiencies and module pair
-(symmetry group) efficiencies. Next to the PETSIRD listmode file, reference outputs
+(symmetry group) efficiencies, as well as random coincidences (stored in the prompts)
+and an independent realization of the randoms (stored as delayed coincidences). Next to the PETSIRD listmode file, reference outputs
 (ground truth, attenuation and sensitivity images, ...) are saved for testing
 readers / reconstructions of PETSIRD data.
 
@@ -35,6 +36,7 @@ from simulation import (
     create_petsird_header,
     create_tof_projector,
     histogram_to_listmode,
+    randoms_expectation,
     tof_parameters,
     to_petsird_coincidences,
     write_petsird_file,
@@ -50,6 +52,13 @@ def parse_int_tuple(arg):
 
 def parse_float_tuple(arg):
     return tuple(map(float, arg.split(",")))
+
+
+def random_fraction(arg):
+    value = float(arg)
+    if not 0 <= value < 1:
+        raise argparse.ArgumentTypeError("has to be in [0, 1)")
+    return value
 
 
 def positive_int(arg):
@@ -108,6 +117,14 @@ physics_group.add_argument(
     type=positive_int,
     default=int(4e6),
     help="(expected) number of true coincidences to simulate",
+)
+physics_group.add_argument(
+    "--random_fraction",
+    type=random_fraction,
+    default=0.1,
+    help="(expected) random fraction R / (T + R) of the prompts, where R / T are the "
+    "total randoms / (attenuated) trues; the randoms are also stored as independent "
+    "realization in the delayed coincidences (0 means no randoms and no delayeds)",
 )
 
 efficiency_group = parser.add_argument_group("Detection Efficiency Parameters")
@@ -208,20 +225,58 @@ expected_counts = fwd_op(img)
 scale_fac = args.num_true_counts / expected_counts.sum()
 img *= scale_fac
 expected_counts *= scale_fac
-emission_data = np.random.poisson(expected_counts)
+
+# noise-free randoms (constant for all LORs and TOF bins, 0 for LORs with a dead
+# crystal) with an expected random fraction R / (T + R)
+num_randoms = args.random_fraction / (1 - args.random_fraction) * args.num_true_counts
+randoms, randoms_per_bin = randoms_expectation(
+    lor_efficiencies(efficiency_model, lor_desc), tof_params.num_tofbins, num_randoms
+)
+
+# prompts: Poisson realization of trues + randoms
+emission_data = np.random.poisson(expected_counts + randoms)
+
+# true expectation of the randoms (e.g. to test randoms corrections)
+with open(output_dir / "randoms_expectation.json", "w", encoding="UTF-8") as f:
+    json.dump(
+        {
+            "random_fraction": args.random_fraction,
+            "expected_trues": float(args.num_true_counts),
+            "expected_randoms": float(num_randoms),
+            "expected_randoms_per_lor_and_tof_bin": randoms_per_bin,
+            "num_tofbins": tof_params.num_tofbins,
+            "description": "the randoms are constant for all LORs (pairs of detection bins "
+            "of modules in coincidence) of detecting elements with non-zero efficiency and "
+            "all TOF bins, and 0 for LORs of detecting elements with zero efficiency",
+        },
+        f,
+        indent=4,
+    )
 
 # ground truth activity image (before the image-based resolution model, which is part
 # of the forward model), scaled such that the forward model yields the expected counts
 np.save(output_dir / "ground_truth_image.npy", img)
 
 if args.num_epochs_mlem > 0:
-    recon = histogram_mlem(fwd_op, emission_data, sens_img, args.num_epochs_mlem)
+    recon = histogram_mlem(
+        fwd_op,
+        emission_data,
+        sens_img,
+        args.num_epochs_mlem,
+        contamination=randoms if args.random_fraction > 0 else None,
+    )
     np.save(output_dir / f"reference_histogram_mlem_{args.num_epochs_mlem}_epochs.npy", recon)
 
 # %%
 # listmode events
 
 events = histogram_to_listmode(emission_data, lor_desc, tof_params.num_tofbins)
+
+# delayeds: independent Poisson realization of the randoms
+if args.random_fraction > 0:
+    delayed_events = histogram_to_listmode(
+        np.random.poisson(randoms), lor_desc, tof_params.num_tofbins
+    )
 
 if args.save_lm_backprojection:
     # TOF LM backprojection of the events before writing them to PETSIRD
@@ -246,10 +301,25 @@ if args.save_lm_backprojection:
 # PETSIRD header and coincidences
 
 header = create_petsird_header(
-    scanner_config, efficiency_model, tof_params, args.tof_fwhm_mm, num_energy_bins
+    scanner_config,
+    efficiency_model,
+    tof_params,
+    args.tof_fwhm_mm,
+    num_energy_bins,
+    store_delayeds=args.random_fraction > 0,
 )
 det_bin_0, det_bin_1, tof_idx = to_petsird_coincidences(
     events, scanner_config.num_det_els_per_module, num_energy_bins, tof_params.num_tofbins
+)
+petsird_delayeds = (
+    to_petsird_coincidences(
+        delayed_events,
+        scanner_config.num_det_els_per_module,
+        num_energy_bins,
+        tof_params.num_tofbins,
+    )
+    if args.random_fraction > 0
+    else None
 )
 
 if not args.skip_plots:
@@ -283,6 +353,7 @@ if not args.skip_writing:
         tof_idx,
         args.num_time_blocks,
         args.event_block_duration,
+        delayeds=petsird_delayeds,
     )
 
     # human-readable summary of the written file (output of petsird.helpers.analysis)

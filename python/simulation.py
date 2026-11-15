@@ -88,6 +88,33 @@ def create_forward_model(
     )
 
 
+def randoms_expectation(
+    lor_effs: np.ndarray, num_tofbins: int, num_randoms: float
+) -> tuple[np.ndarray, float]:
+    """noise-free randoms TOF histogram with an (expected) total of num_randoms
+
+    The randoms are constant for all LORs and TOF bins, except for LORs with a detecting
+    element with zero efficiency ("dead" crystal, which can not detect any single) where
+    they are 0.
+
+    Parameters
+    ----------
+    lor_effs : efficiencies of all LORs, shape (num_block_pairs, num_lors_per_block_pair)
+    num_tofbins : number of TOF bins
+    num_randoms : expected total number of randoms
+
+    Returns
+    -------
+    randoms : array of shape (num_block_pairs, num_lors_per_block_pair, num_tofbins)
+    randoms_per_bin : expected randoms per LOR (with non-zero efficiency) and TOF bin
+    """
+    valid = lor_effs > 0
+    randoms_per_bin = float(num_randoms) / (np.count_nonzero(valid) * num_tofbins)
+    randoms = np.zeros(lor_effs.shape + (num_tofbins,), dtype=np.float32)
+    randoms[valid] = randoms_per_bin
+    return randoms, randoms_per_bin
+
+
 @dataclass
 class ListmodeEvents:
     """listmode events in the parallelproj convention (start module < end module)"""
@@ -179,6 +206,7 @@ def create_petsird_header(
     tof_params: TOFParameters,
     tof_fwhm_mm: float,
     num_energy_bins: int = 1,
+    store_delayeds: bool = False,
 ) -> petsird.Header:
     """PETSIRD header of the simulated scanner (one module type)"""
     tof_bin_edges = petsird.BinEdges(
@@ -207,11 +235,13 @@ def create_petsird_header(
             efficiency_model, config, num_energy_bins
         ),
     )
-    # we only store prompt coincidences, all other event types (singles, delayeds,
-    # triples, quadruples) keep the default policy NONE.
+    # we store prompt and (optionally) delayed coincidences, all other event types
+    # (singles, triples, quadruples) keep the default policy NONE.
     # All pairs of singles within the coincidence window are coincidences
     # (multiples are stored as all pairs; the simulation itself creates no multiples)
     scanner.prompt_event_policy = petsird.CoincidencePolicy.MULTIPLES_AS_ALL_COINCIDENCES
+    if store_delayeds:
+        scanner.delayed_event_policy = petsird.CoincidencePolicy.MULTIPLES_AS_ALL_COINCIDENCES
 
     exam = petsird.ExamInformation(
         modality="PT", patient=petsird.DICOMPatientInformation(patient_id="42")
@@ -227,23 +257,36 @@ def write_petsird_file(
     tof_idx: np.ndarray,
     num_time_blocks: int,
     time_block_duration_ms: int,
+    delayeds: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
 ) -> None:
-    """write the coincidences (split evenly into time blocks) into a PETSIRD file"""
+    """write the coincidences (split evenly into time blocks) into a PETSIRD file
+
+    det_bin_0, det_bin_1, tof_idx: prompt coincidences (see to_petsird_coincidences)
+    delayeds: (det_bin_0, det_bin_1, tof_idx) of the delayed coincidences (optional,
+    the header must have a delayed_event_policy != NONE)
+    """
+
+    def to_events(chunk):
+        return [
+            petsird.CoincidenceEvent(detection_bins=[int(x[0]), int(x[1])], tof_idx=int(x[2]))
+            for x in chunk
+        ]
+
     chunks = np.array_split(np.array([det_bin_0, det_bin_1, tof_idx]).T, num_time_blocks)
+    if delayeds is not None:
+        delayed_chunks = np.array_split(np.array(delayeds).T, num_time_blocks)
 
     with petsird.BinaryPETSIRDWriter(str(fname)) as writer:
         writer.write_header(header)
         for i_t, chunk in enumerate(chunks):
             print(f"Writing time block {i_t + 1}/{len(chunks)}")
-            prompts = [
-                petsird.CoincidenceEvent(detection_bins=[int(x[0]), int(x[1])], tof_idx=int(x[2]))
-                for x in chunk
-            ]
+            delayed_events = [[to_events(delayed_chunks[i_t])]] if delayeds is not None else []
             writer.write_time_blocks(
                 (
                     petsird.TimeBlock.EventTimeBlock(
                         petsird.EventTimeBlock(
-                            prompt_events=[[prompts]],
+                            prompt_events=[[to_events(chunk)]],
+                            delayed_events=delayed_events,
                             time_interval=petsird.TimeInterval(
                                 start=i_t * time_block_duration_ms,
                                 stop=(i_t + 1) * time_block_duration_ms,
