@@ -41,6 +41,7 @@ from pathlib import Path
 import petsird
 from petsird.helpers.create import construct_lower_triangular_matrix
 
+from geometry_plots import plot_petsird_geometry
 from utils import FWHM_PER_SIGMA
 
 
@@ -626,53 +627,50 @@ if num_true_counts > 0:
     )
 
 # %%
-# Visualize the projector geometry and and the first 3 coincidences
-# Visualize the TOF profile of one LOR of the noise free data and the sensitivity image
+# Visualize the sensitivity image and the TOF profile of the LOR with the most counts
+# (the PETSIRD scanner geometry and the written events are visualized further below)
+
+# image coordinates: the image is centered at (0,0,0)
+img_origin_mm = -(np.asarray(img_shape) - 1) / 2 * np.asarray(voxel_size)
 
 if not skip_plots:
-    fig_geom = plt.figure(figsize=(4, 4), tight_layout=True)
-    ax_geom = fig_geom.add_subplot(111, projection="3d")
-    ax_geom.set_xlabel("x0")
-    ax_geom.set_ylabel("x1")
-    ax_geom.set_zlabel("x2")
-    proj.show_geometry(ax_geom)
-
-    if num_true_counts > 0:
-        for i in range(3):
-            event_start_coord = scanner.get_lor_endpoints(
-                event_start_block[i : (i + 1)], event_start_el[i : (i + 1)]
-            )[0]
-            event_end_coord = scanner.get_lor_endpoints(
-                event_end_block[i : (i + 1)], event_end_el[i : (i + 1)]
-            )[0]
-
-            ax_geom.plot(
-                [event_start_coord[0], event_end_coord[0]],
-                [event_start_coord[1], event_end_coord[1]],
-                [event_start_coord[2], event_end_coord[2]],
-            )
-
-    fig_geom.savefig(output_dir / "scanner_geometry.png", dpi=300)
-    fig_geom.show()
-
-    fig2, ax2 = plt.subplots(1, 4, figsize=(12, 3), tight_layout=True)
+    fig2, ax2 = plt.subplots(1, 4, figsize=(14, 3.5), layout="constrained")
     vmin = float(np.min(sens_img))
     vmax = float(np.max(sens_img))
+    extent = [
+        img_origin_mm[0] - 0.5 * voxel_size[0],
+        img_origin_mm[0] + (img_shape[0] - 0.5) * voxel_size[0],
+        img_origin_mm[1] - 0.5 * voxel_size[1],
+        img_origin_mm[1] + (img_shape[1] - 0.5) * voxel_size[1],
+    ]
     for i, sl in enumerate(
         [img_shape[2] // 4, img_shape[2] // 2, 3 * img_shape[2] // 4]
     ):
-        ax2[i].imshow(
-            parallelproj.to_numpy_array(sens_img[:, :, sl]),
+        im = ax2[i].imshow(
+            parallelproj.to_numpy_array(sens_img[:, :, sl]).T,
+            origin="lower",
+            extent=extent,
             vmin=vmin,
             vmax=vmax,
             cmap="Greys",
         )
-        ax2[i].set_title(f"sens. img. sl {sl}", fontsize="small")
+        z_sl = img_origin_mm[2] + sl * voxel_size[2]
+        ax2[i].set_title(f"sensitivity image, z = {z_sl:.1f} mm", fontsize="small")
+        ax2[i].set_xlabel("x (mm)")
+        ax2[i].set_ylabel("y (mm)")
+    fig2.colorbar(im, ax=ax2[:3], shrink=0.8)
 
-    ax2[-1].plot(parallelproj.to_numpy_array(img_fwd_tof[17, 0, :]), ".-")
-    ax2[-1].set_xlabel("TOF bin")
+    # LOR with the most expected counts (noise-free data)
+    i_bp, i_lor = np.unravel_index(
+        np.argmax(img_fwd_tof.sum(-1)), img_fwd_tof.shape[:-1]
+    )
+    ax2[-1].plot(parallelproj.to_numpy_array(img_fwd_tof[i_bp, i_lor, :]), ".-")
+    ax2[-1].set_xlabel("TOF bin (parallelproj convention)")
+    ax2[-1].set_ylabel("expected counts")
     ax2[-1].set_title(
-        f"TOF profile of LOR 0 in block pair {block_pairs[17]}", fontsize="small"
+        f"TOF profile of the LOR with the most counts\n"
+        f"(block pair {tuple(int(b) for b in block_pairs[i_bp])}, LOR {i_lor})",
+        fontsize="small",
     )
 
     fig2.savefig(output_dir / "tof_profile_and_sensitivity_image.png", dpi=300)
@@ -942,6 +940,30 @@ chunked_data = np.array_split(
     np.array([det_bin_0, det_bin_1, petsird_tof_idx]).T,
     num_time_blocks,
 )
+
+# %%
+# visualize the PETSIRD scanner geometry and the first written events
+
+if not skip_plots and num_true_counts > 0:
+    num_events_to_show = 8
+    fig_geom = plot_petsird_geometry(
+        petsird_scanner,
+        events=np.stack(
+            [
+                np.zeros(num_events_to_show, dtype=np.int64),
+                np.zeros(num_events_to_show, dtype=np.int64),
+                det_bin_0[:num_events_to_show],
+                det_bin_1[:num_events_to_show],
+                petsird_tof_idx[:num_events_to_show],
+            ],
+            axis=1,
+        ),
+        background=(img, voxel_size, img_origin_mm),
+        background_label="ground truth activity",
+        title=f"PETSIRD scanner geometry and the first {num_events_to_show} events written to {fname}",
+    )
+    fig_geom.savefig(output_dir / "petsird_geometry_and_events.png", dpi=150)
+    fig_geom.show()
 
 # %%
 # write petsird data

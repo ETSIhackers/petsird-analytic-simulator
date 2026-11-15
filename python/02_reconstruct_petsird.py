@@ -32,6 +32,7 @@ from utils import (
     read_listmode_prompt_events,
     backproject_efficiencies,
 )
+from geometry_plots import plot_petsird_geometry, read_first_events
 from viewer import show_vol_cuts
 
 
@@ -149,12 +150,8 @@ print(f"Scanner with {num_replicated_modules} types of replicated modules.")
 
 # %%
 ################################################################################
-### READ DETECTOR CENTERS AND VISUALIZE ########################################
+### READ DETECTOR CENTERS ####################################################
 ################################################################################
-
-# Create a new figure
-fig = plt.figure()
-ax = fig.add_subplot(111, projection="3d")
 
 # all cached / derived files are tagged with a fingerprint of the listmode file
 # such that they are not reused for a different file with the same name
@@ -168,32 +165,13 @@ all_detector_centers_file = Path(fname).with_name(
 
 if not all_detector_centers_file.exists():
     print("Calculating all detector centers ...")
-    all_detector_centers = get_all_detector_centers(scanner_geom, ax=ax)
+    all_detector_centers = get_all_detector_centers(scanner_geom)
     np.savez_compressed(all_detector_centers_file, *all_detector_centers)
     print(f"Detector centers saved to {all_detector_centers_file}")
 else:
     print(f"Loading all detector centers from {all_detector_centers_file}")
     with np.load(all_detector_centers_file) as data:
         all_detector_centers = [data[name] for name in data.files]
-
-if not ax is None:
-    min_coords = all_detector_centers[0].reshape(-1, 3).min(0)
-    max_coords = all_detector_centers[0].reshape(-1, 3).max(0)
-
-    ax.set_xlim3d([min_coords.min(), max_coords.max()])
-    ax.set_ylim3d([min_coords.min(), max_coords.max()])
-    ax.set_zlim3d([min_coords.min(), max_coords.max()])
-
-    for detector_centers in all_detector_centers:
-        ax.scatter(
-            detector_centers[:, :, 0].ravel(),
-            detector_centers[:, :, 1].ravel(),
-            detector_centers[:, :, 2].ravel(),
-            s=0.5,
-            c="k",
-            alpha=0.3,
-        )
-    fig.show()
 
 # %%
 ################################################################################
@@ -359,19 +337,6 @@ else:
 
 # %%
 ################################################################################
-### VISUALIZE GEOMETRY AND FIRST 5 EVENTS ######################################
-################################################################################
-if not ax is None:
-    for i in range(5):
-        ax.plot(
-            [coords0[i, 0], coords1[i, 0]],
-            [coords0[i, 1], coords1[i, 1]],
-            [coords0[i, 2], coords1[i, 2]],
-        )
-    fig.show()
-
-# %%
-################################################################################
 ### PARALLELRPOJ BACKPROJECTIONS ###############################################
 ################################################################################
 
@@ -516,6 +481,27 @@ opath = Path(fname).with_name(f"lm_osem_{num_epochs}_{num_subsets}_{params_hash}
 xp.save(opath, recon)
 print(f"LM OSEM recon saved to {opath}")
 
+
+# %%
+# SHOW THE PETSIRD GEOMETRY AND THE FIRST EVENTS (ON TOP OF THE RECON)
+
+num_events_to_show = 8
+geometry_reader = petsird.BinaryPETSIRDReader(fname)
+geometry_reader.read_header()
+fig_geom = plot_petsird_geometry(
+    scanner_info,
+    events=read_first_events(geometry_reader, num_events_to_show),
+    background=(
+        parallelproj.to_numpy_array(recon),
+        voxel_size,
+        parallelproj.to_numpy_array(img_origin),
+    ),
+    background_label="LM OSEM recon",
+    title=f"PETSIRD scanner geometry and the first {num_events_to_show} events of {Path(fname).name}",
+)
+geometry_fig_path = Path(fname).with_name(f"{lm_stem}_geometry_and_events_{params_hash}.png")
+fig_geom.savefig(geometry_fig_path, dpi=150)
+print(f"Geometry figure saved to {geometry_fig_path}")
 
 # %%
 # SHOW RECON

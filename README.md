@@ -37,13 +37,19 @@ tree --charset=ascii data/sim_uniform_cylinder_4000000_0
 data/sim_uniform_cylinder_4000000_0
 |-- attenuation_image.npy
 |-- ground_truth_image.npy
+|-- petsird_geometry_and_events.png
 |-- reference_sensitivity_image.npy
 |-- reference_sensitivity_image_no_attenuation.npy
-|-- scanner_geometry.png
 |-- sim_parameters.json
 |-- simulated_petsird_lm_file.bin
 `-- tof_profile_and_sensitivity_image.png
 ```
+
+`petsird_geometry_and_events.png` visualizes (transaxial, sagittal and 3D views) the PETSIRD scanner geometry as written
+to the file (detecting element boxes with front faces and box axes, average detection
+points, module and detecting element indices) and the first events (detection bins and
+the emission position decoded from the TOF bin following the PETSIRD definition) on top
+of the ground truth activity (see `python/geometry_plots.py`).
 
 The following phantoms are available (`--phantom`):
 
@@ -160,6 +166,10 @@ and warns about information that is ignored:
 - delayed events (no randoms correction) and dead time time blocks (no dead time correction)
 - single, triple and quadruple events, singles histograms, external signals and
   non-detecting volumes
+
+After the reconstruction, the same visualization of the PETSIRD geometry and the first
+events is shown on top of the reconstructed image (and saved as
+`my_petsird_file_geometry_and_events_<fingerprint>_<hash>.png`).
 
 All files written by the reconstruction script (cached detector positions, events
 and sensitivity images, backprojections and reconstructions) are tagged with a
