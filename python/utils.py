@@ -57,6 +57,84 @@ def lm_file_fingerprint(fname: str | Path, chunk_size: int = 4 * 1024**2) -> str
     return hash_obj.hexdigest()[:8]
 
 
+class UnsupportedPETSIRDFeatureError(NotImplementedError):
+    """a PETSIRD feature that is used in a file is not supported by the reconstruction"""
+
+
+def _is_identity_transform(transform: petsird.RigidTransformation | None) -> bool:
+    return transform is None or np.allclose(
+        transform.matrix, np.eye(4)[:3], atol=1e-6
+    )
+
+
+def check_header_support(header: petsird.Header) -> None:
+    """check whether the PETSIRD header uses features not supported by the reconstruction
+
+    Raises UnsupportedPETSIRDFeatureError for features that would lead to wrong
+    reconstructions and warns about information that is ignored.
+    Features of the time blocks are checked in read_listmode_prompt_events().
+    """
+    scanner: petsird.ScannerInformation = header.scanner
+    num_module_types = scanner.scanner_geometry.number_of_module_types()
+
+    if header.contains_weighted_event_time_blocks:
+        raise UnsupportedPETSIRDFeatureError(
+            "Weighted event time blocks are not supported."
+        )
+
+    if scanner.prompt_event_policy == petsird.CoincidencePolicy.NONE:
+        raise UnsupportedPETSIRDFeatureError(
+            "The file does not contain prompt events (prompt_event_policy is NONE)."
+        )
+
+    # the reconstruction uses the same TOF parameters for all module type pairs
+    tof_params = [
+        get_tof_parameters(scanner, m1, m2)
+        for m1 in range(num_module_types)
+        for m2 in range(m1 + 1)
+    ]
+    if any(
+        (p.num_tofbins, p.tofbin_width, p.sigma_tof)
+        != (tof_params[0].num_tofbins, tof_params[0].tofbin_width, tof_params[0].sigma_tof)
+        for p in tof_params
+    ):
+        raise UnsupportedPETSIRDFeatureError(
+            "Different TOF bin edges / TOF resolutions for different module type pairs "
+            "are not supported."
+        )
+
+    if not _is_identity_transform(scanner.gantry_alignment):
+        warnings.warn(
+            "The gantry alignment of the scanner is ignored: the reconstructed image "
+            "(and an attenuation image) are in the PET gantry coordinate system.",
+            UserWarning,
+        )
+
+    if scanner.delayed_event_policy != petsird.CoincidencePolicy.NONE:
+        warnings.warn(
+            "The file contains delayed coincidences, but randoms are not corrected "
+            "for in the reconstruction (prompts are assumed to be true coincidences).",
+            UserWarning,
+        )
+
+    ignored = []
+    if scanner.single_event_policy != petsird.SingleEventPolicy.NONE:
+        ignored.append("single events")
+    if scanner.triple_event_policy != petsird.TripleEventPolicy.NONE:
+        ignored.append("triple events")
+    if scanner.quadruple_event_policy != petsird.QuadrupleEventPolicy.NONE:
+        ignored.append("quadruple events")
+    if scanner.singles_histogram_level != petsird.SinglesHistogramLevelType.NONE:
+        ignored.append("singles histograms")
+    if scanner.scanner_geometry.non_detecting_volumes:
+        ignored.append("non-detecting volumes")
+    if ignored:
+        warnings.warn(
+            f"The following information in the file is ignored: {', '.join(ignored)}",
+            UserWarning,
+        )
+
+
 def get_all_detector_centers(
     scanner_geometry: petsird.ScannerGeometry, ax=None
 ) -> list[np.ndarray]:
@@ -217,7 +295,7 @@ def _get_calibration_factor(scanner_info: petsird.ScannerInformation) -> float:
     return float(det_effs.calibration_factor)
 
 
-def _get_tof_parameters(
+def get_tof_parameters(
     scanner_info: petsird.ScannerInformation, module_type_1: int, module_type_2: int
 ) -> TOFParameters:
     """parallelproj TOF parameters for a pair of module types (module_type_2 <= module_type_1)"""
@@ -226,14 +304,14 @@ def _get_tof_parameters(
 
     # raise an error if tof_bin_edges are non equidistant (up to 0.1%)
     if not np.allclose(np.diff(tof_bin_edges), tofbin_width, rtol=0.001):
-        raise ValueError(
+        raise UnsupportedPETSIRDFeatureError(
             f"TOF bin edges for module types {module_type_1} and {module_type_2} are not equidistant."
         )
 
     # TOF bins have to be symmetric around 0, since parallelproj assumes that the
     # central TOF bin is centered at the LOR center
     if not np.isclose(tof_bin_edges[0], -tof_bin_edges[-1], atol=1e-3 * tofbin_width):
-        raise ValueError(
+        raise UnsupportedPETSIRDFeatureError(
             f"TOF bin edges for module types {module_type_1} and {module_type_2} are not symmetric around 0."
         )
 
@@ -297,7 +375,7 @@ def backproject_efficiencies(
                 -1, num_det_els_1, num_energy_bins_1, num_det_els_2, num_energy_bins_2
             )
 
-            tof_params = _get_tof_parameters(scanner_info, mod_type_1, mod_type_2)
+            tof_params = get_tof_parameters(scanner_info, mod_type_1, mod_type_2)
 
             if verbose:
                 print(
@@ -405,12 +483,58 @@ def read_listmode_prompt_events(
     if verbose:
         print("\nReading prompt events from time blocks ...")
 
+    # number of time blocks / events that are ignored
+    num_ignored: dict[str, int] = {}
+
+    def _count_ignored(name: str, num: int = 1) -> None:
+        if num > 0:
+            num_ignored[name] = num_ignored.get(name, 0) + num
+
+    def _num_events(nested) -> int:
+        # total number of events in nested lists of event lists
+        if len(nested) == 0 or not isinstance(nested[0], list):
+            return len(nested)
+        return sum(_num_events(x) for x in nested)
+
     for i_t, time_block in enumerate(reader.read_time_blocks()):
         if isinstance(time_block, petsird.TimeBlock.WeightedEventTimeBlock):
-            raise NotImplementedError("Weighted event time blocks are not supported.")
-
-        if not isinstance(time_block, petsird.TimeBlock.EventTimeBlock):
+            raise UnsupportedPETSIRDFeatureError(
+                "Weighted event time blocks are not supported."
+            )
+        if isinstance(time_block, petsird.TimeBlock.BedMovementTimeBlock):
+            if not _is_identity_transform(time_block.value.transform):
+                raise UnsupportedPETSIRDFeatureError(
+                    "Bed movement time blocks are not supported."
+                )
             continue
+        if isinstance(time_block, petsird.TimeBlock.GantryMovementTimeBlock):
+            if not all(_is_identity_transform(t) for t in time_block.value.transforms):
+                raise UnsupportedPETSIRDFeatureError(
+                    "Gantry movement time blocks are not supported."
+                )
+            continue
+        if isinstance(time_block, petsird.TimeBlock.DeadTimeTimeBlock):
+            _count_ignored("dead time time blocks (dead time is not corrected)")
+            continue
+        if isinstance(time_block, petsird.TimeBlock.SinglesHistogramTimeBlock):
+            _count_ignored("singles histogram time blocks")
+            continue
+        if isinstance(time_block, petsird.TimeBlock.ExternalSignalTimeBlock):
+            _count_ignored("external signal time blocks")
+            continue
+        if not isinstance(time_block, petsird.TimeBlock.EventTimeBlock):
+            _count_ignored(f"time blocks of type {type(time_block).__name__}")
+            continue
+
+        _count_ignored(
+            "delayed events (randoms are not corrected)",
+            _num_events(time_block.value.delayed_events),
+        )
+        _count_ignored("single events", _num_events(time_block.value.single_events))
+        _count_ignored("triple events", _num_events(time_block.value.triple_events))
+        _count_ignored(
+            "quadruple events", _num_events(time_block.value.quadruple_events)
+        )
 
         if verbose:
             interval = time_block.value.time_interval
@@ -419,6 +543,8 @@ def read_listmode_prompt_events(
             )
 
         prompt_events = time_block.value.prompt_events
+        if len(prompt_events) == 0:
+            continue
         for m1, m2 in raw_events:
             events = prompt_events[m1][m2]
             if len(events) == 0:
@@ -429,6 +555,9 @@ def read_listmode_prompt_events(
                     dtype=np.int64,
                 )
             )
+
+    for name, num in num_ignored.items():
+        warnings.warn(f"Ignored {num} {name}.", UserWarning)
 
     coords0 = []
     coords1 = []

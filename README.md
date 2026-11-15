@@ -135,6 +135,23 @@ time.
 
 ## Reconstructions of PETSIRD listmode files
 
+The reconstruction is meant as a reference implementation of reading and
+reconstructing PETSIRD data. It supports multiple module types, energy bins and time
+blocks, the full detection efficiency model and TOF. It stops with an error for
+features that would lead to wrong reconstructions:
+
+- bed or gantry movement time blocks
+- weighted event time blocks
+- different TOF bin edges / TOF resolutions for different module type pairs
+- non-equidistant or asymmetric TOF bins
+
+and warns about information that is ignored:
+
+- gantry alignment (the image is reconstructed in the PET gantry coordinate system)
+- delayed events (no randoms correction) and dead time time blocks (no dead time correction)
+- single, triple and quadruple events, singles histograms, external signals and
+  non-detecting volumes
+
 All files written by the reconstruction script (cached detector positions, events
 and sensitivity images, backprojections and reconstructions) are tagged with a
 fingerprint of the listmode file (`<fingerprint>`, computed from the file size and

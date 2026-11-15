@@ -4,7 +4,6 @@ from pathlib import Path
 import parallelproj
 from parallelproj.operators import GaussianFilterOperator
 from parallelproj.projectors import ListmodePETProjector
-from parallelproj.tof import TOFParameters
 import petsird
 import hashlib
 
@@ -19,7 +18,9 @@ import argparse
 print(f"Using {xp.__name__} for parallelproj reconstructions")
 
 from utils import (
+    check_header_support,
     get_all_detector_centers,
+    get_tof_parameters,
     lm_file_fingerprint,
     read_listmode_prompt_events,
     backproject_efficiencies,
@@ -141,6 +142,8 @@ attenuation_image_fname: str | None = args.attenuation_image
 
 reader = petsird.BinaryPETSIRDReader(fname)
 header: petsird.Header = reader.read_header()
+# raise errors / warnings for PETSIRD features that are not supported
+check_header_support(header)
 scanner_info: petsird.ScannerInformation = header.scanner
 scanner_geom: petsird.ScannerGeometry = scanner_info.scanner_geometry
 
@@ -391,16 +394,9 @@ non_tof_backproj_path = Path(fname).with_name(
 )
 xp.save(non_tof_backproj_path, non_tof_backproj)
 
-#### HACK assumes same TOF parameters for all module type pairs
+# (check_header_support() made sure that all module type pairs have the same TOF parameters)
 if tof:
-    sigma_tof = scanner_info.tof_resolution[0][0] / 2.35
-    tof_bin_edges = scanner_info.tof_bin_edges[0][0].edges
-    num_tofbins = tof_bin_edges.size - 1
-    tofbin_width = float(tof_bin_edges[1] - tof_bin_edges[0])
-
-    tof_params = TOFParameters(
-        num_tofbins=num_tofbins, tofbin_width=tofbin_width, sigma_tof=sigma_tof
-    )
+    tof_params = get_tof_parameters(scanner_info, 0, 0)
 
     proj.tof_parameters = tof_params
     proj.event_tofbins = xp.asarray(tof_bins, dtype=xp.int16).copy()
@@ -461,7 +457,6 @@ for i_subset, sl in enumerate(subset_slices):
         )
     )
 
-    #### HACK assumes same TOF parameters for all module type pairs
     if tof:
         lm_subset_projs[i_subset].tof_parameters = tof_params
         lm_subset_projs[i_subset].event_tofbins = xp.asarray(
