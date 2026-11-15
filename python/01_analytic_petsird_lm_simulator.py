@@ -325,7 +325,7 @@ elif phantom == "points":
     img[img_shape[0] // 4, img_shape[1] // 2, img_shape[2] // 6] = 6
 
 else:
-    raise ValueError("Invalid phantom {phantom}")
+    raise ValueError(f"Invalid phantom {phantom}")
 
 # %%
 # setup of a parallelproj TOF projector

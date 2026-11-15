@@ -2,6 +2,7 @@
 **/__pycache__/
 *.npy
 .DS_Store
+.vscode/
 
 # Common editor backups
 ~$*
