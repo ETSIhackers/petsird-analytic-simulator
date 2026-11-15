@@ -307,14 +307,7 @@ else:
 
 preprocess_file = Path(fname).with_suffix(".preprocessed_events.npz")
 
-# caches written by older versions store signed TOF bins (parallelproj v1 convention)
-# under "signed_tof_bins" - those are ignored and the events are re-read
-cache_is_valid = False
-if preprocess_file.exists():
-    with np.load(preprocess_file) as data:
-        cache_is_valid = "tof_bins" in data.files
-
-if not cache_is_valid:
+if not preprocess_file.exists():
     print("Reading prompt events from listmode file ...")
     coords0, coords1, tof_bins, effs, energy_idx0, energy_idx1 = (
         read_listmode_prompt_events(

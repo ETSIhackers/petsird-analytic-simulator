@@ -362,7 +362,7 @@ proj.tof_parameters = TOFParameters(
 )
 
 # check if the projector passes the adjointness test
-# (parallelproj v2 defaults to float64 test arrays, but the projectors require float32)
+# (the projectors require float32 arrays)
 assert proj.adjointness_test(np, "cpu", dtype=np.float32, rtol=1e-4)
 
 
@@ -413,8 +413,7 @@ for i, bp in enumerate(proj.lor_descriptor.all_block_pairs):
 # where G is the image-based resolution model
 # P is the (TOF) forward projector
 # diag(s) is the elementwise multiplication with a non-TOF sensitivity histogram
-# (parallelproj v2 no longer has a TOFNonTOFElementwiseMultiplicationOperator,
-#  so we broadcast the non-TOF sensitivities along the TOF axis - zero-copy view)
+# (the non-TOF sensitivities are broadcasted along the TOF axis - zero-copy view)
 fwd_op = CompositeLinearOperator(
     [
         ElementwiseMultiplicationOperator(
@@ -601,7 +600,7 @@ if check_backprojection and (num_true_counts > 0):
     # non-TOF LM backprojection
     lm_back_non_tof = lm_proj.adjoint(np.ones(num_events, dtype=np.float32))
 
-    # TOF LM backprojection - parallelproj v2 uses unsigned TOF bins (0 ... num_tofbins - 1)
+    # TOF LM backprojection - parallelproj uses unsigned TOF bins (0 ... num_tofbins - 1)
     lm_proj.tof_parameters = proj.tof_parameters
     lm_proj.event_tofbins = unsigned_event_tof_bin.astype(np.int16)
     lm_proj.tof = True
