@@ -4,6 +4,7 @@ Everything is derived from the PETSIRD data following the PETSIRD definitions on
 (independent of how the data were simulated).
 """
 
+import math
 import warnings
 
 import numpy as np
@@ -302,8 +303,29 @@ def get_num_data_bins(scanner_info: petsird.ScannerInformation, tof: bool) -> in
     return num_bins
 
 
+def detection_bin_offsets(scanner_info: petsird.ScannerInformation) -> np.ndarray:
+    """offsets of the detection bins of all module types in a global detection bin index
+
+    The global index of detection bin b of module type m is offsets[m] + b, i.e. the
+    detection bins of all module types are numbered consecutively.
+    offsets[-1] is the total number of detection bins.
+    """
+    num_module_types = scanner_info.scanner_geometry.number_of_module_types()
+    num_bins = [math.prod(module_type_info(scanner_info, m)) for m in range(num_module_types)]
+    return np.concatenate([[0], np.cumsum(num_bins)]).astype(np.int64)
+
+
 # names of the arrays describing listmode events (see read_listmode_events)
-EVENT_ARRAYS = ("coords0", "coords1", "tof_bins", "effs", "energy_idx0", "energy_idx1")
+EVENT_ARRAYS = (
+    "coords0",
+    "coords1",
+    "tof_bins",
+    "effs",
+    "energy_idx0",
+    "energy_idx1",
+    "det_bin0",
+    "det_bin1",
+)
 
 
 def read_listmode_events(
@@ -325,6 +347,8 @@ def read_listmode_events(
     effs : (num_events,) float32 array with the detection efficiencies
     energy_idx0, energy_idx1 : (num_events,) uint16 arrays with the energy bin indices
         (empty if store_energy_bins is False)
+    det_bin0, det_bin1 : (num_events,) int64 arrays with the global detection bin
+        indices (see detection_bin_offsets) of the two detection bins
 
     The efficiencies are computed in a vectorized way following the definition in
     petsird.DetectionEfficiencies (equivalent to petsird.helpers.get_detection_efficiency).
@@ -446,6 +470,7 @@ def _convert_events(
     """convert raw (detection bin 0, detection bin 1, tof_idx) events of all module type
     pairs to LOR coordinates, TOF bins, efficiencies and energy bin indices"""
     out: dict[str, list[np.ndarray]] = {name: [] for name in EVENT_ARRAYS}
+    bin_offsets = detection_bin_offsets(scanner_info)
 
     for (m1, m2), chunks in raw_events.items():
         if len(chunks) == 0:
@@ -475,6 +500,8 @@ def _convert_events(
         out["coords0"].append(all_detector_centers[m1][mod_0, el_0])
         out["coords1"].append(all_detector_centers[m2][mod_1, el_1])
         out["tof_bins"].append(tof_idx)
+        out["det_bin0"].append(bin_offsets[m1] + det_bin_0)
+        out["det_bin1"].append(bin_offsets[m2] + det_bin_1)
 
         det_bin_effs_1 = get_detection_bin_efficiencies(scanner_info, m1).ravel()
         det_bin_effs_2 = get_detection_bin_efficiencies(scanner_info, m2).ravel()
@@ -515,6 +542,8 @@ def _convert_events(
         "effs": "float32",
         "energy_idx0": "uint16",
         "energy_idx1": "uint16",
+        "det_bin0": "int64",
+        "det_bin1": "int64",
     }
     return {
         name: np.concatenate(x).astype(dtypes[name])

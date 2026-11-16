@@ -100,14 +100,3 @@ def test_histogram_mlem_converges_for_consistent_data():
     sens = A.adjoint(np.ones(3, dtype="float32"))
     recon = histogram_mlem(A, A(x_true), sens, num_epochs=500)
     np.testing.assert_allclose(recon, x_true, rtol=1e-2)
-
-
-def test_constant_randoms_contamination_units():
-    """randoms per event refer to a TOF bin (TOF) or the whole LOR (non-TOF)"""
-    from reconstruction import constant_randoms_contamination
-
-    tof = constant_randoms_contamination(0.01, num_events=3, num_tofbins=7, tof=True)
-    non_tof = constant_randoms_contamination(0.01, num_events=3, num_tofbins=7, tof=False)
-    np.testing.assert_allclose(tof, 0.01)
-    # the randoms of a LOR are the sum over its TOF bins
-    np.testing.assert_allclose(non_tof, 7 * tof)

@@ -71,7 +71,7 @@ jobs:
             --num_epochs 1 \
             --num_subsets 5
 
-      - name: Reconstruct PETSIRD listmode data (TOF, attenuation and randoms correction)
+      - name: Reconstruct PETSIRD listmode data (TOF, attenuation and ML randoms correction from delayeds)
         working-directory: python
         run: |
           python 02_reconstruct_petsird.py "$OUT_DIR/simulated_petsird_lm_file.bin" \
@@ -79,7 +79,7 @@ jobs:
             --num_epochs 1 \
             --num_subsets 5 \
             --attenuation_image "$OUT_DIR/attenuation_image.npy" \
-            --randoms_expectation "$OUT_DIR/randoms_expectation.json"
+            --randoms_from_delayeds ml
 
       - name: Check PETSIRD file and reconstructions
         run: |

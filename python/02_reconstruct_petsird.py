@@ -3,6 +3,7 @@
 The building blocks are defined in
 - petsird_reader.py: reading and interpreting the PETSIRD data
 - reconstruction.py: image grid, sensitivity image, LM OSEM
+- randoms.py: randoms estimation from the delayed coincidences
 All cached / derived files are written next to the listmode file and are tagged
 with a fingerprint of the listmode file and a hash of the reconstruction parameters.
 """
@@ -28,8 +29,14 @@ from petsird_reader import (
     EVENT_ARRAYS,
     read_listmode_events,
 )
+from randoms import (
+    casey_singles,
+    delayeds_fan_sums,
+    detection_bin_fans,
+    ml_singles,
+    randoms_of_events,
+)
 from reconstruction import (
-    constant_randoms_contamination,
     create_lm_subset_objectives,
     default_image_grid,
     lm_osem,
@@ -80,12 +87,27 @@ parser.add_argument("--non-tof", action="store_true", help="Whether to disable T
 parser.add_argument(
     "--attenuation_image", type=str, default=None, help="Path to attenuation image"
 )
-parser.add_argument(
+randoms_group = parser.add_mutually_exclusive_group()
+randoms_group.add_argument(
+    "--randoms_from_delayeds",
+    choices=["ml", "casey"],
+    default=None,
+    help="randoms correction with the randoms estimated from the delayed coincidences: "
+    "maximum likelihood (ml) or Casey-type fan-sum (casey) estimate of the singles",
+)
+randoms_group.add_argument(
     "--randoms_expectation",
     type=str,
     default=None,
     help="Path to the (true) randoms expectation written by the simulator "
-    "(randoms_expectation.json) used for randoms correction",
+    "(randoms_expectation.json) used for an 'oracle' randoms correction",
+)
+parser.add_argument(
+    "--randoms_ml_iterations",
+    type=int,
+    default=10,
+    help="number of iterations of the ML randoms (singles) estimation (initialized with "
+    "the Casey-type estimate)",
 )
 args = parser.parse_args()
 
@@ -201,7 +223,7 @@ else:
 streams = ("prompts", "delayeds")
 # cached as flat dictionary with keys "<stream>_<array>"
 flat_events = load_or_compute(
-    output_path("preprocessed_events", ".npz"),
+    output_path("listmode_events", ".npz"),
     compute=lambda: {
         f"{stream}_{k}": v
         for stream, arrays in read_listmode_events(
@@ -219,6 +241,9 @@ all_events = {
 events = all_events["prompts"]
 num_delayeds = all_events["delayeds"]["coords0"].shape[0]
 print(f"{events['coords0'].shape[0]} prompts, {num_delayeds} delayeds")
+
+# fans (detection bins in coincidence) of all detection bins
+fans = detection_bin_fans(scanner_info)
 
 # TOF parameters (check_header_support() made sure that all module type pairs have
 # the same TOF parameters)
@@ -253,30 +278,59 @@ if not np.all(valid):
     print(f"Filtering out {np.count_nonzero(~valid)} events with zero efficiency ...")
     events = {k: v[valid] for k, v in events.items()}
 
-# additive contamination (randoms) of all events
-contamination_list, contamination_sum = None, 0.0
+# additive contamination (randoms) of all events: the expected randoms of a pair of
+# detection bins (a, b) are s_a * s_b with the (scaled) singles s (see randoms.py)
+num_tofbins = scanner_info.tof_bin_edges[0][0].number_of_bins()
+randoms_singles, randoms_tag = None, ""
 if args.randoms_expectation is not None:
-    # "oracle" randoms correction using the true randoms expectation of the simulator:
-    # constant expectation per LOR (with non-zero efficiency) and TOF bin
+    # "oracle" randoms correction using the true singles of the simulator
     with open(args.randoms_expectation, encoding="UTF-8") as f:
         randoms_info = json.load(f)
-    num_tofbins = scanner_info.tof_bin_edges[0][0].number_of_bins()
     if randoms_info["num_tofbins"] != num_tofbins:
         raise ValueError("number of TOF bins of the randoms expectation and the data differ")
-    contamination_list = constant_randoms_contamination(
-        randoms_info["expected_randoms_per_lor_and_tof_bin"],
-        events["coords0"].shape[0],
-        num_tofbins,
-        tof,
+    randoms_singles = np.asarray(randoms_info["singles"], dtype=np.float64)
+    randoms_tag = "_randoms_oracle"
+elif args.randoms_from_delayeds is not None:
+    delayeds = all_events["delayeds"]
+    if num_delayeds == 0:
+        raise ValueError("--randoms_from_delayeds requires delayed coincidences in the file")
+    delayed_fan_sums = delayeds_fan_sums(fans, delayeds["det_bin0"], delayeds["det_bin1"])
+    if args.randoms_from_delayeds == "casey":
+        randoms_singles = casey_singles(fans, delayed_fan_sums)
+        randoms_tag = "_randoms_casey"
+    else:
+        randoms_singles = ml_singles(
+            fans, delayed_fan_sums, num_iterations=args.randoms_ml_iterations
+        )
+        randoms_tag = f"_randoms_ml{args.randoms_ml_iterations}"
+    num_zero = np.count_nonzero(delayed_fan_sums == 0)
+    print(
+        f"Estimated singles from {num_delayeds} delayeds ({args.randoms_from_delayeds}), "
+        f"{num_zero} of {fans.num_bins} detection bins without delayeds"
     )
-    # sum over all data bins (only needed for the value of the log-likelihood)
-    contamination_sum = randoms_info["expected_randoms"]
-    print(f"Randoms correction with {contamination_list[0]:.3e} expected randoms per event")
+    np.save(output_path("randoms_singles" + randoms_tag.removeprefix("_randoms")), randoms_singles)
 elif num_delayeds > 0:
     warnings.warn(
         f"The file contains {num_delayeds} delayed coincidences, but randoms are not "
-        "corrected (see --randoms_expectation): the reconstruction is biased.",
+        "corrected (see --randoms_from_delayeds): the reconstruction is biased.",
         UserWarning,
+    )
+
+contamination_list, contamination_sum = None, 0.0
+if randoms_singles is not None:
+    if randoms_singles.shape != (fans.num_bins,):
+        raise ValueError(
+            f"singles of {randoms_singles.shape} detection bins do not match the "
+            f"{fans.num_bins} detection bins of the scanner"
+        )
+    contamination_list = randoms_of_events(
+        randoms_singles, events["det_bin0"], events["det_bin1"], num_tofbins, tof
+    )
+    # sum over all data bins (only needed for the value of the log-likelihood)
+    contamination_sum = fans.pair_sum(randoms_singles)
+    print(
+        f"Randoms correction: {contamination_sum:.4e} expected randoms in total, "
+        f"mean per event {contamination_list.mean():.3e}"
     )
 
 # eps added to the expected counts of all events: only needed if the contamination is
@@ -309,7 +363,6 @@ subset_objectives = create_lm_subset_objectives(
 )
 recon = lm_osem(subset_objectives, sens_img, args.num_epochs, xp=xp)
 
-randoms_tag = "_randoms_corrected" if contamination_list is not None else ""
 opath = fname.with_name(
     f"lm_osem_{args.num_epochs}_{args.num_subsets}_{params_tag}{randoms_tag}.npy"
 )

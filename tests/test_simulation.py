@@ -58,6 +58,9 @@ def test_write_read_roundtrip(tmp_path, tiny_config, tiny_efficiency_model, tiny
     coords0, coords1, tof_bins, effs = (
         prompts[k] for k in ("coords0", "coords1", "tof_bins", "effs")
     )
+    # global detection bin indices (one module type, all events written in time order)
+    np.testing.assert_array_equal(prompts["det_bin0"], det_bin_0)
+    np.testing.assert_array_equal(prompts["det_bin1"], det_bin_1)
 
     # PETSIRD first detection bin = parallelproj end point (end module has the higher index)
     scanner = lor_desc.scanner
@@ -88,17 +91,32 @@ def test_referenced_materials_are_defined(tiny_header):
         assert m.density > 0
 
 
-def test_randoms_expectation():
-    """randoms are constant for LORs with non-zero efficiency and all TOF bins"""
-    from simulation import randoms_expectation
+def test_randoms_expectation(tiny_config):
+    """randoms of a LOR are proportional to the product of the singles and uniform in TOF"""
+    from simulation import lor_products, randoms_expectation
 
-    lor_effs = np.array([[1.0, 0.0, 2.0], [0.5, 0.3, 0.0]], dtype="float32")
-    randoms, per_bin = randoms_expectation(lor_effs, num_tofbins=5, total_expected_randoms=100.0)
-    assert randoms.shape == (2, 3, 5)
+    lor_desc = create_parallelproj_lor_descriptor(tiny_config)
+    singles = np.random.default_rng(0).uniform(0.5, 2, (tiny_config.num_modules, tiny_config.num_det_els_per_module))
+    singles[1, 2] = 0
+    randoms, scaled = randoms_expectation(singles, lor_desc, num_tofbins=5, total_expected_randoms=100.0)
+    assert randoms.shape == (lor_desc.num_block_pairs, tiny_config.num_det_els_per_module**2, 5)
     np.testing.assert_allclose(randoms.sum(), 100.0, rtol=1e-5)
-    np.testing.assert_allclose(randoms[lor_effs > 0], per_bin)
-    assert np.all(randoms[lor_effs == 0] == 0)
-    np.testing.assert_allclose(per_bin, 100.0 / (4 * 5))
+    np.testing.assert_allclose(randoms.sum(-1), lor_products(scaled, lor_desc), rtol=1e-5)
+    np.testing.assert_allclose(randoms, randoms[..., :1].repeat(5, -1))
+    # scaled singles are proportional to the singles
+    ratio = scaled[singles > 0] / singles[singles > 0]
+    np.testing.assert_allclose(ratio, ratio[0])
+    assert scaled[1, 2] == 0
+
+
+def test_singles_model():
+    """singles = eff x (uniform part + flux part), 0 for dead elements"""
+    from simulation import singles_model
+
+    effs = np.array([[1.0, 2.0], [0.0, 1.0]])
+    trues_fan_sums = np.array([[1.0, 2.0], [0.0, 3.0]])  # flux 1, 1, -, 3 (mean 5/3)
+    s = singles_model(trues_fan_sums, effs, uniform_fraction=0.5)
+    np.testing.assert_allclose(s, [[0.5 + 0.3, 2 * (0.5 + 0.3)], [0.0, 0.5 + 0.9]])
 
 
 def test_write_read_delayeds(tmp_path, tiny_config, tiny_efficiency_model, tiny_tof_params):

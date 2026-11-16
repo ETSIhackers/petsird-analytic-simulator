@@ -2,10 +2,11 @@
 
 We simulate true (unscattered) TOF coincidences including the effect of attenuation
 (of a water body), detecting element (crystal) efficiencies and module pair
-(symmetry group) efficiencies, as well as random coincidences (stored in the prompts)
-and an independent realization of the randoms (stored as delayed coincidences). Next to the PETSIRD listmode file, reference outputs
-(ground truth, attenuation and sensitivity images, ...) are saved for testing
-readers / reconstructions of PETSIRD data.
+(symmetry group) efficiencies, as well as random coincidences (stored in the prompts,
+product of the singles of the detecting elements) and an independent realization of
+the randoms (stored as delayed coincidences). Next to the PETSIRD listmode file,
+reference outputs (ground truth, attenuation and sensitivity images, true randoms
+expectation, ...) are saved for testing readers / reconstructions of PETSIRD data.
 
 The building blocks are defined in
 - scanner.py: scanner geometry (parallelproj and PETSIRD)
@@ -36,7 +37,9 @@ from simulation import (
     create_petsird_header,
     create_tof_projector,
     histogram_to_listmode,
+    lor_fan_sums,
     randoms_expectation,
+    singles_model,
     tof_parameters,
     to_petsird_coincidences,
     write_petsird_file,
@@ -173,6 +176,7 @@ args = parser.parse_args()
 
 img_shape = args.img_shape
 voxel_size = args.voxel_size
+# all events are in one energy bin (detection bin = detecting element)
 num_energy_bins = 1
 
 if args.output_dir is None:
@@ -227,11 +231,17 @@ scale_fac = args.num_true_counts / expected_trues.sum()
 img *= scale_fac
 expected_trues *= scale_fac
 
-# noise-free randoms (constant for all LORs and TOF bins, 0 for LORs with a dead
-# crystal) with an expected random fraction R / (T + R)
+# noise-free randoms with an expected random fraction R / (T + R): the randoms of a LOR
+# are proportional to the product of the singles of its detecting elements and uniform
+# over the TOF bins. The singles depend on the activity seen by the detecting elements
+# (fan sums of the expected trues) and their efficiencies (0 for dead crystals).
 total_expected_randoms = args.random_fraction / (1 - args.random_fraction) * args.num_true_counts
-expected_randoms, expected_randoms_per_bin = randoms_expectation(
-    lor_efficiencies(efficiency_model, lor_desc), tof_params.num_tofbins, total_expected_randoms
+singles = singles_model(
+    lor_fan_sums(expected_trues.sum(-1), lor_desc, scanner_config.num_modules),
+    efficiency_model.det_el_effs,
+)
+expected_randoms, scaled_singles = randoms_expectation(
+    singles, lor_desc, tof_params.num_tofbins, total_expected_randoms
 )
 
 # prompts: Poisson realization of trues + randoms
@@ -244,11 +254,12 @@ with open(output_dir / "randoms_expectation.json", "w", encoding="UTF-8") as f:
             "random_fraction": args.random_fraction,
             "expected_trues": float(args.num_true_counts),
             "expected_randoms": float(total_expected_randoms),
-            "expected_randoms_per_lor_and_tof_bin": expected_randoms_per_bin,
             "num_tofbins": tof_params.num_tofbins,
-            "description": "the randoms are constant for all LORs (pairs of detection bins "
-            "of modules in coincidence) of detecting elements with non-zero efficiency and "
-            "all TOF bins, and 0 for LORs of detecting elements with zero efficiency",
+            # one value per PETSIRD detection bin (= detecting element for one energy bin)
+            "singles": scaled_singles.ravel().tolist(),
+            "description": "the expected randoms of a pair of detection bins (a, b) in "
+            "coincidence (summed over all TOF bins) are singles[a] * singles[b] and are "
+            "uniformly distributed over the TOF bins (see python/randoms.py)",
         },
         f,
         indent=4,

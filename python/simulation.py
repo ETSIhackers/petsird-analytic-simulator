@@ -88,31 +88,101 @@ def create_forward_model(
     )
 
 
+def _lor_end_points(lor_desc: EqualBlockPETLORDescriptor) -> tuple[np.ndarray, ...]:
+    """(start module, start element, end module, end element) of all LORs, each of shape
+    (num_block_pairs, num_lors_per_block_pair) (same LOR order as lor_efficiencies)"""
+    num_det_els = lor_desc.num_lorendpoints_per_block
+    start_el, end_el = np.meshgrid(np.arange(num_det_els), np.arange(num_det_els), indexing="ij")
+    pairs = np.asarray(lor_desc.all_block_pairs)
+    shape = (lor_desc.num_block_pairs, num_det_els**2)
+    return (
+        np.broadcast_to(pairs[:, :1], shape),
+        np.broadcast_to(start_el.ravel(), shape),
+        np.broadcast_to(pairs[:, 1:], shape),
+        np.broadcast_to(end_el.ravel(), shape),
+    )
+
+
+def lor_products(values: np.ndarray, lor_desc: EqualBlockPETLORDescriptor) -> np.ndarray:
+    """values[start module, start element] * values[end module, end element] of all LORs
+
+    values: array of shape (num_modules, num_det_els_per_module)
+    Returns an array of shape (num_block_pairs, num_lors_per_block_pair).
+    """
+    start_mod, start_el, end_mod, end_el = _lor_end_points(lor_desc)
+    return values[start_mod, start_el] * values[end_mod, end_el]
+
+
+def lor_fan_sums(
+    lor_values: np.ndarray, lor_desc: EqualBlockPETLORDescriptor, num_modules: int
+) -> np.ndarray:
+    """sum of the values of all LORs of every detecting element (fan sums)
+
+    lor_values: array of shape (num_block_pairs, num_lors_per_block_pair)
+    Returns an array of shape (num_modules, num_det_els_per_module).
+    """
+    num_det_els = lor_desc.num_lorendpoints_per_block
+    start_mod, start_el, end_mod, end_el = _lor_end_points(lor_desc)
+    fan_sums = np.zeros((num_modules, num_det_els), dtype=np.float64)
+    np.add.at(fan_sums, (start_mod, start_el), lor_values)
+    np.add.at(fan_sums, (end_mod, end_el), lor_values)
+    return fan_sums
+
+
+def singles_model(
+    trues_fan_sums: np.ndarray, det_el_effs: np.ndarray, uniform_fraction: float = 0.5
+) -> np.ndarray:
+    """(unscaled) singles rates of all detecting elements
+
+    s = eff * (uniform_fraction + (1 - uniform_fraction) * flux / mean(flux))
+    where flux = trues_fan_sums / eff is the (efficiency corrected) fan sum of the
+    expected trues of a detecting element, which models the photon flux from the activity
+    in the FOV seen by the element. The uniform part models e.g. activity outside of the
+    FOV. Elements with zero efficiency ("dead") have no singles.
+
+    trues_fan_sums, det_el_effs: arrays of shape (num_modules, num_det_els_per_module)
+    """
+    alive = det_el_effs > 0
+    flux = np.zeros(det_el_effs.shape, dtype=np.float64)
+    flux[alive] = trues_fan_sums[alive] / det_el_effs[alive]
+    flux /= flux[alive].mean()
+    return det_el_effs * (uniform_fraction + (1 - uniform_fraction) * flux)
+
+
 def randoms_expectation(
-    lor_effs: np.ndarray, num_tofbins: int, total_expected_randoms: float
-) -> tuple[np.ndarray, float]:
+    singles: np.ndarray,
+    lor_desc: EqualBlockPETLORDescriptor,
+    num_tofbins: int,
+    total_expected_randoms: float,
+) -> tuple[np.ndarray, np.ndarray]:
     """noise-free randoms TOF histogram with an (expected) total of total_expected_randoms
 
-    The randoms are constant for all LORs and TOF bins, except for LORs with a detecting
-    element with zero efficiency ("dead" crystal, which can not detect any single) where
-    they are 0.
+    The randoms of a LOR (pair of detecting elements a, b of modules in coincidence)
+    are proportional to the product of the singles s_a * s_b, and uniformly distributed
+    over the TOF bins.
 
     Parameters
     ----------
-    lor_effs : efficiencies of all LORs, shape (num_block_pairs, num_lors_per_block_pair)
+    singles : (unscaled) singles of all detecting elements, shape (num_modules, num_det_els_per_module)
+    lor_desc : LOR descriptor (defines the pairs of detecting elements in coincidence)
     num_tofbins : number of TOF bins
     total_expected_randoms : expected total number of randoms
 
     Returns
     -------
     expected_randoms : array of shape (num_block_pairs, num_lors_per_block_pair, num_tofbins)
-    expected_randoms_per_bin : expected randoms per LOR (with non-zero efficiency) and TOF bin
+    scaled_singles : singles scaled such that the expected randoms of a LOR (summed over
+        all TOF bins) are scaled_singles[a] * scaled_singles[b] (see randoms.py),
+        shape (num_modules, num_det_els_per_module)
     """
-    valid = lor_effs > 0
-    expected_randoms_per_bin = float(total_expected_randoms) / (np.count_nonzero(valid) * num_tofbins)
-    expected_randoms = np.zeros(lor_effs.shape + (num_tofbins,), dtype=np.float32)
-    expected_randoms[valid] = expected_randoms_per_bin
-    return expected_randoms, expected_randoms_per_bin
+    singles = np.asarray(singles, dtype=np.float64)
+    unscaled_sum = lor_products(singles, lor_desc).sum()
+    scale = np.sqrt(total_expected_randoms / unscaled_sum) if unscaled_sum > 0 else 0.0
+    scaled_singles = scale * singles
+    expected_randoms = np.repeat(
+        (lor_products(scaled_singles, lor_desc) / num_tofbins)[..., None], num_tofbins, axis=-1
+    ).astype(np.float32)
+    return expected_randoms, scaled_singles
 
 
 @dataclass

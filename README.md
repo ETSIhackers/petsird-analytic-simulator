@@ -52,7 +52,7 @@ data/sim_uniform_cylinder_4000000_0
 | `ground_truth_image.npy` | ground truth activity image, i.e. **before** the image-based resolution model (`--fwhm_mm`) which is part of the forward model of the simulation |
 | `attenuation_image.npy` | attenuation image (1 / mm) of the water body of the phantom, to be used for attenuation correction |
 | `reference_sensitivity_image.npy` | sensitivity image of the forward model of the simulation (efficiencies, attenuation, image-based resolution model) |
-| `randoms_expectation.json` | true (noise-free) expectation of the randoms: random fraction, expected trues and randoms, expected randoms per LOR and TOF bin (to test randoms corrections) |
+| `randoms_expectation.json` | true (noise-free) expectation of the randoms: random fraction, expected trues and randoms, (scaled) singles of all detection bins (to test randoms corrections and estimations) |
 | `petsird_summary.txt` | human-readable summary of the PETSIRD file (output of `petsird.helpers.analysis`) |
 | `petsird_geometry_and_events.png` | visualization of the PETSIRD geometry and the first events (see below) |
 | `lm_backprojection_tof.npy` | (only with `--save_lm_backprojection`) TOF LM backprojection of the events before writing them to PETSIRD |
@@ -62,10 +62,15 @@ All images are centered at (0,0,0) and use the voxel size `--voxel_size`.
 
 **Randoms:** the prompts contain true coincidences and random coincidences with an
 expected random fraction R / (T + R) given by `--random_fraction` (default 0.1, where
-T are the (attenuated) trues and R the randoms). The randoms are constant for all LORs
-(pairs of detection bins of modules in coincidence) and TOF bins, except for LORs with a
-"dead" detecting element (zero efficiency) where they are 0. An independent Poisson
-realization of the randoms is stored as delayed coincidences. With
+T are the (attenuated) trues and R the randoms). The expected randoms of a LOR (pair of
+detection bins a, b of modules in coincidence, summed over all TOF bins) are the product
+of the (scaled) singles `s_a * s_b`, and the randoms are uniformly distributed over the
+TOF bins. The singles of a detecting element are its efficiency (0 for "dead" elements)
+times 50% uniform + 50% flux from the activity in the FOV (the efficiency corrected fan
+sum of its expected trues, normalized to mean 1), such that they vary with the
+activity distribution and the efficiencies (see `singles_model` in
+`python/simulation.py`). An independent Poisson realization of the randoms is stored as
+delayed coincidences. The true singles are saved in `randoms_expectation.json`. With
 `--random_fraction 0`, no randoms and no delayeds are simulated.
 
 `petsird_geometry_and_events.png` visualizes (transaxial, sagittal and 3D views) the PETSIRD scanner geometry as written
@@ -251,14 +256,31 @@ attenuation correction. The 2-class attenuation image created by
 ### Randoms correction
 
 ```
-python 02_reconstruct_petsird.py my_petsird_file.bin --attenuation_image my_att_img.npy --randoms_expectation randoms_expectation.json
+python 02_reconstruct_petsird.py my_petsird_file.bin --attenuation_image my_att_img.npy --randoms_from_delayeds ml
 ```
 
-uses the true randoms expectation written by the simulator (`randoms_expectation.json`)
-as additive contamination in the LM OSEM reconstruction ("oracle" randoms correction,
-only possible for simulated data). An estimation of the randoms from the delayed
-coincidences stored in the PETSIRD file is not implemented yet. Without randoms
-correction, the reconstruction of data with randoms is biased (a warning is shown).
+estimates the randoms from the delayed coincidences in the PETSIRD file and uses them
+as additive contamination in the LM OSEM reconstruction (see `python/randoms.py`).
+The expected randoms of a pair of detection bins (a, b) in coincidence are modeled as
+`s_a * s_b` (uniform over the TOF bins), where the singles `s` are estimated from the
+fan sums of the delayeds `F_a` (number of delayeds of detection bin `a`). The fans
+(detection bins in coincidence) follow from the module pair SGID LUT of the PETSIRD
+file. Two estimators are available:
+
+- `ml` (default for `--randoms_from_delayeds`): maximum likelihood estimate (Poisson
+  model of the delayeds), `--randoms_ml_iterations` (default 10) monotone iterations
+  initialized with the Casey-type estimate
+- `casey`: Casey-type fan-sum estimate `s_a = F_a / sqrt(sum_{b in fan(a)} F_b)`, which is
+  only exact if all fan sums of the singles are equal (biased by up to 14% for module
+  pairs of the simulated scanner, see `tests/study_randoms_estimation.py`)
+
+The estimated singles are saved as
+`my_petsird_file_randoms_singles_<method>_<fingerprint>.npy`. For simulated data,
+`--randoms_expectation randoms_expectation.json` uses the true singles instead
+("oracle" randoms correction). Without randoms correction, the reconstruction of data
+with randoms is biased (a warning is shown). Detection bins without delayeds get
+zero singles (which is the ML estimate), and the LM OSEM then uses a small eps in the
+expected counts of all events (only needed for very low numbers of delayeds).
 Reconstructions without attenuation correction are expected to be biased low
 (and to show "cupping").
 
@@ -286,6 +308,7 @@ flat modules (no installation needed, the scripts import them directly):
 | `simulation.py` | forward model, histogram to listmode conversion, ordering of the coincidences, PETSIRD header and writing |
 | `petsird_reader.py` | reading and interpreting PETSIRD data (supported features, ADPs, efficiencies, TOF, events) |
 | `reconstruction.py` | image grid, sensitivity image and LM OSEM reconstruction |
+| `randoms.py` | randoms model (product of singles), fans of the detection bins, Casey-type and ML estimation of the singles from the delayeds |
 | `geometry_plots.py` | visualization of the PETSIRD geometry and of events |
 | `viewer.py` | interactive 3-axis viewer |
 | `utils.py` | small generic helpers (version check, FWHM / sigma, file fingerprint, caching) |
@@ -298,6 +321,9 @@ Unit tests (using a tiny scanner, run in a few seconds) are in `tests/test_*.py`
 python -m pytest
 ```
 
+`tests/study_randoms_estimation.py OUTPUT_DIR` is a (slower) statistical study of the
+randoms estimators (bias, variance and convergence for many noise realizations).
+
 ## Consistency checks
 
 `tests/check_simulation_and_recon.py` checks a simulated PETSIRD file (and its
@@ -309,7 +335,7 @@ These checks are run in the CI:
 cd python
 python 01_analytic_petsird_lm_simulator.py --output_dir ../ci_output --phantom offcenter_cylinder --num_true_counts 200000 --save_lm_backprojection --skip_plots
 python 02_reconstruct_petsird.py ../ci_output/simulated_petsird_lm_file.bin --img_shape 55 55 19 --num_epochs 1
-python 02_reconstruct_petsird.py ../ci_output/simulated_petsird_lm_file.bin --img_shape 55 55 19 --num_epochs 1 --attenuation_image ../ci_output/attenuation_image.npy --randoms_expectation ../ci_output/randoms_expectation.json
+python 02_reconstruct_petsird.py ../ci_output/simulated_petsird_lm_file.bin --img_shape 55 55 19 --num_epochs 1 --attenuation_image ../ci_output/attenuation_image.npy --randoms_from_delayeds ml
 cd ..
 python tests/check_simulation_and_recon.py ci_output
 ```

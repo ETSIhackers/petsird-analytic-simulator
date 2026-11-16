@@ -14,6 +14,9 @@ reconstruction code:
 - all tables over module (type) pairs are lower-triangular
 - all prompt and delayed coincidences are ordered (detection_bins[0] >= detection_bins[1])
 - the numbers of prompts (trues + randoms) and delayeds (randoms) match their expectation
+- the delayeds of all module pairs match the randoms expectation of the simulator
+  (randoms_expectation.json: product of the singles of the detection bins) and are
+  uniformly distributed over the TOF bins
 - a TOF LM back projection of the events in the PETSIRD file matches the one
   calculated by the simulator before writing (checks detection bin swapping and
   TOF bin mirroring)
@@ -26,6 +29,10 @@ If reconstruction outputs exist, the LM back projections calculated from the PET
 file are compared to the ones of the simulator, and the sensitivity image of a TOF
 recon with attenuation correction (using the simulated attenuation image
 attenuation_image.npy) has to match the simulator's (reference_sensitivity_image.npy).
+
+If a recon estimated the randoms from the delayeds (--randoms_from_delayeds), the
+module pair randoms of the ML estimate have to match the expectation within the Poisson
+noise and their total the number of delayeds (Casey-type estimates are only reported).
 
 The script exits with a non-zero exit code if any check fails.
 """
@@ -97,6 +104,7 @@ num_modules = len(rep_module.transforms)
 num_det_els = len(det_els.transforms)
 num_energy_bins = scanner.event_energy_bin_edges[0].number_of_bins()
 num_det_bins = num_modules * num_det_els * num_energy_bins
+num_bins_per_module_type = num_det_els * num_energy_bins
 det_effs = scanner.detection_efficiencies
 sgid_lut = det_effs.module_pair_sgidlut[0][0]
 
@@ -153,7 +161,7 @@ for time_block in reader.read_time_blocks():
             tof_idx.append(event.tof_idx)
         if len(time_block.value.delayed_events) > 0:
             delayeds += [
-                (e.detection_bins[0], e.detection_bins[1])
+                (e.detection_bins[0], e.detection_bins[1], e.tof_idx)
                 for e in time_block.value.delayed_events[0][0]
             ]
 det_bin_0, det_bin_1, tof_idx = map(np.asarray, (det_bin_0, det_bin_1, tof_idx))
@@ -169,7 +177,7 @@ check(
     f"all {num_events} prompt coincidences are ordered",
 )
 check(
-    all(are_detections_ordered(type_pair, int(b0), int(b1)) for b0, b1 in delayeds),
+    all(are_detections_ordered(type_pair, int(b0), int(b1)) for b0, b1, _ in delayeds),
     f"all {len(delayeds)} delayed coincidences are ordered",
 )
 
@@ -185,6 +193,48 @@ check(
     abs(len(delayeds) - expected_delayeds) < 5 * np.sqrt(expected_delayeds) + 1,
     f"number of delayeds {len(delayeds)} matches the expectation {expected_delayeds:.0f}",
 )
+
+# %%
+# delayeds vs the randoms model of the simulator: the expected randoms of a pair of
+# detection bins (a, b) in coincidence are singles[a] * singles[b], uniform over the TOF
+# bins. Coincidences are defined on the module pair level (SGID >= 0), such that the
+# expected delayeds of module pairs only depend on the module totals of the singles.
+
+num_tofbins = scanner.tof_bin_edges[0][0].number_of_bins()
+module_coinc = np.zeros((num_modules, num_modules))
+for i, row in enumerate(sgid_lut):
+    for j, sg in enumerate(row):
+        if sg >= 0:
+            module_coinc[i, j] = module_coinc[j, i] = 1
+true_singles = np.asarray(randoms_info["singles"])
+check(true_singles.shape == (num_det_bins,), "randoms expectation has one singles value per detection bin")
+
+
+def module_pair_randoms(singles: np.ndarray) -> np.ndarray:
+    """expected randoms of all module pairs (lower triangle, i > j) from the singles"""
+    totals = singles.reshape(num_modules, -1).sum(1)
+    return np.tril(module_coinc * np.outer(totals, totals), -1)
+
+
+if delayeds:
+    delayed_arr = np.asarray(delayeds)
+    delayed_mp = np.zeros((num_modules, num_modules))
+    np.add.at(
+        delayed_mp,
+        (delayed_arr[:, 0] // num_bins_per_module_type, delayed_arr[:, 1] // num_bins_per_module_type),
+        1,
+    )
+    exp_mp = module_pair_randoms(true_singles)
+    in_coinc = exp_mp > 0
+    z = (delayed_mp[in_coinc] - exp_mp[in_coinc]) / np.sqrt(exp_mp[in_coinc])
+    check(
+        np.all(delayed_mp[~in_coinc] == 0) and np.abs(z).max() < 5,
+        f"delayeds of all module pairs match the randoms expectation (max |z| {np.abs(z).max():.1f})",
+    )
+    tof_counts = np.bincount(delayed_arr[:, 2], minlength=num_tofbins)
+    exp_tof = len(delayeds) / num_tofbins
+    z_tof = np.abs(tof_counts - exp_tof).max() / np.sqrt(exp_tof)
+    check(z_tof < 5, f"delayeds are uniformly distributed over the TOF bins (max |z| {z_tof:.1f})")
 
 # %%
 # TOF LM back projection of the events in the PETSIRD file vs simulator
@@ -340,6 +390,28 @@ if recon_sens and recon_tof_back:
         check(d < 1e-4, f"recon TOF LM back projection {f.name} matches PETSIRD events ({d:.1e})")
 else:
     print("no reconstruction outputs found - skipping reconstruction checks")
+
+# randoms estimated from the delayeds by a recon (--randoms_from_delayeds): the ML
+# estimate reproduces the number of delayeds and the module pair randoms agree with
+# the expectation within the Poisson noise of the delayeds of a module pair
+for f in sorted(out_dir.glob(f"{stem}_randoms_singles_*_{fingerprint}.npy")):
+    est_singles = np.load(f)
+    est_mp, exp_mp = module_pair_randoms(est_singles), module_pair_randoms(true_singles)
+    in_coinc = exp_mp > 0
+    z = (est_mp[in_coinc] - exp_mp[in_coinc]) / np.sqrt(exp_mp[in_coinc])
+    rel = est_mp[in_coinc] / exp_mp[in_coinc] - 1
+    msg = (
+        f"{f.name}: total {est_mp.sum():.0f} ({len(delayeds)} delayeds, expectation "
+        f"{exp_mp.sum():.0f}), module pair randoms vs expectation: rel. diff "
+        f"[{rel.min():+.3f}, {rel.max():+.3f}], max |z| {np.abs(z).max():.1f}"
+    )
+    if "_ml" in f.name:
+        check(
+            abs(est_mp.sum() / len(delayeds) - 1) < 1e-4 and np.abs(z).max() < 5,
+            f"ML randoms estimate {msg}",
+        )
+    else:
+        print(f"       {msg}")
 
 # %%
 if failed:
