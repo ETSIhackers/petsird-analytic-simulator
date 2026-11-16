@@ -345,6 +345,7 @@ EVENT_ARRAYS = (
     "energy_idx1",
     "det_bin0",
     "det_bin1",
+    "event_index",
 )
 
 
@@ -411,8 +412,9 @@ def detection_bin_tables(
 
 
 # raw coincidences of one stream per module type pair: (detection bin 0, detection bin 1,
-# tof_idx) as uint32 arrays
-RawEvents = dict[tuple[int, int], tuple[np.ndarray, np.ndarray, np.ndarray]]
+# tof_idx) as uint32 arrays and the index of the events among all events of the stream and
+# module type pair in the file (int64, file order, also counting skipped time blocks)
+RawEvents = dict[tuple[int, int], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]
 
 
 def read_listmode_events(
@@ -456,6 +458,11 @@ def read_listmode_events(
         (empty if store_energy_bins is False)
     det_bin0, det_bin1 : (num_events,) int64 arrays with the global detection bin
         indices (see detection_bin_offsets) of the two detection bins
+    event_index : (num_events,) int64 array with the index of every event among all events
+        of its stream and module type pair in the file (file order, i.e. also counting the
+        events of time blocks outside of time_range_ms)
+    The result also contains "event_time_ms": {"selected": ..., "all": ...}, the summed
+    durations of the selected / all event time blocks (ms).
 
     The efficiencies are computed in a vectorized way following the definition in
     petsird.DetectionEfficiencies (equivalent to petsird.helpers.get_detection_efficiency).
@@ -470,13 +477,13 @@ def read_listmode_events(
     if backend == "petsird_fast":
         if verbose:
             print("\nReading time blocks with petsird_fast (C++) ...")
-        raw_events, singles, num_ignored, num_skipped = _read_time_blocks_petsird_fast(
-            fname, scanner_info, time_range_ms
+        raw_events, singles, num_ignored, num_skipped, event_time_ms = (
+            _read_time_blocks_petsird_fast(fname, scanner_info, time_range_ms)
         )
     else:
         if verbose:
             print("\nReading time blocks with the yardl-generated Python code ...")
-        raw_events, singles, num_ignored, num_skipped = _read_time_blocks_yardl(
+        raw_events, singles, num_ignored, num_skipped, event_time_ms = _read_time_blocks_yardl(
             reader, scanner_info, verbose, time_range_ms
         )
 
@@ -490,6 +497,7 @@ def read_listmode_events(
     }
     result["singles"] = singles
     result["num_skipped_time_blocks"] = num_skipped
+    result["event_time_ms"] = event_time_ms
     return result
 
 
@@ -498,9 +506,9 @@ def _read_time_blocks_yardl(
     scanner_info: petsird.ScannerInformation,
     verbose: bool,
     time_range_ms: tuple[int, int] | None = None,
-) -> tuple[dict[str, RawEvents], dict[str, np.ndarray], dict[str, int], int]:
-    """raw events, singles histograms, ignored content and number of skipped time blocks
-    (yardl-generated Python code)"""
+) -> tuple[dict[str, RawEvents], dict[str, np.ndarray], dict[str, int], int, dict[str, int]]:
+    """raw events, singles histograms, ignored content, number of skipped time blocks and
+    durations of the selected / all event time blocks (yardl-generated Python code)"""
     num_module_types = scanner_info.scanner_geometry.number_of_module_types()
     pairs = [(m1, m2) for m1 in range(num_module_types) for m2 in range(m1 + 1)]
     chunks: dict[str, dict[tuple[int, int], list[np.ndarray]]] = {
@@ -526,14 +534,34 @@ def _read_time_blocks_yardl(
 
     num_skipped = 0
     num_read_events = 0
+    # number of events per stream and module type pair in all event time blocks so far
+    next_index = {stream: {pair: 0 for pair in pairs} for stream in chunks}
+    index_chunks: dict[str, dict[tuple[int, int], list[np.ndarray]]] = {
+        stream: {pair: [] for pair in pairs} for stream in chunks
+    }
+    event_time_ms = {"selected": 0, "all": 0}
+
+    def _nested(time_block, stream):
+        return time_block.value.prompt_events if stream == "prompts" else time_block.value.delayed_events
+
     progress = Progress("Reading time blocks (petsird)")
     for i_t, time_block in enumerate(reader.read_time_blocks()):
         progress.update(1, events=num_read_events)
-        if time_range_ms is not None:
-            interval = time_block.value.time_interval
-            if interval.start < time_range_ms[0] or interval.stop > time_range_ms[1]:
-                num_skipped += 1
-                continue
+        interval = time_block.value.time_interval
+        is_event_block = isinstance(time_block, petsird.TimeBlock.EventTimeBlock)
+        if is_event_block:
+            event_time_ms["all"] += interval.stop - interval.start
+        if time_range_ms is not None and (
+            interval.start < time_range_ms[0] or interval.stop > time_range_ms[1]
+        ):
+            num_skipped += 1
+            if is_event_block:
+                for stream in chunks:
+                    nested = _nested(time_block, stream)
+                    for m1, m2 in pairs:
+                        if len(nested) > 0:
+                            next_index[stream][(m1, m2)] += len(nested[m1][m2])
+            continue
         if isinstance(time_block, petsird.TimeBlock.WeightedEventTimeBlock):
             raise UnsupportedPETSIRDFeatureError(
                 "Weighted event time blocks are not supported."
@@ -581,6 +609,7 @@ def _read_time_blocks_yardl(
             _IGNORED_NAMES["quadruple_events"], _num_events(time_block.value.quadruple_events)
         )
 
+        event_time_ms["selected"] += interval.stop - interval.start
         for stream, nested_events in (
             ("prompts", time_block.value.prompt_events),
             ("delayeds", time_block.value.delayed_events),
@@ -592,6 +621,9 @@ def _read_time_blocks_yardl(
                 if len(events) == 0:
                     continue
                 num_read_events += len(events)
+                first = next_index[stream][(m1, m2)]
+                index_chunks[stream][(m1, m2)].append(np.arange(first, first + len(events)))
+                next_index[stream][(m1, m2)] += len(events)
                 chunks[stream][(m1, m2)].append(
                     np.array(
                         [(e.detection_bins[0], e.detection_bins[1], e.tof_idx) for e in events],
@@ -607,7 +639,9 @@ def _read_time_blocks_yardl(
         raw_events[stream] = {}
         for pair, c in per_pair.items():
             ev = np.concatenate(c) if c else np.zeros((0, 3), dtype=np.uint32)
-            raw_events[stream][pair] = (ev[:, 0], ev[:, 1], ev[:, 2])
+            idx = index_chunks[stream][pair]
+            index = np.concatenate(idx).astype(np.int64) if idx else np.zeros(0, dtype=np.int64)
+            raw_events[stream][pair] = (ev[:, 0], ev[:, 1], ev[:, 2], index)
 
     singles = {
         "counts": np.array(singles_counts, dtype=np.int64)
@@ -615,7 +649,7 @@ def _read_time_blocks_yardl(
         else np.zeros((0, 0), dtype=np.int64),
         "durations_ms": np.array(singles_durations_ms, dtype=np.int64),
     }
-    return raw_events, singles, num_ignored, num_skipped
+    return raw_events, singles, num_ignored, num_skipped, event_time_ms
 
 
 # names of the ignored content in the warnings (keys: names used by petsird_fast)
@@ -627,6 +661,15 @@ _IGNORED_NAMES = {
     "triple_events": "triple events",
     "quadruple_events": "quadruple events",
 }
+
+
+def _event_index(coincidences: dict[str, np.ndarray]) -> np.ndarray:
+    """file order index of all events of petsird_fast coincidences (from the offsets and
+    the file order index of the first event of every event time block)"""
+    offsets = coincidences["block_offsets"]
+    counts = np.diff(offsets)
+    shift = coincidences["block_first_index"] - offsets[:-1]
+    return np.repeat(shift, counts) + np.arange(offsets[-1], dtype=np.int64)
 
 
 def _read_petsird_fast_chunks(
@@ -644,9 +687,18 @@ def _read_petsird_fast_chunks(
         progress.update(chunk["num_time_blocks"], events=num_events)
     progress.close()
     if not chunks:
-        return petsird_fast.read_time_blocks(fname, time_range_ms)
+        data = petsird_fast.read_time_blocks(fname, time_range_ms)
+        for stream in ("prompts", "delayeds"):
+            for a in data[stream].values():
+                a["event_index"] = _event_index(a)
+        return data
 
-    merged: dict = {"other": {}, "num_skipped_time_blocks": 0}
+    merged: dict = {
+        "other": {},
+        "num_skipped_time_blocks": 0,
+        "selected_event_time_ms": 0,
+        "all_event_time_ms": 0,
+    }
     for stream in ("prompts", "delayeds"):
         merged[stream] = {
             pair: {
@@ -655,6 +707,10 @@ def _read_petsird_fast_chunks(
             }
             for pair in chunks[0][stream]
         }
+        for pair in chunks[0][stream]:
+            merged[stream][pair]["event_index"] = np.concatenate(
+                [_event_index(c[stream][pair]) for c in chunks]
+            )
     # singles histograms of all chunks that contain singles time blocks
     with_singles = [c for c in chunks if c["singles"]["start"].size > 0]
     num_types = len(chunks[0]["singles"]["counts"])
@@ -670,6 +726,8 @@ def _read_petsird_fast_chunks(
     }
     for c in chunks:
         merged["num_skipped_time_blocks"] += c["num_skipped_time_blocks"]
+        merged["selected_event_time_ms"] += c["selected_event_time_ms"]
+        merged["all_event_time_ms"] += c["all_event_time_ms"]
         for name, n in c["other"].items():
             merged["other"][name] = merged["other"].get(name, 0) + n
     return merged
@@ -679,9 +737,10 @@ def _read_time_blocks_petsird_fast(
     fname: str,
     scanner_info: petsird.ScannerInformation,
     time_range_ms: tuple[int, int] | None = None,
-) -> tuple[dict[str, RawEvents], dict[str, np.ndarray], dict[str, int], int]:
-    """raw events, singles histograms, ignored content and number of skipped time blocks
-    (yardl-generated C++ code via the optional package petsird_fast)
+) -> tuple[dict[str, RawEvents], dict[str, np.ndarray], dict[str, int], int, dict[str, int]]:
+    """raw events, singles histograms, ignored content, number of skipped time blocks and
+    durations of the selected / all event time blocks (yardl-generated C++ code via the
+    optional package petsird_fast)
 
     The file is read in chunks of time blocks to be able to show the progress.
     """
@@ -700,7 +759,7 @@ def _read_time_blocks_petsird_fast(
 
     raw_events = {
         stream: {
-            pair: (a["det_bin0"], a["det_bin1"], a["tof_idx"])
+            pair: (a["det_bin0"], a["det_bin1"], a["tof_idx"], a["event_index"])
             for pair, a in data[stream].items()
         }
         for stream in ("prompts", "delayeds")
@@ -724,7 +783,11 @@ def _read_time_blocks_petsird_fast(
             else np.zeros(0, dtype=np.int64)
         ),
     }
-    return raw_events, singles, num_ignored, data["num_skipped_time_blocks"]
+    event_time_ms = {
+        "selected": int(data["selected_event_time_ms"]),
+        "all": int(data["all_event_time_ms"]),
+    }
+    return raw_events, singles, num_ignored, data["num_skipped_time_blocks"], event_time_ms
 
 
 def _convert_events(
@@ -742,7 +805,7 @@ def _convert_events(
     """
     out: dict[str, list[np.ndarray]] = {name: [] for name in EVENT_ARRAYS}
 
-    for (m1, m2), (det_bin_0, det_bin_1, tof_idx) in raw_events.items():
+    for (m1, m2), (det_bin_0, det_bin_1, tof_idx, event_index) in raw_events.items():
         if det_bin_0.size == 0:
             continue
 
@@ -762,6 +825,7 @@ def _convert_events(
         out["coords0"].append(np.take(tables.adps[m1], det_bin_0, axis=0))
         out["coords1"].append(np.take(tables.adps[m2], det_bin_1, axis=0))
         out["tof_bins"].append(tof_idx)
+        out["event_index"].append(event_index)
         out["det_bin0"].append(tables.bin_offsets[m1] + det_bin_0.astype(np.int64))
         out["det_bin1"].append(tables.bin_offsets[m2] + det_bin_1.astype(np.int64))
 
@@ -809,6 +873,7 @@ def _convert_events(
         "energy_idx1": "uint16",
         "det_bin0": "int64",
         "det_bin1": "int64",
+        "event_index": "int64",
     }
     return {
         name: (x[0] if len(x) == 1 else np.concatenate(x)).astype(dtypes[name], copy=False)

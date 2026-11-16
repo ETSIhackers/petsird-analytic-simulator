@@ -58,6 +58,9 @@ struct CoincidenceArrays {
   // number of events before every event time block (+ total): the events of event time
   // block k are [block_offsets[k], block_offsets[k+1])
   std::vector<int64_t> block_offsets{0};
+  // index of the first event of every event time block among all events of this stream
+  // and module type pair in the file (incl. skipped time blocks / previous chunks)
+  std::vector<int64_t> block_first_index;
 
   void append(const petsird::ListOfCoincidenceEvents& events) {
     for (const auto& e : events) {
@@ -75,6 +78,7 @@ struct CoincidenceArrays {
     d["det_bin1"] = to_numpy(std::move(det_bin1));
     d["tof_idx"] = to_numpy(std::move(tof_idx));
     d["block_offsets"] = to_numpy(std::move(block_offsets));
+    d["block_first_index"] = to_numpy(std::move(block_first_index));
     return d;
   }
 };
@@ -108,6 +112,13 @@ class TimeBlockReader {
     std::map<std::string, int64_t> counts;
 
     size_t num_read = 0, num_skipped = 0;
+    // summed durations (ms) of the selected / all event time blocks
+    int64_t selected_event_ms = 0, all_event_ms = 0;
+    for (size_t m1 = 0; m1 < num_module_types_; ++m1)
+      for (size_t m2 = 0; m2 <= m1; ++m2) {
+        next_index_prompts_.try_emplace({m1, m2}, 0);
+        next_index_delayeds_.try_emplace({m1, m2}, 0);
+      }
     auto in_range = [&](const petsird::TimeInterval& t) {
       return (!start_ms || t.start >= *start_ms) && (!stop_ms || t.stop <= *stop_ms);
     };
@@ -123,19 +134,31 @@ class TimeBlockReader {
         }
         ++num_read;
         const auto& interval = std::visit([](const auto& b) -> const petsird::TimeInterval& { return b.time_interval; }, time_block);
+        auto* event_block = std::get_if<petsird::EventTimeBlock>(&time_block);
+        if (event_block) all_event_ms += interval.stop - interval.start;
         if (!in_range(interval)) {
           ++num_skipped;
+          // count the events of skipped event time blocks (file order event index)
+          if (event_block)
+            for (auto& [stream, next] : {std::pair{&event_block->prompt_events, &next_index_prompts_},
+                                         std::pair{&event_block->delayed_events, &next_index_delayeds_}})
+              for (auto& [pair, n] : *next) n += num_events(*stream, pair);
           continue;
         }
-        if (auto* tb = std::get_if<petsird::EventTimeBlock>(&time_block)) {
+        if (auto* tb = event_block) {
+          selected_event_ms += interval.stop - interval.start;
           event_start.push_back(tb->time_interval.start);
           event_stop.push_back(tb->time_interval.stop);
-          for (auto& [stream, arrays] :
-               {std::pair{&tb->prompt_events, &prompts}, std::pair{&tb->delayed_events, &delayeds}}) {
-            for (size_t m1 = 0; m1 < stream->size(); ++m1)
-              for (size_t m2 = 0; m2 < (*stream)[m1].size() && m2 <= m1; ++m2)
-                (*arrays)[{m1, m2}].append((*stream)[m1][m2]);
-            for (auto& [pair, a] : *arrays) a.end_time_block();
+          for (auto& [stream, arrays, next] :
+               {std::tuple{&tb->prompt_events, &prompts, &next_index_prompts_},
+                std::tuple{&tb->delayed_events, &delayeds, &next_index_delayeds_}}) {
+            for (auto& [pair, a] : *arrays) {
+              a.block_first_index.push_back((*next)[pair]);
+              if (pair.first < stream->size() && pair.second < (*stream)[pair.first].size())
+                a.append((*stream)[pair.first][pair.second]);
+              a.end_time_block();
+              (*next)[pair] += num_events(*stream, pair);
+            }
           }
           for (const auto& s : tb->single_events) counts["single_events"] += s.size();
           for (const auto& a : tb->triple_events)
@@ -202,14 +225,23 @@ class TimeBlockReader {
     result["other"] = counts_dict;
     result["num_time_blocks"] = num_read;
     result["num_skipped_time_blocks"] = num_skipped;
+    result["selected_event_time_ms"] = selected_event_ms;
+    result["all_event_time_ms"] = all_event_ms;
     return result;
   }
 
  private:
+  static size_t num_events(const petsird::LowerTriangularMatrix<petsird::ListOfCoincidenceEvents>& m,
+                           const std::pair<size_t, size_t>& pair) {
+    return (pair.first < m.size() && pair.second < m[pair.first].size()) ? m[pair.first][pair.second].size() : 0;
+  }
+
   petsird::binary::PETSIRDReader reader_;
   petsird::Header header_;
   size_t num_module_types_ = 0;
   bool done_ = false;
+  // number of events per module type pair read so far (all time blocks)
+  std::map<std::pair<size_t, size_t>, int64_t> next_index_prompts_, next_index_delayeds_;
 };
 
 // writes time blocks from flat arrays; the header is read from a PETSIRD file (written

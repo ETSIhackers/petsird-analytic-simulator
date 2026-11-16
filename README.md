@@ -241,8 +241,10 @@ python 02_reconstruct_petsird.py my_petsird_file.bin --time_range_ms 0 500
 
 only uses the time blocks (events, singles histograms, ...) whose time interval lies
 within [0, 500] ms. The backprojections, reconstructions and figures are tagged with
-`_t0-500ms`. The oracle randoms correction (`--randoms_expectation`) refers to the
-whole acquisition and can not be combined with a time range.
+`_t0-500ms`. With the oracle randoms correction (`--randoms_expectation`), the true
+expected randoms of the selected prompts (over the whole acquisition) are scaled with the
+fraction of the acquisition time that is selected (the simulated randoms are constant
+over time).
 
 ### NON-TOF NAC recon
 

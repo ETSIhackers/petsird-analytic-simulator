@@ -318,25 +318,31 @@ contamination_list, contamination_sum = None, 0.0
 randoms_singles, randoms_tag = None, ""
 if args.randoms_expectation is not None:
     # "oracle" randoms correction: the true expected randoms in the data bin (detection
-    # bins and TOF bin) of every prompt, in the order of the prompts in the file
+    # bins and TOF bin) of every prompt over the whole acquisition, in the order of the
+    # prompts in the file
     if scanner_info.scanner_geometry.number_of_module_types() != 1:
-        # read_listmode_events() groups the events by module type pairs
+        # the event index refers to the events of one module type pair
         raise ValueError("--randoms_expectation is only supported for one module type")
-    if args.time_range_ms is not None:
-        # the expectation refers to the whole acquisition and to all prompts of the file
-        raise ValueError("--randoms_expectation can not be combined with --time_range_ms")
     prompts_randoms = np.load(args.randoms_expectation)
-    if prompts_randoms.shape != valid.shape:
+    event_index = all_events["prompts"]["event_index"]
+    if event_index.size > 0 and event_index.max() >= prompts_randoms.shape[0]:
         raise ValueError(
-            f"{prompts_randoms.shape[0]} expected randoms for {valid.shape[0]} prompts"
+            f"{prompts_randoms.shape[0]} expected randoms for more prompts in the file"
         )
+    # with a time range: the randoms are constant over time (simulation), such that the
+    # expectation of the selected time blocks scales with their duration
+    event_time_ms = all_events["event_time_ms"]
+    time_fraction = event_time_ms["selected"] / event_time_ms["all"]
     # non-TOF: the randoms of an event are the sum over all TOF bins of its LOR
-    contamination_list = (prompts_randoms[valid] * (1 if tof else num_tofbins)).astype(
-        np.float32
-    )
+    contamination_list = (
+        prompts_randoms[event_index[valid]] * time_fraction * (1 if tof else num_tofbins)
+    ).astype(np.float32)
     # the sum of the contamination over all data bins only enters the value of the
     # log-likelihood (not the EM update) and is not known here
-    print(f"Oracle randoms correction, mean per event {contamination_list.mean():.3e}")
+    print(
+        f"Oracle randoms correction (time fraction {time_fraction:.4f}), mean per event "
+        f"{contamination_list.mean():.3e}"
+    )
     randoms_tag = "_randoms_oracle"
 elif args.randoms_from_delayeds is not None:
     delayeds = all_events["delayeds"]
