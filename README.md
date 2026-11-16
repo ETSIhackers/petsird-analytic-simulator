@@ -331,6 +331,28 @@ expected counts of all events (only needed for very low numbers of delayeds).
 Reconstructions without attenuation correction are expected to be biased low
 (and to show "cupping").
 
+## TOF histo-images
+
+```
+python 04_tof_histo_image.py my_petsird_file.bin [--stream {prompts,delayeds}] [--tof_position {center,uniform}]
+```
+
+places every event of the prompt (or delayed) stream at the center of its TOF bin along
+its LOR (most likely emission position, following the PETSIRD TOF definition) and
+accumulates the positions in an image (trilinear or nearest-voxel splatting, see
+`python/histo_images.py`). This is a fast TOF backprojection with a point-like TOF
+kernel (8M events in a few seconds), useful as a quick look at the data and to check the
+TOF convention of a file. The image and a figure with three central cuts are saved next
+to the listmode file (`<stem>_tof_histo_image_<stream>_<fingerprint>.npy / .png`).
+
+The centers of all TOF bins of a LOR are anchored at the LOR midpoint, and on a ring
+scanner the midpoints of many LORs coincide (e.g. at the scanner center and on the
+scanner axis). With exact TOF bin centers, the image therefore shows a spike / lines at
+these positions. `--tof_position uniform` places the events uniformly within their TOF
+bins instead, which removes most of this artifact. Non-TOF data are not supported.
+Options: `--efficiency_weighted` (weights 1 / efficiency), `--time_range_ms`,
+`--petsird_backend`.
+
 ## Simulated data from the CI
 
 Every CI run uploads all outputs of the simulation and the reconstructions (the
@@ -355,6 +377,7 @@ flat modules (no installation needed, the scripts import them directly):
 | `simulation.py` | forward model, histogram to listmode conversion, ordering of the coincidences, PETSIRD header and writing |
 | `petsird_reader.py` | reading and interpreting PETSIRD data (supported features, ADPs, efficiencies, TOF, events) |
 | `reconstruction.py` | image grid, sensitivity image and LM OSEM reconstruction |
+| `histo_images.py` | TOF histo-images: events at the center of their TOF bin, splatting into an image |
 | `randoms.py` | randoms model (product of singles), fans of the detection bins, Casey-type and ML estimation of the singles from the delayeds, randoms from singles histograms |
 | `geometry_plots.py` | visualization of the PETSIRD geometry and of events |
 | `viewer.py` | interactive 3-axis viewer |

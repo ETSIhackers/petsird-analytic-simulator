@@ -92,6 +92,12 @@ jobs:
             --attenuation_image "$OUT_DIR/attenuation_image.npy" \
             --randoms_from_singles
 
+      - name: TOF histo-images of the prompts and delayeds
+        working-directory: python
+        run: |
+          python 04_tof_histo_image.py "$OUT_DIR/simulated_petsird_lm_file.bin" --img_shape 55 55 19 --skip_plots
+          python 04_tof_histo_image.py "$OUT_DIR/simulated_petsird_lm_file.bin" --img_shape 55 55 19 --skip_plots --stream delayeds --tof_position uniform
+
       - name: Check PETSIRD file and reconstructions
         run: |
           python tests/check_simulation_and_recon.py "$OUT_DIR"
