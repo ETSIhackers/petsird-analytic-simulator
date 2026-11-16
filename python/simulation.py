@@ -16,7 +16,7 @@ from parallelproj.tof import TOFParameters
 
 from efficiencies import EfficiencyModel, to_petsird_detection_efficiencies
 from scanner import ScannerConfig, create_petsird_scanner_geometry, crystal_bulk_material
-from utils import FWHM_PER_SIGMA, petsird_fast, resolve_petsird_backend
+from utils import FWHM_PER_SIGMA, Progress, petsird_fast, resolve_petsird_backend
 
 
 def tof_parameters(
@@ -380,10 +380,11 @@ def write_petsird_file(
     if delayeds is not None:
         delayed_chunks = np.array_split(np.array(delayeds).T, num_time_blocks)
 
+    progress = Progress("Writing time blocks (petsird)", total=len(chunks))
+    num_written = 0
     with petsird.BinaryPETSIRDWriter(str(fname)) as writer:
         writer.write_header(header)
         for i_t, chunk in enumerate(chunks):
-            print(f"Writing time block {i_t + 1}/{len(chunks)}")
             delayed_events = [[to_events(delayed_chunks[i_t])]] if delayeds is not None else []
             time_interval = petsird.TimeInterval(
                 start=i_t * time_block_duration_ms, stop=(i_t + 1) * time_block_duration_ms
@@ -410,6 +411,9 @@ def write_petsird_file(
                     )
                 )
             writer.write_time_blocks(tuple(time_blocks))
+            num_written += len(chunk) + (len(delayed_chunks[i_t]) if delayeds is not None else 0)
+            progress.update(1, events=num_written)
+    progress.close()
 
 
 def _write_petsird_file_fast(
@@ -421,9 +425,10 @@ def _write_petsird_file_fast(
     if delayeds is not None:
         delayed_chunks = np.array_split(np.arange(delayeds[0].size), num_time_blocks)
 
+    progress = Progress("Writing time blocks (petsird_fast)", total=len(chunks))
+    num_written = 0
     with petsird_fast.TimeBlockWriter(fname, header) as writer:
         for i_t, idx in enumerate(chunks):
-            print(f"Writing time block {i_t + 1}/{len(chunks)} (petsird_fast)")
             start, stop = i_t * time_block_duration_ms, (i_t + 1) * time_block_duration_ms
             sl = slice(idx[0], idx[-1] + 1) if idx.size > 0 else slice(0, 0)
             prompts = {(0, 0): (det_bin_0[sl], det_bin_1[sl], tof_idx[sl])}
@@ -436,3 +441,6 @@ def _write_petsird_file_fast(
             if singles_counts is not None:
                 writer.add_singles_histogram_time_block(start, stop, [singles_counts[i_t]])
             writer.flush()
+            num_written += idx.size + (delayed_chunks[i_t].size if delayeds is not None else 0)
+            progress.update(1, events=num_written)
+    progress.close()

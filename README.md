@@ -148,7 +148,7 @@ Detection Efficiency Parameters:
 
 Time Block Configuration:
   --num_time_blocks NUM_TIME_BLOCKS
-                        number of time blocks to split the data into (default: 3)
+                        number of time blocks to split the data into (default: 100)
   --event_block_duration EVENT_BLOCK_DURATION
                         duration of each time block in ms (default: 100)
 

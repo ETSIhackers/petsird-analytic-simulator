@@ -152,7 +152,7 @@ efficiency_group.add_argument(
 
 time_group = parser.add_argument_group("Time Block Configuration")
 time_group.add_argument(
-    "--num_time_blocks", type=int, default=3, help="number of time blocks to split the data into"
+    "--num_time_blocks", type=int, default=100, help="number of time blocks to split the data into"
 )
 time_group.add_argument(
     "--event_block_duration", type=int, default=100, help="duration of each time block in ms"

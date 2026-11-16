@@ -12,7 +12,7 @@ import numpy as np
 import petsird
 from parallelproj.tof import TOFParameters
 
-from utils import FWHM_PER_SIGMA, petsird_fast, resolve_petsird_backend
+from utils import FWHM_PER_SIGMA, Progress, petsird_fast, resolve_petsird_backend
 
 # NOTE on conventions used in this module (PETSIRD >= 0.13):
 # - a DetectionBin of a module type encodes
@@ -525,7 +525,10 @@ def _read_time_blocks_yardl(
         return sum(_num_events(x) for x in nested)
 
     num_skipped = 0
+    num_read_events = 0
+    progress = Progress("Reading time blocks (petsird)")
     for i_t, time_block in enumerate(reader.read_time_blocks()):
+        progress.update(1, events=num_read_events)
         if time_range_ms is not None:
             interval = time_block.value.time_interval
             if interval.start < time_range_ms[0] or interval.stop > time_range_ms[1]:
@@ -578,12 +581,6 @@ def _read_time_blocks_yardl(
             _IGNORED_NAMES["quadruple_events"], _num_events(time_block.value.quadruple_events)
         )
 
-        if verbose:
-            interval = time_block.value.time_interval
-            print(
-                f"Processing time block {i_t} with time interval {interval.start} ... {interval.stop}"
-            )
-
         for stream, nested_events in (
             ("prompts", time_block.value.prompt_events),
             ("delayeds", time_block.value.delayed_events),
@@ -594,12 +591,16 @@ def _read_time_blocks_yardl(
                 events = nested_events[m1][m2]
                 if len(events) == 0:
                     continue
+                num_read_events += len(events)
                 chunks[stream][(m1, m2)].append(
                     np.array(
                         [(e.detection_bins[0], e.detection_bins[1], e.tof_idx) for e in events],
                         dtype=np.uint32,
                     )
                 )
+
+    progress.update(0, events=num_read_events)
+    progress.close()
 
     raw_events: dict[str, RawEvents] = {}
     for stream, per_pair in chunks.items():
@@ -628,14 +629,63 @@ _IGNORED_NAMES = {
 }
 
 
+def _read_petsird_fast_chunks(
+    fname: str, time_range_ms: tuple[int, int] | None, chunk_size: int = 10
+) -> dict:
+    """petsird_fast.read_time_blocks() in chunks of time blocks (with progress display)"""
+    progress = Progress("Reading time blocks (petsird_fast)")
+    chunks = []
+    num_events = 0
+    for chunk in petsird_fast.iter_time_blocks(fname, chunk_size, time_range_ms):
+        chunks.append(chunk)
+        num_events += sum(
+            a["det_bin0"].size for s in ("prompts", "delayeds") for a in chunk[s].values()
+        )
+        progress.update(chunk["num_time_blocks"], events=num_events)
+    progress.close()
+    if not chunks:
+        return petsird_fast.read_time_blocks(fname, time_range_ms)
+
+    merged: dict = {"other": {}, "num_skipped_time_blocks": 0}
+    for stream in ("prompts", "delayeds"):
+        merged[stream] = {
+            pair: {
+                name: np.concatenate([c[stream][pair][name] for c in chunks])
+                for name in ("det_bin0", "det_bin1", "tof_idx")
+            }
+            for pair in chunks[0][stream]
+        }
+    # singles histograms of all chunks that contain singles time blocks
+    with_singles = [c for c in chunks if c["singles"]["start"].size > 0]
+    num_types = len(chunks[0]["singles"]["counts"])
+    merged["singles"] = {
+        "counts": [
+            np.concatenate([c["singles"]["counts"][m] for c in with_singles])
+            if with_singles
+            else np.zeros((0, 0), dtype=np.uint64)
+            for m in range(num_types)
+        ],
+        "start": np.concatenate([c["singles"]["start"] for c in chunks]),
+        "stop": np.concatenate([c["singles"]["stop"] for c in chunks]),
+    }
+    for c in chunks:
+        merged["num_skipped_time_blocks"] += c["num_skipped_time_blocks"]
+        for name, n in c["other"].items():
+            merged["other"][name] = merged["other"].get(name, 0) + n
+    return merged
+
+
 def _read_time_blocks_petsird_fast(
     fname: str,
     scanner_info: petsird.ScannerInformation,
     time_range_ms: tuple[int, int] | None = None,
 ) -> tuple[dict[str, RawEvents], dict[str, np.ndarray], dict[str, int], int]:
     """raw events, singles histograms, ignored content and number of skipped time blocks
-    (yardl-generated C++ code via the optional package petsird_fast)"""
-    data = petsird_fast.read_time_blocks(fname, time_range_ms)
+    (yardl-generated C++ code via the optional package petsird_fast)
+
+    The file is read in chunks of time blocks to be able to show the progress.
+    """
+    data = _read_petsird_fast_chunks(fname, time_range_ms)
     other = dict(data["other"])
 
     if other.pop("weighted_event_time_blocks", 0) > 0:

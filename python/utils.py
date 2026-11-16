@@ -2,6 +2,8 @@
 
 import hashlib
 import os
+import sys
+import time
 import warnings
 from collections.abc import Callable
 from importlib.metadata import version
@@ -119,3 +121,50 @@ def load_or_compute(
         tmp_path.unlink(missing_ok=True)
     print(f"Saved {description} to {path}")
     return result
+
+
+class Progress:
+    """single-line progress display (updated in place, at most every 0.2 s)
+
+    Usage:
+        progress = Progress("Writing time blocks", total=100)
+        for ...:
+            progress.update(1, events=num_events_so_far)
+        progress.close()
+
+    Without total (e.g. reading a PETSIRD file, whose number of time blocks is unknown
+    in advance), the count, the events and the elapsed time are shown.
+    """
+
+    def __init__(self, description: str, total: int | None = None, unit: str = "time blocks"):
+        self.description = description
+        self.total = total
+        self.unit = unit
+        self.count = 0
+        self.events = 0
+        self._start = time.perf_counter()
+        self._last_print = 0.0
+
+    def _line(self) -> str:
+        elapsed = time.perf_counter() - self._start
+        count = f"{self.count}/{self.total}" if self.total else f"{self.count}"
+        percent = f" ({100 * self.count / self.total:3.0f}%)" if self.total else ""
+        rate = f", {self.events / elapsed / 1e6:.1f} M events/s" if elapsed > 0 and self.events else ""
+        return (
+            f"{self.description}: {count} {self.unit}{percent}, "
+            f"{self.events:,} events, {elapsed:.1f} s{rate}"
+        )
+
+    def update(self, n: int = 1, events: int | None = None) -> None:
+        self.count += n
+        if events is not None:
+            self.events = events
+        now = time.perf_counter()
+        if now - self._last_print > 0.2 or (self.total and self.count >= self.total):
+            self._last_print = now
+            sys.stdout.write("\r" + self._line())
+            sys.stdout.flush()
+
+    def close(self) -> None:
+        sys.stdout.write("\r" + self._line() + "\n")
+        sys.stdout.flush()
