@@ -316,6 +316,25 @@ def detection_bin_offsets(scanner_info: petsird.ScannerInformation) -> np.ndarra
     return np.concatenate([[0], np.cumsum(num_bins)]).astype(np.int64)
 
 
+def first_events(
+    events: dict[str, np.ndarray], scanner_info: petsird.ScannerInformation, num_events: int
+) -> np.ndarray:
+    """the first events of events read with read_listmode_events() in the format of
+    geometry_plots.read_first_events(): array of shape (num_events, 5) with the columns
+    (module type 0, module type 1, detection bin 0, detection bin 1, tof_idx)
+
+    (for multiple module types, the events are ordered by module type pair)
+    """
+    offsets = detection_bin_offsets(scanner_info)
+    columns = []
+    for name in ("det_bin0", "det_bin1"):
+        global_bins = events[name][:num_events]
+        module_type = np.searchsorted(offsets, global_bins, side="right") - 1
+        columns += [module_type, global_bins - offsets[module_type]]
+    m0, b0, m1, b1 = columns
+    return np.stack([m0, m1, b0, b1, events["tof_bins"][:num_events]], axis=1).astype(np.int64)
+
+
 # names of the arrays describing listmode events (see read_listmode_events)
 EVENT_ARRAYS = (
     "coords0",

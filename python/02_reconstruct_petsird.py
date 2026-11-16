@@ -22,9 +22,10 @@ import petsird
 from parallelproj.operators import GaussianFilterOperator
 from parallelproj.projectors import ListmodePETProjector
 
-from geometry_plots import plot_petsird_geometry, read_first_events
+from geometry_plots import plot_petsird_geometry
 from petsird_reader import (
     check_header_support,
+    first_events,
     get_all_detector_centers,
     get_num_data_bins,
     get_tof_parameters,
@@ -456,11 +457,10 @@ print(f"LM OSEM recon saved to {opath}")
 # PETSIRD geometry and the first events (on top of the recon)
 
 num_events_to_show = 8
-geometry_reader = petsird.BinaryPETSIRDReader(str(fname))
-geometry_reader.read_header()
 fig_geom = plot_petsird_geometry(
     scanner_info,
-    events=read_first_events(geometry_reader, num_events_to_show),
+    # the first prompts (of the selected time range) that were read already
+    events=first_events(all_events["prompts"], scanner_info, num_events_to_show),
     background=(
         parallelproj.to_numpy_array(recon),
         voxel_size,

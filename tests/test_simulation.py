@@ -182,3 +182,24 @@ def test_read_time_range(tmp_path, tiny_config, tiny_efficiency_model, tiny_tof_
         np.testing.assert_array_equal(events["delayeds"]["det_bin1"], delayeds[1][3:])
         np.testing.assert_array_equal(events["singles"]["counts"], singles[1:])
         np.testing.assert_array_equal(events["singles"]["durations_ms"], [50, 50])
+
+
+def test_first_events_match_read_first_events(tmp_path, tiny_config, tiny_efficiency_model, tiny_tof_params):
+    """the first events taken from read_listmode_events() == read from the file"""
+    from geometry_plots import read_first_events
+    from petsird_reader import first_events
+    from simulation import create_petsird_header
+
+    header = create_petsird_header(tiny_config, tiny_efficiency_model, tiny_tof_params, 20.0)
+    rng = np.random.default_rng(1)
+    prompts = (rng.integers(40, 48, 30), rng.integers(0, 8, 30), rng.integers(0, 3, 30))
+    fname = tmp_path / "first.bin"
+    write_petsird_file(fname, header, *prompts, 2, 50)
+
+    reader = petsird.BinaryPETSIRDReader(str(fname))
+    h = reader.read_header()
+    ref = read_first_events(reader, 8)
+    reader = petsird.BinaryPETSIRDReader(str(fname))
+    h = reader.read_header()
+    events = read_listmode_events(reader, h, get_all_detector_centers(h.scanner.scanner_geometry))
+    np.testing.assert_array_equal(first_events(events["prompts"], h.scanner, 8), ref)
