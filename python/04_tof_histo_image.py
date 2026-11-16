@@ -27,6 +27,7 @@ from petsird_reader import (
 )
 from reconstruction import default_image_grid
 from parallelproj.operators import GaussianFilterOperator
+from parallelproj.projectors import ListmodePETProjector
 
 from utils import FWHM_PER_SIGMA, PETSIRD_BACKENDS, lm_file_fingerprint, resolve_petsird_backend
 from viewer import show_vol_cuts
@@ -88,6 +89,13 @@ parser.add_argument(
     default="auto",
     help="read the time blocks with petsird (yardl Python) or petsird_fast (C++)",
 )
+parser.add_argument(
+    "--attenuation_image",
+    type=str,
+    default=None,
+    help="attenuation image (1/mm, same grid as the histo-image) to correct every event for "
+    "the attenuation of its LOR (weight 1 / exp(-line integral))",
+)
 parser.add_argument("--skip_plots", action="store_true", help="do not show the viewer")
 args = parser.parse_args()
 
@@ -121,10 +129,28 @@ if num_events == 0:
     raise ValueError(f"no {args.stream} in the file (or in the selected time range)")
 
 weights = None
+if args.efficiency_weighted or args.attenuation_image is not None:
+    weights = np.ones(events["coords0"].shape[0])
+if args.attenuation_image is not None:
+    att_img = np.load(args.attenuation_image).astype(np.float32)
+    if att_img.shape != img_shape:
+        raise ValueError(
+            f"attenuation image shape {att_img.shape} does not match image shape {img_shape}"
+        )
+    # attenuation factors exp(-int mu) of the (non-TOF) LORs of all events
+    att_proj = ListmodePETProjector(
+        np.ascontiguousarray(events["coords0"]),
+        np.ascontiguousarray(events["coords1"]),
+        img_shape,
+        voxel_size,
+        img_origin=np.asarray(img_origin, dtype=np.float32),
+    )
+    weights = weights / np.exp(-att_proj(att_img))
+    print(f"Attenuation correction: mean correction factor {weights.mean():.3f}")
 if args.efficiency_weighted:
     valid = events["effs"] > 0
     events = {k: v[valid] for k, v in events.items()}
-    weights = 1.0 / events["effs"]
+    weights = weights[valid] / events["effs"]
 
 positions = tof_bin_center_positions(
     events["coords0"],
@@ -150,6 +176,10 @@ if args.tof_position == "uniform":
     tag += "_uniform"
 if args.postfilter_fwhm_mm > 0:
     tag += f"_fwhm{args.postfilter_fwhm_mm:g}mm"
+if args.attenuation_image is not None:
+    tag += "_ac"
+if args.efficiency_weighted:
+    tag += "_effs"
 if time_range is not None:
     tag += f"_t{time_range[0]}-{time_range[1]}ms"
 opath = fname.with_name(f"{fname.stem}_tof_histo_image_{args.stream}_{tag}.npy")

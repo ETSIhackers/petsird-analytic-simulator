@@ -37,6 +37,7 @@ from randoms import (
     coincidence_window_ns,
     randoms_from_singles_of_events,
     randoms_from_singles_total,
+    static_singles_from_singles_histograms,
     delayeds_fan_sums,
     detection_bin_fans,
     ml_singles,
@@ -109,9 +110,14 @@ randoms_group.add_argument(
 )
 randoms_group.add_argument(
     "--randoms_from_singles",
-    action="store_true",
+    nargs="?",
+    const="static",
+    choices=["static", "time_blocks"],
+    default=None,
     help="randoms correction with the randoms calculated from the singles histograms "
-    "(2 tau S_a S_b, the coincidence window 2 tau is assumed to be the range of the TOF bins)",
+    "(2 tau S_a S_b, the coincidence window 2 tau is assumed to be the range of the TOF "
+    "bins); static (default): singles summed over all time blocks (constant singles "
+    "rates, fast), time_blocks: 2 tau sum_k C_a,k C_b,k / dt_k (time-varying rates)",
 )
 randoms_group.add_argument(
     "--randoms_expectation",
@@ -379,24 +385,31 @@ elif args.randoms_from_singles:
         )
     window_ns = coincidence_window_ns(scanner_info.tof_bin_edges[0][0].edges)
     durations_ns = singles_hists["durations_ms"] * 1e6
-    contamination_list = randoms_from_singles_of_events(
-        singles_hists["counts"],
-        durations_ns,
-        window_ns,
-        events["det_bin0"],
-        events["det_bin1"],
-        num_tofbins,
-        tof,
-    )
-    contamination_sum = randoms_from_singles_total(
-        fans, singles_hists["counts"], durations_ns, window_ns
-    )
-    print(
-        f"Randoms from singles (coincidence window {window_ns:.3f} ns from the TOF bins): "
-        f"{contamination_sum:.4e} expected randoms in total, "
-        f"mean per event {contamination_list.mean():.3e}"
-    )
-    randoms_tag = "_randoms_singles"
+    if args.randoms_from_singles == "static":
+        # constant singles rates: product of the summed singles (one product per event)
+        randoms_singles = static_singles_from_singles_histograms(
+            singles_hists["counts"], durations_ns, window_ns
+        )
+        randoms_tag = "_randoms_singles"
+    else:
+        contamination_list = randoms_from_singles_of_events(
+            singles_hists["counts"],
+            durations_ns,
+            window_ns,
+            events["det_bin0"],
+            events["det_bin1"],
+            num_tofbins,
+            tof,
+        )
+        contamination_sum = randoms_from_singles_total(
+            fans, singles_hists["counts"], durations_ns, window_ns
+        )
+        print(
+            f"Randoms from singles per time block (coincidence window {window_ns:.3f} ns "
+            f"from the TOF bins): {contamination_sum:.4e} expected randoms in total, "
+            f"mean per event {contamination_list.mean():.3e}"
+        )
+        randoms_tag = "_randoms_singles_time_blocks"
 elif num_delayeds > 0:
     warnings.warn(
         f"The file contains {num_delayeds} delayed coincidences, but randoms are not "

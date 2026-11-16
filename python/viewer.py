@@ -10,6 +10,25 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.widgets import Slider, TextBox
 from parallelproj import Array, to_numpy_array
+from parallelproj.operators import GaussianFilterOperator
+
+# ratio between the FWHM and the standard deviation of a Gaussian
+_FWHM_PER_SIGMA = 2 * np.sqrt(2 * np.log(2))
+
+
+def gaussian_filter_mm(
+    vol: np.ndarray, fwhm_mm: float, voxel_size: tuple[float, float, float]
+) -> np.ndarray:
+    """isotropic Gaussian filter (FWHM in mm) of a 3D volume or of every 3D volume of a 4D
+    array (along the last three axes with voxel_size)"""
+    if fwhm_mm <= 0:
+        return vol
+    sigma = fwhm_mm / (_FWHM_PER_SIGMA * np.asarray(voxel_size, dtype=np.float64))
+    op = GaussianFilterOperator(vol.shape[-3:], sigma=sigma)
+    data = np.asarray(vol, dtype=np.float32)
+    if vol.ndim == 3:
+        return np.asarray(op(data))
+    return np.stack([np.asarray(op(v)) for v in data])
 
 
 def show_vol_cuts(
@@ -57,6 +76,9 @@ def show_vol_cuts(
         bottom, matching the scanner coordinate convention.
     figsize : tuple, optional
         Figure size in inches.
+
+    The box "FWHM [mm]" applies an isotropic Gaussian filter with the given FWHM (using
+    voxel_size) to the displayed volume (0: original volume).
 
     Returns
     -------
@@ -128,25 +150,28 @@ def show_vol_cuts(
         # rows: images | leading slider (+ its slice-entry) | 3 sliders |
         #       3 slice-entry boxes | vmin/vmax/cmap | colorbar
         gs = fig.add_gridspec(
-            6, 3, height_ratios=[8, 1, 1, 1, 1, 0.5], hspace=0.6, wspace=0.35
+            7, 3, height_ratios=[8, 1, 1, 1, 1, 1, 0.5], hspace=0.6, wspace=0.35
         )
         ax_s0 = fig.add_subplot(gs[1, 0:2])
         ax_ntb0 = fig.add_subplot(gs[1, 2])  # leading-axis slice entry
         ax_sl = [fig.add_subplot(gs[2, c]) for c in range(3)]
         ax_ntb = [fig.add_subplot(gs[3, c]) for c in range(3)]
         ax_tb = [fig.add_subplot(gs[4, c]) for c in range(3)]
-        ax_cb = fig.add_subplot(gs[5, :])
+        ax_flt = fig.add_subplot(gs[5, 0])
+        ax_cb = fig.add_subplot(gs[6, :])
     else:
-        # rows: images | 3 sliders | 3 slice-entry boxes | vmin/vmax/cmap | colorbar
+        # rows: images | 3 sliders | 3 slice-entry boxes | vmin/vmax/cmap | filter |
+        #       colorbar
         gs = fig.add_gridspec(
-            5, 3, height_ratios=[8, 1, 1, 1, 0.5], hspace=0.6, wspace=0.35
+            6, 3, height_ratios=[8, 1, 1, 1, 1, 0.5], hspace=0.6, wspace=0.35
         )
         ax_s0 = None
         ax_ntb0 = None
         ax_sl = [fig.add_subplot(gs[1, c]) for c in range(3)]
         ax_ntb = [fig.add_subplot(gs[2, c]) for c in range(3)]
         ax_tb = [fig.add_subplot(gs[3, c]) for c in range(3)]
-        ax_cb = fig.add_subplot(gs[4, :])
+        ax_flt = fig.add_subplot(gs[4, 0])
+        ax_cb = fig.add_subplot(gs[5, :])
 
     ax_im = [fig.add_subplot(gs[0, c]) for c in range(3)]
 
@@ -161,11 +186,15 @@ def show_vol_cuts(
     panel_xlabels = [ly, lx, lx]
     panel_ylabels = [lz, lz, ly]
 
+    # displayed volume (the original or a filtered version of it)
+    _state = {"vol": vol}
+
     # per-panel cut extractor: panel 0 depends on ix, panel 1 on iy, panel 2 on iz
     def _panel_cut(c, i0, ix, iy, iz):
+        v = _state["vol"]
         if is_4d:
-            return (vol[i0, ix, :, :], vol[i0, :, iy, :], vol[i0, :, :, iz])[c].T
-        return (vol[ix, :, :], vol[:, iy, :], vol[:, :, iz])[c].T
+            return (v[i0, ix, :, :], v[i0, :, iy, :], v[i0, :, :, iz])[c].T
+        return (v[ix, :, :], v[:, iy, :], v[:, :, iz])[c].T
 
     ims = [
         ax_im[c].imshow(
@@ -343,6 +372,21 @@ def show_vol_cuts(
 
     tb_cmap.on_submit(update_cmap)
 
+    # isotropic Gaussian filter of the displayed volume (FWHM in mm, 0: original)
+    tb_filter = TextBox(ax_flt, "FWHM [mm]", initial="0")
+
+    def update_filter(text):
+        try:
+            fwhm = max(0.0, float(text))
+        except ValueError:
+            fwhm = 0.0
+        tb_filter.text_disp.set_text(f"{fwhm:g}")
+        _state["vol"] = gaussian_filter_mm(vol, fwhm, voxel_size)
+        _render([0, 1, 2])
+        fig.canvas.draw_idle()
+
+    tb_filter.on_submit(update_filter)
+
     widgets = {
         f"s_{lx}": sx,
         f"s_{ly}": sy,
@@ -350,6 +394,7 @@ def show_vol_cuts(
         "tb_vmin": tb_vmin,
         "tb_vmax": tb_vmax,
         "tb_cmap": tb_cmap,
+        "tb_filter": tb_filter,
         # keep a strong ref to the click callback (also handy for tests)
         "on_click": _on_click,
     }

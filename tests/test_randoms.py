@@ -146,3 +146,22 @@ def test_randoms_from_singles_total(tiny_fans):
     durations = np.array([1e8, 2e8])
     ref = sum(tiny_fans.pair_sum(c) / t for c, t in zip(counts, durations)) * 0.7
     np.testing.assert_allclose(randoms_from_singles_total(tiny_fans, counts, durations, 0.7), ref)
+
+
+def test_static_singles_equal_time_blocks_for_constant_rates():
+    """for constant singles rates (noise-free counts), the static estimate (summed singles)
+    equals the per-time-block estimate"""
+    from randoms import randoms_from_singles_of_events, randoms_of_events, static_singles_from_singles_histograms
+
+    rates = np.array([0.0, 1e-4, 3e-4, 2e-4])  # per ns
+    durations = np.array([1e8, 2e8, 1e8])
+    counts = rates[None, :] * durations[:, None]
+    d0, d1 = np.array([3, 2, 3]), np.array([1, 0, 2])
+    s = static_singles_from_singles_histograms(counts, durations, 1.02)
+    np.testing.assert_allclose(
+        randoms_of_events(s, d0, d1, 5, tof=True),
+        randoms_from_singles_of_events(counts, durations, 1.02, d0, d1, 5, tof=True),
+        rtol=1e-6,
+    )
+    # = 2 tau T S_a S_b
+    np.testing.assert_allclose(s[3] * s[1], 1.02 * durations.sum() * rates[3] * rates[1])

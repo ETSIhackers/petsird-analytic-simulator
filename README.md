@@ -316,8 +316,14 @@ file. Two estimators are available:
 The estimated singles are saved as
 `my_petsird_file_randoms_singles_<method>_<fingerprint>.npy`. For simulated data,
 `--randoms_from_singles` calculates the randoms from the singles histograms (per
-detection bin, level ALL) as `2 tau sum_k C_a,k C_b,k / dt_k` (singles counts `C` in
-time blocks `k` of duration `dt_k`). PETSIRD has no field for the coincidence window
+detection bin, level ALL). For static scans (constant singles rates, the default
+`--randoms_from_singles static`), the singles counts `C_a` are summed over all time
+blocks and the randoms are `2 tau C_a C_b / T` (acquisition time `T`): one product per
+event, like the estimates from the delayeds (about 100x faster than per time block for
+100 time blocks). `--randoms_from_singles time_blocks` uses
+`2 tau sum_k C_a,k C_b,k / dt_k` (singles counts `C` in time blocks `k` of duration
+`dt_k`), which is also correct for time-varying singles rates (e.g. decay, for which the
+static estimate is too low). PETSIRD has no field for the coincidence window
 `2 tau`, which is therefore assumed to be the range covered by the TOF bins (true for the
 simulated data; if TOF bins outside of the coincidence window are discarded, the randoms
 have to be rescaled accordingly). Only one event and one singles energy bin are
@@ -351,6 +357,10 @@ scanner axis). With exact TOF bin centers, the image therefore shows a spike / l
 these positions. `--tof_position uniform` places the events uniformly within their TOF
 bins instead, which removes most of this artifact. A (much faster) alternative that is
 often good enough is a Gaussian post filter of the image, `--postfilter_fwhm_mm FWHM`.
+`--attenuation_image att.npy` (1 / mm, on the grid of the histo-image) weights every
+event with the inverse attenuation factor `1 / exp(-int mu)` of its LOR. The histo-image
+is then approximately the activity times the geometric sensitivity without attenuation
+(it is not divided by the sensitivity).
 Non-TOF data are not supported.
 Options: `--efficiency_weighted` (weights 1 / efficiency), `--time_range_ms`,
 `--petsird_backend`.
@@ -382,7 +392,7 @@ flat modules (no installation needed, the scripts import them directly):
 | `histo_images.py` | TOF histo-images: events at the center of their TOF bin, splatting into an image |
 | `randoms.py` | randoms model (product of singles), fans of the detection bins, Casey-type and ML estimation of the singles from the delayeds, randoms from singles histograms |
 | `geometry_plots.py` | visualization of the PETSIRD geometry and of events |
-| `viewer.py` | interactive 3-axis viewer |
+| `viewer.py` | interactive 3-axis viewer (incl. a box to apply an isotropic Gaussian filter with a given FWHM in mm) |
 | `utils.py` | small generic helpers (version check, FWHM / sigma, file fingerprint, caching) |
 
 ## Tests

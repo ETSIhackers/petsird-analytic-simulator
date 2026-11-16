@@ -37,7 +37,9 @@ Randoms from singles histograms
 -------------------------------
 randoms_from_singles_of_events: E[R_ab] = 2 tau sum_k C_a,k C_b,k / dt_k from the
 singles counts C of all detection bins in time blocks k (coincidence window 2 tau from
-the TOF bin edges, see coincidence_window_ns)
+the TOF bin edges, see coincidence_window_ns); for static scans (constant singles rates)
+static_singles_from_singles_histograms: E[R_ab] = 2 tau C_a C_b / T with the singles
+counts summed over all time blocks (much faster)
 """
 
 from dataclasses import dataclass
@@ -295,3 +297,22 @@ def randoms_from_singles_total(
         fans.pair_sum(counts) / duration
         for counts, duration in zip(np.asarray(singles_counts, dtype=np.float64), durations_ns)
     )
+
+
+def static_singles_from_singles_histograms(
+    singles_counts: np.ndarray, durations_ns: np.ndarray, window_ns: float
+) -> np.ndarray:
+    """scaled singles s (E[R_ab] = s_a s_b, see module docstring) of a static scan from
+    singles histograms
+
+    For constant singles rates S_a (static activity distribution, no decay), the
+    randoms of the acquisition (time T) are 2 tau T S_a S_b and S_a = C_a / T with the
+    singles counts C_a summed over all time blocks, i.e. s_a = sqrt(2 tau / T) C_a.
+    This needs one product per event (like the estimates from the delayeds) instead of
+    one per event and time block (randoms_from_singles_of_events).
+    If the singles rates change over time with the same time course g(t) for all
+    detection bins (e.g. decay), the true randoms are larger by T int g^2 / (int g)^2 >= 1.
+    """
+    counts = np.asarray(singles_counts, dtype=np.float64).sum(axis=0)
+    total_time_ns = float(np.sum(durations_ns))
+    return np.sqrt(window_ns / total_time_ns) * counts
