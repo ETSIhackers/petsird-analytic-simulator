@@ -29,6 +29,7 @@ from parallelproj.projectors import ListmodePETProjector
 from efficiencies import generate_efficiency_model, lor_efficiencies
 from geometry_plots import plot_petsird_geometry
 from phantoms import PHANTOMS, create_phantom
+from randoms import randoms_of_events
 from scanner import ScannerConfig, create_parallelproj_lor_descriptor
 from reconstruction import histogram_mlem
 from simulation import (
@@ -332,6 +333,16 @@ petsird_delayeds = (
     )
     if args.random_fraction > 0
     else None
+)
+
+# true (noise-free) expected randoms in the data bin (pair of detection bins and TOF bin)
+# of every prompt, in the order of the prompts in the PETSIRD file (= additive
+# contamination of a TOF LM reconstruction)
+np.save(
+    output_dir / "prompts_randoms_expectation.npy",
+    randoms_of_events(
+        scaled_singles.ravel(), det_bin_0, det_bin_1, tof_params.num_tofbins, tof=True
+    ),
 )
 
 if not args.skip_plots:

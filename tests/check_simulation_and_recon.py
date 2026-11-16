@@ -17,6 +17,8 @@ reconstruction code:
 - the delayeds of all module pairs match the randoms expectation of the simulator
   (randoms_expectation.json: product of the singles of the detection bins) and are
   uniformly distributed over the TOF bins
+- the expected randoms of all prompts (prompts_randoms_expectation.npy) are consistent
+  with the singles of their detection bins (event order of the file)
 - a TOF LM back projection of the events in the PETSIRD file matches the one
   calculated by the simulator before writing (checks detection bin swapping and
   TOF bin mirroring)
@@ -215,6 +217,22 @@ def module_pair_randoms(singles: np.ndarray) -> np.ndarray:
     totals = singles.reshape(num_modules, -1).sum(1)
     return np.tril(module_coinc * np.outer(totals, totals), -1)
 
+
+# expected randoms of every prompt (in file order) written by the simulator
+prompts_randoms = np.load(out_dir / "prompts_randoms_expectation.npy")
+check(
+    prompts_randoms.shape == (num_events,)
+    and np.allclose(
+        prompts_randoms, true_singles[det_bin_0] * true_singles[det_bin_1] / num_tofbins, rtol=1e-5
+    ),
+    "expected randoms of all prompts (prompts_randoms_expectation.npy) match the singles "
+    "of their detection bins",
+)
+if random_fraction > 0:
+    check(
+        bool(np.all(prompts_randoms > 0)),
+        f"all prompts have positive expected randoms (mean {prompts_randoms.mean():.2e})",
+    )
 
 if delayeds:
     delayed_arr = np.asarray(delayeds)

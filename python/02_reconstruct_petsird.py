@@ -9,7 +9,6 @@ with a fingerprint of the listmode file and a hash of the reconstruction paramet
 """
 
 import argparse
-import json
 import warnings
 from pathlib import Path
 
@@ -99,8 +98,8 @@ randoms_group.add_argument(
     "--randoms_expectation",
     type=str,
     default=None,
-    help="Path to the (true) randoms expectation written by the simulator "
-    "(randoms_expectation.json) used for an 'oracle' randoms correction",
+    help="Path to the true (noise-free) expected randoms of all prompts written by the "
+    "simulator (prompts_randoms_expectation.npy) used for an 'oracle' randoms correction",
 )
 parser.add_argument(
     "--randoms_ml_iterations",
@@ -278,17 +277,28 @@ if not np.all(valid):
     print(f"Filtering out {np.count_nonzero(~valid)} events with zero efficiency ...")
     events = {k: v[valid] for k, v in events.items()}
 
-# additive contamination (randoms) of all events: the expected randoms of a pair of
-# detection bins (a, b) are s_a * s_b with the (scaled) singles s (see randoms.py)
+# additive contamination (randoms) of all events
 num_tofbins = scanner_info.tof_bin_edges[0][0].number_of_bins()
+contamination_list, contamination_sum = None, 0.0
 randoms_singles, randoms_tag = None, ""
 if args.randoms_expectation is not None:
-    # "oracle" randoms correction using the true singles of the simulator
-    with open(args.randoms_expectation, encoding="UTF-8") as f:
-        randoms_info = json.load(f)
-    if randoms_info["num_tofbins"] != num_tofbins:
-        raise ValueError("number of TOF bins of the randoms expectation and the data differ")
-    randoms_singles = np.asarray(randoms_info["singles"], dtype=np.float64)
+    # "oracle" randoms correction: the true expected randoms in the data bin (detection
+    # bins and TOF bin) of every prompt, in the order of the prompts in the file
+    if scanner_info.scanner_geometry.number_of_module_types() != 1:
+        # read_listmode_events() groups the events by module type pairs
+        raise ValueError("--randoms_expectation is only supported for one module type")
+    prompts_randoms = np.load(args.randoms_expectation)
+    if prompts_randoms.shape != valid.shape:
+        raise ValueError(
+            f"{prompts_randoms.shape[0]} expected randoms for {valid.shape[0]} prompts"
+        )
+    # non-TOF: the randoms of an event are the sum over all TOF bins of its LOR
+    contamination_list = (prompts_randoms[valid] * (1 if tof else num_tofbins)).astype(
+        np.float32
+    )
+    # the sum of the contamination over all data bins only enters the value of the
+    # log-likelihood (not the EM update) and is not known here
+    print(f"Oracle randoms correction, mean per event {contamination_list.mean():.3e}")
     randoms_tag = "_randoms_oracle"
 elif args.randoms_from_delayeds is not None:
     delayeds = all_events["delayeds"]
@@ -316,8 +326,9 @@ elif num_delayeds > 0:
         UserWarning,
     )
 
-contamination_list, contamination_sum = None, 0.0
 if randoms_singles is not None:
+    # the expected randoms of a pair of detection bins (a, b) are s_a * s_b with the
+    # (scaled) singles s (see randoms.py)
     if randoms_singles.shape != (fans.num_bins,):
         raise ValueError(
             f"singles of {randoms_singles.shape} detection bins do not match the "

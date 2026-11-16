@@ -39,6 +39,7 @@ data/sim_uniform_cylinder_4000000_0
 |-- ground_truth_image.npy
 |-- petsird_geometry_and_events.png
 |-- petsird_summary.txt
+|-- prompts_randoms_expectation.npy
 |-- randoms_expectation.json
 |-- reference_sensitivity_image.npy
 |-- sim_parameters.json
@@ -52,6 +53,7 @@ data/sim_uniform_cylinder_4000000_0
 | `ground_truth_image.npy` | ground truth activity image, i.e. **before** the image-based resolution model (`--fwhm_mm`) which is part of the forward model of the simulation |
 | `attenuation_image.npy` | attenuation image (1 / mm) of the water body of the phantom, to be used for attenuation correction |
 | `reference_sensitivity_image.npy` | sensitivity image of the forward model of the simulation (efficiencies, attenuation, image-based resolution model) |
+| `prompts_randoms_expectation.npy` | true (noise-free) expected randoms in the data bin (pair of detection bins and TOF bin) of every prompt, in the order of the prompts in the PETSIRD file: the additive contamination of a TOF LM reconstruction (multiply by the number of TOF bins for non-TOF) |
 | `randoms_expectation.json` | true (noise-free) expectation of the randoms: random fraction, expected trues and randoms, (scaled) singles of all detection bins (to test randoms corrections and estimations) |
 | `petsird_summary.txt` | human-readable summary of the PETSIRD file (output of `petsird.helpers.analysis`) |
 | `petsird_geometry_and_events.png` | visualization of the PETSIRD geometry and the first events (see below) |
@@ -277,8 +279,8 @@ file. Two estimators are available:
 
 The estimated singles are saved as
 `my_petsird_file_randoms_singles_<method>_<fingerprint>.npy`. For simulated data,
-`--randoms_expectation randoms_expectation.json` uses the true singles instead
-("oracle" randoms correction). Without randoms correction, the reconstruction of data
+`--randoms_expectation prompts_randoms_expectation.npy` uses the true expected randoms
+of all prompts written by the simulator instead ("oracle" randoms correction). Without randoms correction, the reconstruction of data
 with randoms is biased (a warning is shown). Detection bins without delayeds get
 zero singles (which is the ML estimate), and the LM OSEM then uses a small eps in the
 expected counts of all events (only needed for very low numbers of delayeds).
