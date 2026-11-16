@@ -26,7 +26,9 @@ from petsird_reader import (
     read_listmode_events,
 )
 from reconstruction import default_image_grid
-from utils import PETSIRD_BACKENDS, lm_file_fingerprint, resolve_petsird_backend
+from parallelproj.operators import GaussianFilterOperator
+
+from utils import FWHM_PER_SIGMA, PETSIRD_BACKENDS, lm_file_fingerprint, resolve_petsird_backend
 from viewer import show_vol_cuts
 
 parser = argparse.ArgumentParser(
@@ -59,6 +61,13 @@ parser.add_argument(
     "midpoints of many LORs coincide, e.g. the scanner center)",
 )
 parser.add_argument("--seed", type=int, default=0, help="random seed for --tof_position uniform")
+parser.add_argument(
+    "--postfilter_fwhm_mm",
+    type=float,
+    default=0.0,
+    help="FWHM (mm) of an isotropic Gaussian post filter of the histo-image (0: none); a "
+    "fast way to reduce noise and the aliasing of the TOF bin centers",
+)
 parser.add_argument(
     "--efficiency_weighted",
     action="store_true",
@@ -127,6 +136,10 @@ positions = tof_bin_center_positions(
 image, num_outside = splat(
     positions, img_shape, voxel_size, img_origin, weights=weights, interpolation=args.interpolation
 )
+if args.postfilter_fwhm_mm > 0:
+    image = GaussianFilterOperator(
+        img_shape, sigma=args.postfilter_fwhm_mm / (FWHM_PER_SIGMA * np.asarray(voxel_size))
+    )(image)
 print(
     f"TOF histo-image of {num_events:,} {args.stream} ({num_outside:,} outside of the image "
     f"{img_shape} with voxel size {voxel_size} mm)"
@@ -135,6 +148,8 @@ print(
 tag = lm_file_fingerprint(fname)
 if args.tof_position == "uniform":
     tag += "_uniform"
+if args.postfilter_fwhm_mm > 0:
+    tag += f"_fwhm{args.postfilter_fwhm_mm:g}mm"
 if time_range is not None:
     tag += f"_t{time_range[0]}-{time_range[1]}ms"
 opath = fname.with_name(f"{fname.stem}_tof_histo_image_{args.stream}_{tag}.npy")
@@ -153,8 +168,9 @@ for ax, cut, label in zip(
     ax.set_title(f"central {label} slice")
     fig.colorbar(im, ax=ax, shrink=0.8)
 fig.suptitle(
-    f"TOF histo-image ({args.stream}, {args.tof_position} TOF position, {args.interpolation}) "
-    f"of {fname.name}"
+    f"TOF histo-image ({args.stream}, {args.tof_position} TOF position, {args.interpolation}"
+    + (f", {args.postfilter_fwhm_mm:g} mm FWHM post filter" if args.postfilter_fwhm_mm > 0 else "")
+    + f") of {fname.name}"
 )
 fig.savefig(opath.with_suffix(".png"), dpi=150)
 

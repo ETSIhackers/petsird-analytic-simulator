@@ -349,7 +349,9 @@ The centers of all TOF bins of a LOR are anchored at the LOR midpoint, and on a 
 scanner the midpoints of many LORs coincide (e.g. at the scanner center and on the
 scanner axis). With exact TOF bin centers, the image therefore shows a spike / lines at
 these positions. `--tof_position uniform` places the events uniformly within their TOF
-bins instead, which removes most of this artifact. Non-TOF data are not supported.
+bins instead, which removes most of this artifact. A (much faster) alternative that is
+often good enough is a Gaussian post filter of the image, `--postfilter_fwhm_mm FWHM`.
+Non-TOF data are not supported.
 Options: `--efficiency_weighted` (weights 1 / efficiency), `--time_range_ms`,
 `--petsird_backend`.
 
