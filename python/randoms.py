@@ -1,5 +1,7 @@
 """randoms model and estimation of the randoms from delayed coincidences
 
+(theory: docs/randoms_estimation.md)
+
 Model
 -----
 The expected number of random coincidences of a pair of detection bins (a, b) in

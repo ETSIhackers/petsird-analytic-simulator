@@ -260,7 +260,8 @@ python 02_reconstruct_petsird.py my_petsird_file.bin --attenuation_image my_att_
 ```
 
 estimates the randoms from the delayed coincidences in the PETSIRD file and uses them
-as additive contamination in the LM OSEM reconstruction (see `python/randoms.py`).
+as additive contamination in the LM OSEM reconstruction (see `python/randoms.py` and
+the theory in [`docs/randoms_estimation.md`](docs/randoms_estimation.md)).
 The expected randoms of a pair of detection bins (a, b) in coincidence are modeled as
 `s_a * s_b` (uniform over the TOF bins), where the singles `s` are estimated from the
 fan sums of the delayeds `F_a` (number of delayeds of detection bin `a`). The fans
