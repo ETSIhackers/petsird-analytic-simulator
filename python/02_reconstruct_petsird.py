@@ -4,11 +4,14 @@ The building blocks are defined in
 - petsird_reader.py: reading and interpreting the PETSIRD data
 - reconstruction.py: image grid, sensitivity image, LM OSEM
 - randoms.py: randoms estimation from the delayed coincidences
-All cached / derived files are written next to the listmode file and are tagged
-with a fingerprint of the listmode file and a hash of the reconstruction parameters.
+All derived files (cached sensitivity image, backprojections, reconstructions, figures)
+are written next to the listmode file and are tagged with a fingerprint of the listmode
+file and a hash of the reconstruction parameters. The events are read from the listmode
+file in every run (fast if the optional package petsird_fast is installed).
 """
 
 import argparse
+import time
 import warnings
 from pathlib import Path
 
@@ -26,7 +29,6 @@ from petsird_reader import (
     get_num_data_bins,
     get_tof_parameters,
     petsird_fast_available,
-    EVENT_ARRAYS,
     UnsupportedPETSIRDFeatureError,
     read_listmode_events,
 )
@@ -149,26 +151,10 @@ def output_path(kind: str, suffix: str = ".npy", tag: str | None = None) -> Path
     return fname.with_name(f"{fname.stem}_{kind}_{tag or lm_fingerprint}{suffix}")
 
 
-def load_npz_list(path: Path) -> list[np.ndarray]:
-    with np.load(path) as data:
-        return [data[name] for name in data.files]
-
-
-def load_npz_dict(path: Path) -> dict[str, np.ndarray]:
-    with np.load(path) as data:
-        return {name: data[name] for name in data.files}
-
-
 # %%
 # average detection points (ADPs) of all detecting elements
 
-all_detector_centers = load_or_compute(
-    output_path("detector_centers", ".npz"),
-    compute=lambda: get_all_detector_centers(scanner_info.scanner_geometry),
-    save=lambda path, x: np.savez_compressed(path, *x),
-    load=load_npz_list,
-    description="detector centers",
-)
+all_detector_centers = get_all_detector_centers(scanner_info.scanner_geometry)
 
 # %%
 # image grid, resolution model, attenuation image
@@ -235,25 +221,12 @@ print(
     "Reading time blocks with "
     + ("petsird_fast (C++)" if petsird_fast_available() else "the yardl-generated Python code")
 )
-streams = ("prompts", "delayeds")
-# cached as flat dictionary with keys "<stream>_<array>"
-flat_events = load_or_compute(
-    output_path("listmode_data", ".npz"),
-    compute=lambda: {
-        f"{stream}_{k}": v
-        for stream, arrays in read_listmode_events(
-            reader, header, all_detector_centers, verbose=args.verbose, fname=str(fname)
-        ).items()
-        for k, v in arrays.items()
-    },
-    save=lambda path, x: np.savez_compressed(path, **x),
-    load=load_npz_dict,
-    description="preprocessed events",
+t_read = time.perf_counter()
+all_events = read_listmode_events(
+    reader, header, all_detector_centers, verbose=args.verbose, fname=str(fname)
 )
-all_events = {
-    stream: {k: flat_events[f"{stream}_{k}"] for k in EVENT_ARRAYS} for stream in streams
-}
-singles_hists = {k: flat_events[f"singles_{k}"] for k in ("counts", "durations_ms")}
+print(f"Read all time blocks in {time.perf_counter() - t_read:.1f} s")
+singles_hists = all_events["singles"]
 events = all_events["prompts"]
 num_delayeds = all_events["delayeds"]["coords0"].shape[0]
 print(

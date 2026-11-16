@@ -1,6 +1,8 @@
 """small generic helpers"""
 
 import hashlib
+import os
+import warnings
 from collections.abc import Callable
 from importlib.metadata import version
 from pathlib import Path
@@ -54,13 +56,32 @@ def load_or_compute(
     load: Callable[[Path], Any],
     description: str = "",
 ) -> Any:
-    """load a cached result from path if it exists, otherwise compute and save it"""
+    """load a cached result from path if it exists, otherwise compute and save it
+
+    The result is first saved to a temporary file in the same directory, which is
+    renamed to path afterwards, such that an interrupted run never leaves an incomplete
+    cache file behind. If a cache file can not be loaded (e.g. an incomplete file of an
+    older version), the result is recomputed and the cache file is replaced.
+    """
     path = Path(path)
     if path.exists():
         print(f"Loading {description} from {path}")
-        return load(path)
+        try:
+            return load(path)
+        except Exception as e:  # noqa: BLE001 - any error of a corrupt cache file
+            warnings.warn(
+                f"Could not load the cached {description} from {path} ({type(e).__name__}: "
+                f"{e}), recomputing it.",
+                UserWarning,
+            )
     print(f"Calculating {description} ...")
     result = compute()
-    save(path, result)
+    # same suffix (e.g. .npy / .npz) such that numpy does not append another one
+    tmp_path = path.with_name(f"{path.stem}.tmp{os.getpid()}{path.suffix}")
+    try:
+        save(tmp_path, result)
+        os.replace(tmp_path, path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
     print(f"Saved {description} to {path}")
     return result

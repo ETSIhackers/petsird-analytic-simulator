@@ -215,12 +215,13 @@ After the reconstruction, the same visualization of the PETSIRD geometry and the
 events is shown on top of the reconstructed image (and saved as
 `my_petsird_file_geometry_and_events_<fingerprint>_<hash>.png`).
 
-All files written by the reconstruction script (cached detector positions, events
-and sensitivity images, backprojections and reconstructions) are tagged with a
-fingerprint of the listmode file (`<fingerprint>`, computed from the file size and
-its first and last 4 MiB) and a hash of the reconstruction parameters (`<hash>`).
-Re-running a simulation into the same directory therefore never reuses cached files
-of the previous listmode file.
+All files written by the reconstruction script (cached sensitivity images,
+backprojections and reconstructions) are tagged with a fingerprint of the listmode file
+(`<fingerprint>`, computed from the file size and its first and last 4 MiB) and a hash
+of the reconstruction parameters (`<hash>`). Re-running a simulation into the same
+directory therefore never reuses cached files of the previous listmode file. Cache files
+are written atomically, and a cache file that can not be loaded is recomputed. The
+events are not cached: they are read from the listmode file in every run.
 
 ### NON-TOF NAC recon
 
