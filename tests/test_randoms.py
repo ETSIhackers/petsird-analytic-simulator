@@ -112,3 +112,37 @@ def test_randoms_of_events_units():
     non_tof = randoms_of_events(singles, np.array([2, 2]), np.array([1, 0]), num_tofbins=4, tof=False)
     np.testing.assert_allclose(non_tof, [1.0, 0.0])
     np.testing.assert_allclose(tof, non_tof / 4)
+
+
+def test_coincidence_window_from_tof_bin_edges():
+    """TOF bin edges are (t1 - t2) c / 2 in mm: a range of L mm is 2 L / c in time"""
+    from randoms import SPEED_OF_LIGHT_MM_PER_NS, coincidence_window_ns
+
+    edges = np.linspace(-150, 150, 11)
+    np.testing.assert_allclose(coincidence_window_ns(edges), 600 / SPEED_OF_LIGHT_MM_PER_NS)
+
+
+def test_randoms_from_singles_of_events():
+    """2 tau sum_k C_a,k C_b,k / dt_k, for noise-free counts of constant rates equal to
+    the scaled-singles model s_a s_b (s = sqrt(2 tau T) S)"""
+    from randoms import randoms_from_singles_of_events
+    from simulation import singles_rates
+
+    window, durations = 1.5, np.array([2e8, 1e8, 3e8])  # ns
+    scaled_singles = np.array([0.0, 0.4, 1.2, 2.0])
+    rates = singles_rates(scaled_singles, window, durations.sum())
+    counts = rates[None, :] * durations[:, None]
+    d0, d1 = np.array([3, 2, 3]), np.array([1, 0, 2])
+    non_tof = randoms_from_singles_of_events(counts, durations, window, d0, d1, 5, tof=False)
+    np.testing.assert_allclose(non_tof, scaled_singles[d0] * scaled_singles[d1], rtol=1e-6)
+    tof = randoms_from_singles_of_events(counts, durations, window, d0, d1, 5, tof=True)
+    np.testing.assert_allclose(tof, non_tof / 5, rtol=1e-6)
+
+
+def test_randoms_from_singles_total(tiny_fans):
+    from randoms import randoms_from_singles_total
+
+    counts = np.random.default_rng(3).poisson(50.0, (2, tiny_fans.num_bins)).astype(float)
+    durations = np.array([1e8, 2e8])
+    ref = sum(tiny_fans.pair_sum(c) / t for c, t in zip(counts, durations)) * 0.7
+    np.testing.assert_allclose(randoms_from_singles_total(tiny_fans, counts, durations, 0.7), ref)

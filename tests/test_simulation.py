@@ -119,18 +119,26 @@ def test_singles_model():
     np.testing.assert_allclose(s, [[0.5 + 0.3, 2 * (0.5 + 0.3)], [0.0, 0.5 + 0.9]])
 
 
-def test_write_read_delayeds(tmp_path, tiny_config, tiny_efficiency_model, tiny_tof_params):
-    """delayed coincidences are written (with the delayed policy) and read back"""
+def test_write_read_delayeds_and_singles(tmp_path, tiny_config, tiny_efficiency_model, tiny_tof_params):
+    """delayed coincidences (with the delayed policy) and singles histograms (level ALL)
+    are written and read back"""
     from simulation import create_petsird_header
 
     header = create_petsird_header(
-        tiny_config, tiny_efficiency_model, tiny_tof_params, 20.0, store_delayeds=True
+        tiny_config,
+        tiny_efficiency_model,
+        tiny_tof_params,
+        20.0,
+        store_delayeds=True,
+        store_singles=True,
     )
     assert header.scanner.delayed_event_policy == petsird.CoincidencePolicy.MULTIPLES_AS_ALL_COINCIDENCES
     prompts = (np.array([30, 40]), np.array([1, 2]), np.array([3, 4]))
     delayeds = (np.array([35, 41, 50]), np.array([5, 6, 7]), np.array([0, 1, 2]))
     fname = tmp_path / "delayeds.bin"
-    write_petsird_file(fname, header, *prompts, 2, 50, delayeds=delayeds)
+    num_bins = tiny_config.num_modules * tiny_config.num_det_els_per_module
+    singles = np.arange(2 * num_bins).reshape(2, num_bins)
+    write_petsird_file(fname, header, *prompts, 2, 50, delayeds=delayeds, singles_counts=singles)
 
     reader = petsird.BinaryPETSIRDReader(str(fname))
     h = reader.read_header()
@@ -138,3 +146,7 @@ def test_write_read_delayeds(tmp_path, tiny_config, tiny_efficiency_model, tiny_
     assert events["prompts"]["coords0"].shape[0] == 2
     assert events["delayeds"]["coords0"].shape[0] == 3
     np.testing.assert_array_equal(np.sort(events["delayeds"]["tof_bins"]), [0, 1, 2])
+    # singles histograms (one per time block)
+    assert h.scanner.singles_histogram_level == petsird.SinglesHistogramLevelType.ALL
+    np.testing.assert_array_equal(events["singles"]["counts"], singles)
+    np.testing.assert_array_equal(events["singles"]["durations_ms"], [50, 50])

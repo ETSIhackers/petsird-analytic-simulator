@@ -185,6 +185,15 @@ def randoms_expectation(
     return expected_randoms, scaled_singles
 
 
+def singles_rates(
+    scaled_singles: np.ndarray, coincidence_window_ns: float, acquisition_time_ns: float
+) -> np.ndarray:
+    """singles rates (per ns) S such that the expected randoms of a pair of detecting
+    elements over the acquisition, 2 tau T S_a S_b, are scaled_singles[a] * scaled_singles[b]
+    (constant rates, coincidence window 2 tau, acquisition time T)"""
+    return scaled_singles / np.sqrt(coincidence_window_ns * acquisition_time_ns)
+
+
 @dataclass
 class ListmodeEvents:
     """listmode events in the parallelproj convention (start module < end module)"""
@@ -277,8 +286,13 @@ def create_petsird_header(
     tof_fwhm_mm: float,
     num_energy_bins: int = 1,
     store_delayeds: bool = False,
+    store_singles: bool = False,
 ) -> petsird.Header:
-    """PETSIRD header of the simulated scanner (one module type)"""
+    """PETSIRD header of the simulated scanner (one module type)
+
+    store_singles: singles histograms of all detection bins (level ALL) with one
+    singles energy bin per event energy bin (same energy windows)
+    """
     tof_bin_edges = petsird.BinEdges(
         edges=np.linspace(
             -tof_params.num_tofbins * tof_params.tofbin_width / 2,
@@ -312,6 +326,9 @@ def create_petsird_header(
     scanner.prompt_event_policy = petsird.CoincidencePolicy.MULTIPLES_AS_ALL_COINCIDENCES
     if store_delayeds:
         scanner.delayed_event_policy = petsird.CoincidencePolicy.MULTIPLES_AS_ALL_COINCIDENCES
+    if store_singles:
+        scanner.singles_histogram_level = petsird.SinglesHistogramLevelType.ALL
+        scanner.singles_histogram_energy_bin_edges = [energy_bin_edges]
 
     exam = petsird.ExamInformation(
         modality="PT", patient=petsird.DICOMPatientInformation(patient_id="42")
@@ -328,12 +345,17 @@ def write_petsird_file(
     num_time_blocks: int,
     time_block_duration_ms: int,
     delayeds: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
+    singles_counts: np.ndarray | None = None,
 ) -> None:
     """write the coincidences (split evenly into time blocks) into a PETSIRD file
 
     det_bin_0, det_bin_1, tof_idx: prompt coincidences (see to_petsird_coincidences)
     delayeds: (det_bin_0, det_bin_1, tof_idx) of the delayed coincidences (optional,
     the header must have a delayed_event_policy != NONE)
+    singles_counts: singles counts of all detection bins in every time block, shape
+    (num_time_blocks, num_detection_bins) (optional, the header must have
+    singles_histogram_level ALL). They are written as a singles histogram time block with
+    the same time interval after every event time block.
     """
 
     def to_events(chunk):
@@ -351,17 +373,28 @@ def write_petsird_file(
         for i_t, chunk in enumerate(chunks):
             print(f"Writing time block {i_t + 1}/{len(chunks)}")
             delayed_events = [[to_events(delayed_chunks[i_t])]] if delayeds is not None else []
-            writer.write_time_blocks(
-                (
-                    petsird.TimeBlock.EventTimeBlock(
-                        petsird.EventTimeBlock(
-                            prompt_events=[[to_events(chunk)]],
-                            delayed_events=delayed_events,
-                            time_interval=petsird.TimeInterval(
-                                start=i_t * time_block_duration_ms,
-                                stop=(i_t + 1) * time_block_duration_ms,
-                            ),
-                        )
-                    ),
-                )
+            time_interval = petsird.TimeInterval(
+                start=i_t * time_block_duration_ms, stop=(i_t + 1) * time_block_duration_ms
             )
+            time_blocks = [
+                petsird.TimeBlock.EventTimeBlock(
+                    petsird.EventTimeBlock(
+                        prompt_events=[[to_events(chunk)]],
+                        delayed_events=delayed_events,
+                        time_interval=time_interval,
+                    )
+                )
+            ]
+            if singles_counts is not None:
+                time_blocks.append(
+                    petsird.TimeBlock.SinglesHistogramTimeBlock(
+                        petsird.SinglesHistogramTimeBlock(
+                            time_interval=time_interval,
+                            # one module type
+                            singles_per_detection_bin_histogram=[
+                                [int(c) for c in singles_counts[i_t]]
+                            ],
+                        )
+                    )
+                )
+            writer.write_time_blocks(tuple(time_blocks))

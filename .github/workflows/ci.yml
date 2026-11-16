@@ -81,6 +81,16 @@ jobs:
             --attenuation_image "$OUT_DIR/attenuation_image.npy" \
             --randoms_from_delayeds ml
 
+      - name: Reconstruct PETSIRD listmode data (TOF, attenuation and randoms correction from singles)
+        working-directory: python
+        run: |
+          python 02_reconstruct_petsird.py "$OUT_DIR/simulated_petsird_lm_file.bin" \
+            --img_shape 55 55 19 \
+            --num_epochs 1 \
+            --num_subsets 5 \
+            --attenuation_image "$OUT_DIR/attenuation_image.npy" \
+            --randoms_from_singles
+
       - name: Check PETSIRD file and reconstructions
         run: |
           python tests/check_simulation_and_recon.py "$OUT_DIR"

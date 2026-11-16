@@ -1,4 +1,4 @@
-"""randoms model and estimation of the randoms from delayed coincidences
+"""randoms model and estimation of the randoms from delayed coincidences and singles
 
 (theory: docs/randoms_estimation.md)
 
@@ -32,6 +32,12 @@ Estimators of the singles s from the fan sums of the delayeds F_a = sum_{b in fa
 - ml_singles: maximum likelihood estimate (Poisson model of the delayeds), fixed-point
   iterations with exact scale maximization (safeguarded by MM steps, monotone),
   initialized with the Casey-type estimate
+
+Randoms from singles histograms
+-------------------------------
+randoms_from_singles_of_events: E[R_ab] = 2 tau sum_k C_a,k C_b,k / dt_k from the
+singles counts C of all detection bins in time blocks k (coincidence window 2 tau from
+the TOF bin edges, see coincidence_window_ns)
 """
 
 from dataclasses import dataclass
@@ -226,3 +232,66 @@ def randoms_of_events(
     if tof:
         randoms = randoms / num_tofbins
     return randoms.astype(np.float32)
+
+
+# %%
+# randoms from singles histograms
+
+# speed of light in mm / ns
+SPEED_OF_LIGHT_MM_PER_NS = 299.792458
+
+
+def coincidence_window_ns(tof_bin_edges_mm: np.ndarray) -> float:
+    """total width 2 tau (ns) of the coincidence window, assuming that it is the range
+    covered by the TOF bins
+
+    PETSIRD TOF bin edges are given as (t1 - t2) * c / 2 in mm, such that a range of
+    L mm corresponds to an arrival time difference range of 2 L / c.
+    Note: PETSIRD has no field for the coincidence window. If TOF bins outside of the
+    coincidence window are missing (e.g. discarded), the window is larger than this.
+    """
+    edges = np.asarray(tof_bin_edges_mm, dtype=np.float64)
+    return 2 * float(edges[-1] - edges[0]) / SPEED_OF_LIGHT_MM_PER_NS
+
+
+def randoms_from_singles_of_events(
+    singles_counts: np.ndarray,
+    durations_ns: np.ndarray,
+    window_ns: float,
+    det_bin0: np.ndarray,
+    det_bin1: np.ndarray,
+    num_tofbins: int,
+    tof: bool,
+) -> np.ndarray:
+    """expected randoms of listmode events from singles histograms
+
+    E[R_ab] = 2 tau sum_k C_a,k C_b,k / dt_k
+
+    with the singles counts C_a,k of detection bin a in time block k of duration dt_k,
+    i.e. the singles rate C_a,k / dt_k is assumed to be constant within a time block.
+    For TOF, the randoms are divided by the number of TOF bins (uniform distribution
+    over the TOF bins, which cover the coincidence window).
+
+    singles_counts: shape (num_time_blocks, num_detection_bins)
+    durations_ns: shape (num_time_blocks,)
+    """
+    randoms = np.zeros(det_bin0.shape[0], dtype=np.float64)
+    for counts, duration in zip(np.asarray(singles_counts, dtype=np.float64), durations_ns):
+        randoms += counts[det_bin0] * counts[det_bin1] / duration
+    randoms *= window_ns
+    if tof:
+        randoms /= num_tofbins
+    return randoms.astype(np.float32)
+
+
+def randoms_from_singles_total(
+    fans: DetectionBinFans,
+    singles_counts: np.ndarray,
+    durations_ns: np.ndarray,
+    window_ns: float,
+) -> float:
+    """expected randoms (from singles histograms) summed over all pairs in coincidence"""
+    return window_ns * sum(
+        fans.pair_sum(counts) / duration
+        for counts, duration in zip(np.asarray(singles_counts, dtype=np.float64), durations_ns)
+    )

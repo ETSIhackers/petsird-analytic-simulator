@@ -26,10 +26,14 @@ from petsird_reader import (
     get_num_data_bins,
     get_tof_parameters,
     EVENT_ARRAYS,
+    UnsupportedPETSIRDFeatureError,
     read_listmode_events,
 )
 from randoms import (
     casey_singles,
+    coincidence_window_ns,
+    randoms_from_singles_of_events,
+    randoms_from_singles_total,
     delayeds_fan_sums,
     detection_bin_fans,
     ml_singles,
@@ -93,6 +97,12 @@ randoms_group.add_argument(
     default=None,
     help="randoms correction with the randoms estimated from the delayed coincidences: "
     "maximum likelihood (ml) or Casey-type fan-sum (casey) estimate of the singles",
+)
+randoms_group.add_argument(
+    "--randoms_from_singles",
+    action="store_true",
+    help="randoms correction with the randoms calculated from the singles histograms "
+    "(2 tau S_a S_b, the coincidence window 2 tau is assumed to be the range of the TOF bins)",
 )
 randoms_group.add_argument(
     "--randoms_expectation",
@@ -222,7 +232,7 @@ else:
 streams = ("prompts", "delayeds")
 # cached as flat dictionary with keys "<stream>_<array>"
 flat_events = load_or_compute(
-    output_path("listmode_events", ".npz"),
+    output_path("listmode_data", ".npz"),
     compute=lambda: {
         f"{stream}_{k}": v
         for stream, arrays in read_listmode_events(
@@ -237,9 +247,13 @@ flat_events = load_or_compute(
 all_events = {
     stream: {k: flat_events[f"{stream}_{k}"] for k in EVENT_ARRAYS} for stream in streams
 }
+singles_hists = {k: flat_events[f"singles_{k}"] for k in ("counts", "durations_ms")}
 events = all_events["prompts"]
 num_delayeds = all_events["delayeds"]["coords0"].shape[0]
-print(f"{events['coords0'].shape[0]} prompts, {num_delayeds} delayeds")
+print(
+    f"{events['coords0'].shape[0]} prompts, {num_delayeds} delayeds, "
+    f"{singles_hists['counts'].shape[0]} singles histograms"
+)
 
 # fans (detection bins in coincidence) of all detection bins
 fans = detection_bin_fans(scanner_info)
@@ -319,10 +333,45 @@ elif args.randoms_from_delayeds is not None:
         f"{num_zero} of {fans.num_bins} detection bins without delayeds"
     )
     np.save(output_path("randoms_singles" + randoms_tag.removeprefix("_randoms")), randoms_singles)
+elif args.randoms_from_singles:
+    if singles_hists["counts"].shape[0] == 0:
+        raise ValueError(
+            "--randoms_from_singles requires singles histograms per detection bin in the file"
+        )
+    num_module_types = scanner_info.scanner_geometry.number_of_module_types()
+    if any(
+        scanner_info.singles_histogram_energy_bin_edges[m].number_of_bins() != 1
+        or scanner_info.event_energy_bin_edges[m].number_of_bins() != 1
+        for m in range(num_module_types)
+    ):
+        raise UnsupportedPETSIRDFeatureError(
+            "randoms from singles are only supported for one event and one singles energy bin"
+        )
+    window_ns = coincidence_window_ns(scanner_info.tof_bin_edges[0][0].edges)
+    durations_ns = singles_hists["durations_ms"] * 1e6
+    contamination_list = randoms_from_singles_of_events(
+        singles_hists["counts"],
+        durations_ns,
+        window_ns,
+        events["det_bin0"],
+        events["det_bin1"],
+        num_tofbins,
+        tof,
+    )
+    contamination_sum = randoms_from_singles_total(
+        fans, singles_hists["counts"], durations_ns, window_ns
+    )
+    print(
+        f"Randoms from singles (coincidence window {window_ns:.3f} ns from the TOF bins): "
+        f"{contamination_sum:.4e} expected randoms in total, "
+        f"mean per event {contamination_list.mean():.3e}"
+    )
+    randoms_tag = "_randoms_singles"
 elif num_delayeds > 0:
     warnings.warn(
         f"The file contains {num_delayeds} delayed coincidences, but randoms are not "
-        "corrected (see --randoms_from_delayeds): the reconstruction is biased.",
+        "corrected (see --randoms_from_delayeds / --randoms_from_singles): the "
+        "reconstruction is biased.",
         UserWarning,
     )
 

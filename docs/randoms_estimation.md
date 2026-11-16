@@ -1,4 +1,4 @@
-# Randoms estimation from delayed coincidences
+# Randoms estimation from delayed coincidences and singles
 
 This note describes the randoms model and the estimators implemented in
 [`python/randoms.py`](../python/randoms.py) and used by
@@ -186,7 +186,40 @@ $1/F_a + 1/F_b$. For the raw delayeds of a single bin it is $1/(s_a s_b)$. With 
 hundreds to thousands of counts, compared with $\ll 1$ count per bin, the estimate is orders
 of magnitude less noisy (see the study for numbers).
 
-## 7. Assumptions and limitations
+## 7. Randoms from singles histograms
+
+PETSIRD can store singles histograms: the number of singles $C_{a,k}$ of every detection
+bin $a$ (`singles_histogram_level` ALL) in the time interval of a
+`SinglesHistogramTimeBlock` $k$ of duration $\Delta t_k$. Assuming a constant singles rate
+$C_{a,k} / \Delta t_k$ within every time block, Section 1 gives
+
+$$
+\hat R_{ab} = 2\tau \sum_k \frac{C_{a,k}\, C_{b,k}}{\Delta t_k} ,
+\qquad \hat R_{ab,t} = \hat R_{ab} / n_\text{TOF} \;\; (\text{TOF}) .
+$$
+
+For $a \ne b$, $C_{a,k}$ and $C_{b,k}$ are independent Poisson variables, so the product
+is unbiased. Its relative variance is about $1/C_a + 1/C_b$ with $C_a = \sum_k C_{a,k}$.
+There are many more singles than delayeds (≈35 singles per prompt in the CI
+simulation), so this estimate is much less noisy than the one from the delayeds. Since it
+is computed per time block, it also follows singles distributions that change over time,
+which the time-integrated delayeds estimate cannot (Section 8).
+
+**Coincidence window.** PETSIRD has no field for $2\tau$. Its TOF bin edges are
+$x = (t_1 - t_2)\, c / 2$ in mm, so TOF bins covering $[x_\text{min}, x_\text{max}]$
+correspond to the time window $2\tau = 2 (x_\text{max} - x_\text{min}) / c$. We assume
+that the TOF bins cover the coincidence window. This is true for the simulated data,
+where the randoms are uniform over the TOF bins. If TOF bins inside the coincidence
+window are discarded, the randoms from singles have to be rescaled by the window
+fraction that is kept.
+
+**Real data.** The singles histograms of real scanners are counted in a singles energy
+window, which can differ from the coincidence window. They also include dead-time and
+pile-up losses that differ from those of coincidences. Both require corrections that the
+delayeds estimate does not need. The simulated singles are ideal: same energy window, no
+dead time.
+
+## 8. Assumptions and limitations
 
 - Independent (Poisson) singles. The randoms of a pair are the product of two per-bin factors.
 - Delayed and prompt windows have the same width and the same losses (dead time, pile-up).

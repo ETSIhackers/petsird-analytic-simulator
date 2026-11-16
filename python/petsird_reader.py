@@ -87,8 +87,8 @@ def check_header_support(header: petsird.Header) -> None:
         ignored.append("triple events")
     if scanner.quadruple_event_policy != petsird.QuadrupleEventPolicy.NONE:
         ignored.append("quadruple events")
-    if scanner.singles_histogram_level != petsird.SinglesHistogramLevelType.NONE:
-        ignored.append("singles histograms")
+    if scanner.singles_histogram_level == petsird.SinglesHistogramLevelType.MODULE:
+        ignored.append("singles histograms per singles unit (level MODULE)")
     if scanner.scanner_geometry.non_detecting_volumes:
         ignored.append("non-detecting volumes")
     if ignored:
@@ -337,11 +337,18 @@ def read_listmode_events(
     with_calibration_factor: bool = True,
 ) -> dict[str, dict[str, np.ndarray]]:
     """read all prompt and delayed events and convert them to LOR coordinates, TOF bins
-    and efficiencies
+    and efficiencies, and read all singles histograms
 
     Returns
     -------
-    {"prompts": events, "delayeds": events} where events is a dictionary with
+    {"prompts": events, "delayeds": events, "singles": singles} where singles contains
+    the singles histograms (only for singles_histogram_level ALL)
+    counts : (num_singles_time_blocks, num_singles_detection_bins) int64 array, the
+        singles detection bins of all module types are numbered consecutively
+        (energy index over the singles energy bins)
+    durations_ms : (num_singles_time_blocks,) int64 array with the durations of the
+        time intervals of the singles time blocks
+    and events is a dictionary with
     coords0, coords1 : (num_events, 3) float32 arrays with the ADPs of the two detection bins
     tof_bins : (num_events,) int16 array with the unsigned TOF bins (= PETSIRD tof_idx)
     effs : (num_events,) float32 array with the detection efficiencies
@@ -370,6 +377,10 @@ def read_listmode_events(
 
     if verbose:
         print("\nReading prompt and delayed events from time blocks ...")
+
+    # singles histograms (level ALL) of all time blocks
+    singles_counts: list[np.ndarray] = []
+    singles_durations_ms: list[int] = []
 
     # number of time blocks / events that are ignored
     num_ignored: dict[str, int] = {}
@@ -405,7 +416,19 @@ def read_listmode_events(
             _count_ignored("dead time time blocks (dead time is not corrected)")
             continue
         if isinstance(time_block, petsird.TimeBlock.SinglesHistogramTimeBlock):
-            _count_ignored("singles histogram time blocks")
+            if scanner_info.singles_histogram_level != petsird.SinglesHistogramLevelType.ALL:
+                _count_ignored("singles histogram time blocks (not per detection bin)")
+                continue
+            interval = time_block.value.time_interval
+            singles_durations_ms.append(interval.stop - interval.start)
+            singles_counts.append(
+                np.concatenate(
+                    [
+                        np.asarray(h, dtype=np.int64)
+                        for h in time_block.value.singles_per_detection_bin_histogram
+                    ]
+                )
+            )
             continue
         if isinstance(time_block, petsird.TimeBlock.ExternalSignalTimeBlock):
             _count_ignored("external signal time blocks")
@@ -446,7 +469,7 @@ def read_listmode_events(
     for name, num in num_ignored.items():
         warnings.warn(f"Ignored {num} {name}.", UserWarning)
 
-    return {
+    result = {
         stream: _convert_events(
             raw_events[stream],
             scanner_info,
@@ -457,6 +480,13 @@ def read_listmode_events(
         )
         for stream in raw_events
     }
+    result["singles"] = {
+        "counts": np.array(singles_counts, dtype=np.int64)
+        if singles_counts
+        else np.zeros((0, 0), dtype=np.int64),
+        "durations_ms": np.array(singles_durations_ms, dtype=np.int64),
+    }
+    return result
 
 
 def _convert_events(

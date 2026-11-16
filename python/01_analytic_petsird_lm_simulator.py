@@ -3,8 +3,9 @@
 We simulate true (unscattered) TOF coincidences including the effect of attenuation
 (of a water body), detecting element (crystal) efficiencies and module pair
 (symmetry group) efficiencies, as well as random coincidences (stored in the prompts,
-product of the singles of the detecting elements) and an independent realization of
-the randoms (stored as delayed coincidences). Next to the PETSIRD listmode file,
+product of the singles of the detecting elements), an independent realization of
+the randoms (stored as delayed coincidences) and the singles counts of all detecting
+elements (stored as singles histograms). Next to the PETSIRD listmode file,
 reference outputs (ground truth, attenuation and sensitivity images, true randoms
 expectation, ...) are saved for testing readers / reconstructions of PETSIRD data.
 
@@ -29,7 +30,7 @@ from parallelproj.projectors import ListmodePETProjector
 from efficiencies import generate_efficiency_model, lor_efficiencies
 from geometry_plots import plot_petsird_geometry
 from phantoms import PHANTOMS, create_phantom
-from randoms import randoms_of_events
+from randoms import coincidence_window_ns, randoms_of_events
 from scanner import ScannerConfig, create_parallelproj_lor_descriptor
 from reconstruction import histogram_mlem
 from simulation import (
@@ -41,6 +42,7 @@ from simulation import (
     lor_fan_sums,
     randoms_expectation,
     singles_model,
+    singles_rates,
     tof_parameters,
     to_petsird_coincidences,
     write_petsird_file,
@@ -245,6 +247,17 @@ expected_randoms, scaled_singles = randoms_expectation(
     singles, lor_desc, tof_params.num_tofbins, total_expected_randoms
 )
 
+# constant singles rates S of all detecting elements, such that the expected randoms
+# 2 tau T S_a S_b of the acquisition (time T) are the simulated randoms. The coincidence
+# window 2 tau is the range covered by the TOF bins.
+window_ns = coincidence_window_ns(
+    np.array([-0.5, 0.5]) * tof_params.num_tofbins * tof_params.tofbin_width
+)
+time_block_duration_ns = args.event_block_duration * 1e6
+rates_per_ns = singles_rates(
+    scaled_singles.ravel(), window_ns, args.num_time_blocks * time_block_duration_ns
+)
+
 # prompts: Poisson realization of trues + randoms
 prompts_histogram = np.random.poisson(expected_trues + expected_randoms)
 
@@ -256,11 +269,17 @@ with open(output_dir / "randoms_expectation.json", "w", encoding="UTF-8") as f:
             "expected_trues": float(args.num_true_counts),
             "expected_randoms": float(total_expected_randoms),
             "num_tofbins": tof_params.num_tofbins,
+            "coincidence_window_ns": window_ns,
+            "acquisition_time_ns": args.num_time_blocks * time_block_duration_ns,
+            # singles rates (per ns) of all detection bins
+            "singles_rates_per_ns": rates_per_ns.tolist(),
             # one value per PETSIRD detection bin (= detecting element for one energy bin)
             "singles": scaled_singles.ravel().tolist(),
             "description": "the expected randoms of a pair of detection bins (a, b) in "
             "coincidence (summed over all TOF bins) are singles[a] * singles[b] and are "
-            "uniformly distributed over the TOF bins (see python/randoms.py)",
+            "uniformly distributed over the TOF bins (see python/randoms.py); "
+            "singles[a] * singles[b] = coincidence_window_ns * acquisition_time_ns * "
+            "singles_rates_per_ns[a] * singles_rates_per_ns[b] (constant singles rates)",
         },
         f,
         indent=4,
@@ -289,6 +308,13 @@ prompt_events = histogram_to_listmode(prompts_histogram, lor_desc, tof_params.nu
 if args.random_fraction > 0:
     delayed_events = histogram_to_listmode(
         np.random.poisson(expected_randoms), lor_desc, tof_params.num_tofbins
+    )
+
+# singles histograms (ideal: same energy window as the coincidences, no dead time) of
+# all detecting elements in every time block: Poisson realizations of the singles rates
+if args.random_fraction > 0:
+    singles_counts = np.random.poisson(
+        np.broadcast_to(rates_per_ns * time_block_duration_ns, (args.num_time_blocks, rates_per_ns.size))
     )
 
 if args.save_lm_backprojection:
@@ -320,6 +346,7 @@ header = create_petsird_header(
     args.tof_fwhm_mm,
     num_energy_bins,
     store_delayeds=args.random_fraction > 0,
+    store_singles=args.random_fraction > 0,
 )
 det_bin_0, det_bin_1, tof_idx = to_petsird_coincidences(
     prompt_events, scanner_config.num_det_els_per_module, num_energy_bins, tof_params.num_tofbins
@@ -377,6 +404,7 @@ if not args.skip_writing:
         args.num_time_blocks,
         args.event_block_duration,
         delayeds=petsird_delayeds,
+        singles_counts=singles_counts if args.random_fraction > 0 else None,
     )
 
     # human-readable summary of the written file (output of petsird.helpers.analysis)

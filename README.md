@@ -72,8 +72,14 @@ times 50% uniform + 50% flux from the activity in the FOV (the efficiency correc
 sum of its expected trues, normalized to mean 1), such that they vary with the
 activity distribution and the efficiencies (see `singles_model` in
 `python/simulation.py`). An independent Poisson realization of the randoms is stored as
-delayed coincidences. The true singles are saved in `randoms_expectation.json`. With
-`--random_fraction 0`, no randoms and no delayeds are simulated.
+delayed coincidences. The singles counts of all detecting elements in every time block
+are stored as singles histograms (`singles_histogram_level` ALL, ideal singles: same
+energy window as the coincidences, no dead time). They are Poisson realizations of
+constant singles rates `S` such that the randoms are `2 tau T S_a S_b` (acquisition time
+`T`), where the coincidence window `2 tau` is the range covered by the TOF bins
+(`(t1 - t2)` range `= 2 x TOF bin range / c`, ≈ 1.02 ns for the defaults). The true
+singles, singles rates and coincidence window are saved in `randoms_expectation.json`.
+With `--random_fraction 0`, no randoms, no delayeds and no singles are simulated.
 
 `petsird_geometry_and_events.png` visualizes (transaxial, sagittal and 3D views) the PETSIRD scanner geometry as written
 to the file (detecting element boxes with front faces and box axes, average detection
@@ -197,8 +203,8 @@ and warns about information that is ignored:
 
 - gantry alignment (the image is reconstructed in the PET gantry coordinate system)
 - delayed events, if no randoms correction is used, and dead time time blocks (no dead time correction)
-- single, triple and quadruple events, singles histograms, external signals and
-  non-detecting volumes
+- single, triple and quadruple events, singles histograms per singles unit (level
+  MODULE), external signals and non-detecting volumes
 
 After the reconstruction, the same visualization of the PETSIRD geometry and the first
 events is shown on top of the reconstructed image (and saved as
@@ -261,7 +267,8 @@ attenuation correction. The 2-class attenuation image created by
 python 02_reconstruct_petsird.py my_petsird_file.bin --attenuation_image my_att_img.npy --randoms_from_delayeds ml
 ```
 
-estimates the randoms from the delayed coincidences in the PETSIRD file and uses them
+(or `--randoms_from_singles`, see below) estimates the randoms from the delayed
+coincidences in the PETSIRD file and uses them
 as additive contamination in the LM OSEM reconstruction (see `python/randoms.py` and
 the theory in [`docs/randoms_estimation.md`](docs/randoms_estimation.md)).
 The expected randoms of a pair of detection bins (a, b) in coincidence are modeled as
@@ -279,6 +286,14 @@ file. Two estimators are available:
 
 The estimated singles are saved as
 `my_petsird_file_randoms_singles_<method>_<fingerprint>.npy`. For simulated data,
+`--randoms_from_singles` calculates the randoms from the singles histograms (per
+detection bin, level ALL) as `2 tau sum_k C_a,k C_b,k / dt_k` (singles counts `C` in
+time blocks `k` of duration `dt_k`). PETSIRD has no field for the coincidence window
+`2 tau`, which is therefore assumed to be the range covered by the TOF bins (true for the
+simulated data; if TOF bins outside of the coincidence window are discarded, the randoms
+have to be rescaled accordingly). Only one event and one singles energy bin are
+supported.
+
 `--randoms_expectation prompts_randoms_expectation.npy` uses the true expected randoms
 of all prompts written by the simulator instead ("oracle" randoms correction). Without randoms correction, the reconstruction of data
 with randoms is biased (a warning is shown). Detection bins without delayeds get
@@ -311,7 +326,7 @@ flat modules (no installation needed, the scripts import them directly):
 | `simulation.py` | forward model, histogram to listmode conversion, ordering of the coincidences, PETSIRD header and writing |
 | `petsird_reader.py` | reading and interpreting PETSIRD data (supported features, ADPs, efficiencies, TOF, events) |
 | `reconstruction.py` | image grid, sensitivity image and LM OSEM reconstruction |
-| `randoms.py` | randoms model (product of singles), fans of the detection bins, Casey-type and ML estimation of the singles from the delayeds |
+| `randoms.py` | randoms model (product of singles), fans of the detection bins, Casey-type and ML estimation of the singles from the delayeds, randoms from singles histograms |
 | `geometry_plots.py` | visualization of the PETSIRD geometry and of events |
 | `viewer.py` | interactive 3-axis viewer |
 | `utils.py` | small generic helpers (version check, FWHM / sigma, file fingerprint, caching) |
@@ -339,6 +354,7 @@ cd python
 python 01_analytic_petsird_lm_simulator.py --output_dir ../ci_output --phantom offcenter_cylinder --num_true_counts 200000 --save_lm_backprojection --skip_plots
 python 02_reconstruct_petsird.py ../ci_output/simulated_petsird_lm_file.bin --img_shape 55 55 19 --num_epochs 1
 python 02_reconstruct_petsird.py ../ci_output/simulated_petsird_lm_file.bin --img_shape 55 55 19 --num_epochs 1 --attenuation_image ../ci_output/attenuation_image.npy --randoms_from_delayeds ml
+python 02_reconstruct_petsird.py ../ci_output/simulated_petsird_lm_file.bin --img_shape 55 55 19 --num_epochs 1 --attenuation_image ../ci_output/attenuation_image.npy --randoms_from_singles
 cd ..
 python tests/check_simulation_and_recon.py ci_output
 ```
