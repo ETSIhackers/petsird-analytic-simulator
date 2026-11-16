@@ -59,13 +59,27 @@ imported):
 
 ```bash
 python -m pytest petsird_fast/tests
-python petsird_fast/benchmark.py path/to/file.bin
+python petsird_fast/scripts/benchmark.py path/to/file.bin
 ```
 
 The tests compare all arrays with the events, offsets, time intervals and singles read
 with the yardl-generated Python code. They cover 1 and 2 module types, module type
 pairs and time blocks without events, missing delayeds in some time blocks, chunked
 reading, other time block types and errors.
+
+Benchmark on a default simulation of this repository (`01_analytic_petsird_lm_simulator.py`,
+4M trues, random fraction 0.5, 20 time blocks: 12M prompts + delayeds, 58 MB), linux-64:
+
+| | time | per event |
+|---|---|---|
+| yardl Python: events to arrays | 32.6 s | 2.7 µs |
+| petsird_fast: events to arrays | 0.38 s | 32 ns (85x) |
+| end to end `read_listmode_events` (yardl Python) | 36.8 s | 3.1 µs |
+| end to end, petsird_fast + the same NumPy conversion | 2.65 s | 0.22 µs (14x) |
+
+All arrays are identical. With petsird_fast, the remaining time is spent in the NumPy
+conversion of `python/petsird_reader.py` (LOR end points, efficiencies, ...), which can
+be optimized separately.
 
 ## Design notes
 

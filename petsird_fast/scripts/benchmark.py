@@ -6,7 +6,7 @@
    efficiencies, ...) vs the same conversion of the petsird_fast arrays
 
 Usage (from the repository root):
-    python petsird_fast/benchmark.py FILE.bin
+    python petsird_fast/scripts/benchmark.py FILE.bin
 """
 
 import sys
@@ -18,7 +18,7 @@ import petsird
 
 import petsird_fast
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "python"))
 from petsird_reader import (  # noqa: E402
     _convert_events,
     get_all_detector_centers,
