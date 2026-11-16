@@ -61,7 +61,7 @@ data/sim_uniform_cylinder_4000000_0
 All images are centered at (0,0,0) and use the voxel size `--voxel_size`.
 
 **Randoms:** the prompts contain true coincidences and random coincidences with an
-expected random fraction R / (T + R) given by `--random_fraction` (default 0.1, where
+expected random fraction R / (T + R) given by `--random_fraction` (default 0.5, where
 T are the (attenuated) trues and R the randoms). The expected randoms of a LOR (pair of
 detection bins a, b of modules in coincidence, summed over all TOF bins) are the product
 of the (scaled) singles `s_a * s_b`, and the randoms are uniformly distributed over the
@@ -125,7 +125,7 @@ Physics / simulation parameters:
                         (expected) random fraction R / (T + R) of the prompts, where R / T are the
                         total randoms / (attenuated) trues; the randoms are also stored as
                         independent realization in the delayed coincidences (0 means no randoms
-                        and no delayeds) (default: 0.1)
+                        and no delayeds) (default: 0.5)
 
 Detection Efficiency Parameters:
   --uniform_crystal_eff

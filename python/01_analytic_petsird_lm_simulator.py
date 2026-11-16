@@ -124,7 +124,7 @@ physics_group.add_argument(
 physics_group.add_argument(
     "--random_fraction",
     type=random_fraction,
-    default=0.1,
+    default=0.5,
     help="(expected) random fraction R / (T + R) of the prompts, where R / T are the "
     "total randoms / (attenuated) trues; the randoms are also stored as independent "
     "realization in the delayed coincidences (0 means no randoms and no delayeds)",
