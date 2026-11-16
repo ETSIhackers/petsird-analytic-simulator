@@ -58,6 +58,9 @@ def test_write_read_roundtrip(tmp_path, tiny_config, tiny_efficiency_model, tiny
     coords0, coords1, tof_bins, effs = (
         prompts[k] for k in ("coords0", "coords1", "tof_bins", "effs")
     )
+    # global detection bin indices (one module type, all events written in time order)
+    np.testing.assert_array_equal(prompts["det_bin0"], det_bin_0)
+    np.testing.assert_array_equal(prompts["det_bin1"], det_bin_1)
 
     # PETSIRD first detection bin = parallelproj end point (end module has the higher index)
     scanner = lor_desc.scanner
@@ -88,31 +91,54 @@ def test_referenced_materials_are_defined(tiny_header):
         assert m.density > 0
 
 
-def test_randoms_expectation():
-    """randoms are constant for LORs with non-zero efficiency and all TOF bins"""
-    from simulation import randoms_expectation
+def test_randoms_expectation(tiny_config):
+    """randoms of a LOR are proportional to the product of the singles and uniform in TOF"""
+    from simulation import lor_products, randoms_expectation
 
-    lor_effs = np.array([[1.0, 0.0, 2.0], [0.5, 0.3, 0.0]], dtype="float32")
-    randoms, per_bin = randoms_expectation(lor_effs, num_tofbins=5, total_expected_randoms=100.0)
-    assert randoms.shape == (2, 3, 5)
+    lor_desc = create_parallelproj_lor_descriptor(tiny_config)
+    singles = np.random.default_rng(0).uniform(0.5, 2, (tiny_config.num_modules, tiny_config.num_det_els_per_module))
+    singles[1, 2] = 0
+    randoms, scaled = randoms_expectation(singles, lor_desc, num_tofbins=5, total_expected_randoms=100.0)
+    assert randoms.shape == (lor_desc.num_block_pairs, tiny_config.num_det_els_per_module**2, 5)
     np.testing.assert_allclose(randoms.sum(), 100.0, rtol=1e-5)
-    np.testing.assert_allclose(randoms[lor_effs > 0], per_bin)
-    assert np.all(randoms[lor_effs == 0] == 0)
-    np.testing.assert_allclose(per_bin, 100.0 / (4 * 5))
+    np.testing.assert_allclose(randoms.sum(-1), lor_products(scaled, lor_desc), rtol=1e-5)
+    np.testing.assert_allclose(randoms, randoms[..., :1].repeat(5, -1))
+    # scaled singles are proportional to the singles
+    ratio = scaled[singles > 0] / singles[singles > 0]
+    np.testing.assert_allclose(ratio, ratio[0])
+    assert scaled[1, 2] == 0
 
 
-def test_write_read_delayeds(tmp_path, tiny_config, tiny_efficiency_model, tiny_tof_params):
-    """delayed coincidences are written (with the delayed policy) and read back"""
+def test_singles_model():
+    """singles = eff x (uniform part + flux part), 0 for dead elements"""
+    from simulation import singles_model
+
+    effs = np.array([[1.0, 2.0], [0.0, 1.0]])
+    trues_fan_sums = np.array([[1.0, 2.0], [0.0, 3.0]])  # flux 1, 1, -, 3 (mean 5/3)
+    s = singles_model(trues_fan_sums, effs, uniform_fraction=0.5)
+    np.testing.assert_allclose(s, [[0.5 + 0.3, 2 * (0.5 + 0.3)], [0.0, 0.5 + 0.9]])
+
+
+def test_write_read_delayeds_and_singles(tmp_path, tiny_config, tiny_efficiency_model, tiny_tof_params):
+    """delayed coincidences (with the delayed policy) and singles histograms (level ALL)
+    are written and read back"""
     from simulation import create_petsird_header
 
     header = create_petsird_header(
-        tiny_config, tiny_efficiency_model, tiny_tof_params, 20.0, store_delayeds=True
+        tiny_config,
+        tiny_efficiency_model,
+        tiny_tof_params,
+        20.0,
+        store_delayeds=True,
+        store_singles=True,
     )
     assert header.scanner.delayed_event_policy == petsird.CoincidencePolicy.MULTIPLES_AS_ALL_COINCIDENCES
     prompts = (np.array([30, 40]), np.array([1, 2]), np.array([3, 4]))
     delayeds = (np.array([35, 41, 50]), np.array([5, 6, 7]), np.array([0, 1, 2]))
     fname = tmp_path / "delayeds.bin"
-    write_petsird_file(fname, header, *prompts, 2, 50, delayeds=delayeds)
+    num_bins = tiny_config.num_modules * tiny_config.num_det_els_per_module
+    singles = np.arange(2 * num_bins).reshape(2, num_bins)
+    write_petsird_file(fname, header, *prompts, 2, 50, delayeds=delayeds, singles_counts=singles)
 
     reader = petsird.BinaryPETSIRDReader(str(fname))
     h = reader.read_header()
@@ -120,3 +146,7 @@ def test_write_read_delayeds(tmp_path, tiny_config, tiny_efficiency_model, tiny_
     assert events["prompts"]["coords0"].shape[0] == 2
     assert events["delayeds"]["coords0"].shape[0] == 3
     np.testing.assert_array_equal(np.sort(events["delayeds"]["tof_bins"]), [0, 1, 2])
+    # singles histograms (one per time block)
+    assert h.scanner.singles_histogram_level == petsird.SinglesHistogramLevelType.ALL
+    np.testing.assert_array_equal(events["singles"]["counts"], singles)
+    np.testing.assert_array_equal(events["singles"]["durations_ms"], [50, 50])

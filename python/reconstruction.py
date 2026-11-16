@@ -252,20 +252,6 @@ def sensitivity_image(
     )
 
 
-def constant_randoms_contamination(
-    randoms_per_lor_and_tof_bin: float, num_events: int, num_tofbins: int, tof: bool
-) -> np.ndarray:
-    """additive contamination of all events for randoms that are constant for all LORs
-    (with non-zero efficiency) and TOF bins
-
-    The expected counts of an event in a LM reconstruction refer to its TOF bin (TOF) or
-    its LOR (non-TOF), i.e. the randoms of a TOF bin or the sum of the randoms over all
-    TOF bins of the LOR.
-    """
-    randoms_per_event = randoms_per_lor_and_tof_bin * (1 if tof else num_tofbins)
-    return np.full(num_events, randoms_per_event, dtype=np.float32)
-
-
 def em_update(x: Array, objective: C1Function, sens_img: Array, mask: Array | None = None) -> Array:
     """one EM update written as preconditioned gradient step
 

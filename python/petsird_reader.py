@@ -4,6 +4,7 @@ Everything is derived from the PETSIRD data following the PETSIRD definitions on
 (independent of how the data were simulated).
 """
 
+import math
 import warnings
 
 import numpy as np
@@ -86,8 +87,8 @@ def check_header_support(header: petsird.Header) -> None:
         ignored.append("triple events")
     if scanner.quadruple_event_policy != petsird.QuadrupleEventPolicy.NONE:
         ignored.append("quadruple events")
-    if scanner.singles_histogram_level != petsird.SinglesHistogramLevelType.NONE:
-        ignored.append("singles histograms")
+    if scanner.singles_histogram_level == petsird.SinglesHistogramLevelType.MODULE:
+        ignored.append("singles histograms per singles unit (level MODULE)")
     if scanner.scanner_geometry.non_detecting_volumes:
         ignored.append("non-detecting volumes")
     if ignored:
@@ -302,8 +303,29 @@ def get_num_data_bins(scanner_info: petsird.ScannerInformation, tof: bool) -> in
     return num_bins
 
 
+def detection_bin_offsets(scanner_info: petsird.ScannerInformation) -> np.ndarray:
+    """offsets of the detection bins of all module types in a global detection bin index
+
+    The global index of detection bin b of module type m is offsets[m] + b, i.e. the
+    detection bins of all module types are numbered consecutively.
+    offsets[-1] is the total number of detection bins.
+    """
+    num_module_types = scanner_info.scanner_geometry.number_of_module_types()
+    num_bins = [math.prod(module_type_info(scanner_info, m)) for m in range(num_module_types)]
+    return np.concatenate([[0], np.cumsum(num_bins)]).astype(np.int64)
+
+
 # names of the arrays describing listmode events (see read_listmode_events)
-EVENT_ARRAYS = ("coords0", "coords1", "tof_bins", "effs", "energy_idx0", "energy_idx1")
+EVENT_ARRAYS = (
+    "coords0",
+    "coords1",
+    "tof_bins",
+    "effs",
+    "energy_idx0",
+    "energy_idx1",
+    "det_bin0",
+    "det_bin1",
+)
 
 
 def read_listmode_events(
@@ -315,16 +337,25 @@ def read_listmode_events(
     with_calibration_factor: bool = True,
 ) -> dict[str, dict[str, np.ndarray]]:
     """read all prompt and delayed events and convert them to LOR coordinates, TOF bins
-    and efficiencies
+    and efficiencies, and read all singles histograms
 
     Returns
     -------
-    {"prompts": events, "delayeds": events} where events is a dictionary with
+    {"prompts": events, "delayeds": events, "singles": singles} where singles contains
+    the singles histograms (only for singles_histogram_level ALL)
+    counts : (num_singles_time_blocks, num_singles_detection_bins) int64 array, the
+        singles detection bins of all module types are numbered consecutively
+        (energy index over the singles energy bins)
+    durations_ms : (num_singles_time_blocks,) int64 array with the durations of the
+        time intervals of the singles time blocks
+    and events is a dictionary with
     coords0, coords1 : (num_events, 3) float32 arrays with the ADPs of the two detection bins
     tof_bins : (num_events,) int16 array with the unsigned TOF bins (= PETSIRD tof_idx)
     effs : (num_events,) float32 array with the detection efficiencies
     energy_idx0, energy_idx1 : (num_events,) uint16 arrays with the energy bin indices
         (empty if store_energy_bins is False)
+    det_bin0, det_bin1 : (num_events,) int64 arrays with the global detection bin
+        indices (see detection_bin_offsets) of the two detection bins
 
     The efficiencies are computed in a vectorized way following the definition in
     petsird.DetectionEfficiencies (equivalent to petsird.helpers.get_detection_efficiency).
@@ -346,6 +377,10 @@ def read_listmode_events(
 
     if verbose:
         print("\nReading prompt and delayed events from time blocks ...")
+
+    # singles histograms (level ALL) of all time blocks
+    singles_counts: list[np.ndarray] = []
+    singles_durations_ms: list[int] = []
 
     # number of time blocks / events that are ignored
     num_ignored: dict[str, int] = {}
@@ -381,7 +416,19 @@ def read_listmode_events(
             _count_ignored("dead time time blocks (dead time is not corrected)")
             continue
         if isinstance(time_block, petsird.TimeBlock.SinglesHistogramTimeBlock):
-            _count_ignored("singles histogram time blocks")
+            if scanner_info.singles_histogram_level != petsird.SinglesHistogramLevelType.ALL:
+                _count_ignored("singles histogram time blocks (not per detection bin)")
+                continue
+            interval = time_block.value.time_interval
+            singles_durations_ms.append(interval.stop - interval.start)
+            singles_counts.append(
+                np.concatenate(
+                    [
+                        np.asarray(h, dtype=np.int64)
+                        for h in time_block.value.singles_per_detection_bin_histogram
+                    ]
+                )
+            )
             continue
         if isinstance(time_block, petsird.TimeBlock.ExternalSignalTimeBlock):
             _count_ignored("external signal time blocks")
@@ -422,7 +469,7 @@ def read_listmode_events(
     for name, num in num_ignored.items():
         warnings.warn(f"Ignored {num} {name}.", UserWarning)
 
-    return {
+    result = {
         stream: _convert_events(
             raw_events[stream],
             scanner_info,
@@ -433,6 +480,13 @@ def read_listmode_events(
         )
         for stream in raw_events
     }
+    result["singles"] = {
+        "counts": np.array(singles_counts, dtype=np.int64)
+        if singles_counts
+        else np.zeros((0, 0), dtype=np.int64),
+        "durations_ms": np.array(singles_durations_ms, dtype=np.int64),
+    }
+    return result
 
 
 def _convert_events(
@@ -446,6 +500,7 @@ def _convert_events(
     """convert raw (detection bin 0, detection bin 1, tof_idx) events of all module type
     pairs to LOR coordinates, TOF bins, efficiencies and energy bin indices"""
     out: dict[str, list[np.ndarray]] = {name: [] for name in EVENT_ARRAYS}
+    bin_offsets = detection_bin_offsets(scanner_info)
 
     for (m1, m2), chunks in raw_events.items():
         if len(chunks) == 0:
@@ -475,6 +530,8 @@ def _convert_events(
         out["coords0"].append(all_detector_centers[m1][mod_0, el_0])
         out["coords1"].append(all_detector_centers[m2][mod_1, el_1])
         out["tof_bins"].append(tof_idx)
+        out["det_bin0"].append(bin_offsets[m1] + det_bin_0)
+        out["det_bin1"].append(bin_offsets[m2] + det_bin_1)
 
         det_bin_effs_1 = get_detection_bin_efficiencies(scanner_info, m1).ravel()
         det_bin_effs_2 = get_detection_bin_efficiencies(scanner_info, m2).ravel()
@@ -515,6 +572,8 @@ def _convert_events(
         "effs": "float32",
         "energy_idx0": "uint16",
         "energy_idx1": "uint16",
+        "det_bin0": "int64",
+        "det_bin1": "int64",
     }
     return {
         name: np.concatenate(x).astype(dtypes[name])
