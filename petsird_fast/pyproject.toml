@@ -7,7 +7,7 @@ name = "petsird-fast"
 version = "0.0.1"
 description = "Prototype: fast reading of PETSIRD time blocks into flat arrays using libpetsird (C++)"
 requires-python = ">=3.10"
-dependencies = ["numpy"]
+dependencies = ["numpy", "petsird"]
 
 [tool.scikit-build]
 minimum-version = "0.10"

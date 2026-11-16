@@ -150,3 +150,35 @@ def test_write_read_delayeds_and_singles(tmp_path, tiny_config, tiny_efficiency_
     assert h.scanner.singles_histogram_level == petsird.SinglesHistogramLevelType.ALL
     np.testing.assert_array_equal(events["singles"]["counts"], singles)
     np.testing.assert_array_equal(events["singles"]["durations_ms"], [50, 50])
+
+
+def test_read_time_range(tmp_path, tiny_config, tiny_efficiency_model, tiny_tof_params):
+    """only time blocks whose interval lies within the time range are read"""
+    from simulation import create_petsird_header
+
+    header = create_petsird_header(
+        tiny_config, tiny_efficiency_model, tiny_tof_params, 20.0,
+        store_delayeds=True, store_singles=True,
+    )
+    rng = np.random.default_rng(0)
+    prompts = (rng.integers(40, 48, 30), rng.integers(0, 8, 30), rng.integers(0, 3, 30))
+    delayeds = (rng.integers(40, 48, 9), rng.integers(0, 8, 9), rng.integers(0, 3, 9))
+    num_bins = tiny_config.num_modules * tiny_config.num_det_els_per_module
+    singles = rng.integers(0, 100, (3, num_bins))
+    fname = tmp_path / "range.bin"
+    # 3 time blocks [0, 50], [50, 100], [100, 150] ms with 10 prompts / 3 delayeds each
+    write_petsird_file(fname, header, *prompts, 3, 50, delayeds=delayeds, singles_counts=singles)
+
+    for backend in ("petsird", "auto"):
+        reader = petsird.BinaryPETSIRDReader(str(fname))
+        h = reader.read_header()
+        events = read_listmode_events(
+            reader, h, get_all_detector_centers(h.scanner.scanner_geometry),
+            fname=str(fname), backend=backend, time_range_ms=(50, 150),
+        )
+        # event + singles time blocks of the first interval are skipped
+        assert events["num_skipped_time_blocks"] == 2
+        np.testing.assert_array_equal(events["prompts"]["det_bin0"], prompts[0][10:])
+        np.testing.assert_array_equal(events["delayeds"]["det_bin1"], delayeds[1][3:])
+        np.testing.assert_array_equal(events["singles"]["counts"], singles[1:])
+        np.testing.assert_array_equal(events["singles"]["durations_ms"], [50, 50])

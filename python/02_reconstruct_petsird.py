@@ -28,7 +28,6 @@ from petsird_reader import (
     get_all_detector_centers,
     get_num_data_bins,
     get_tof_parameters,
-    petsird_fast_available,
     UnsupportedPETSIRDFeatureError,
     read_listmode_events,
 )
@@ -49,7 +48,13 @@ from reconstruction import (
     recon_params_hash,
     sensitivity_image,
 )
-from utils import FWHM_PER_SIGMA, lm_file_fingerprint, load_or_compute
+from utils import (
+    FWHM_PER_SIGMA,
+    PETSIRD_BACKENDS,
+    lm_file_fingerprint,
+    load_or_compute,
+    resolve_petsird_backend,
+)
 from viewer import show_vol_cuts
 
 # for the parallelproj recon we can use cupy as array backend if available
@@ -120,6 +125,23 @@ parser.add_argument(
     default=10,
     help="number of iterations of the ML randoms (singles) estimation (initialized with "
     "the Casey-type estimate)",
+)
+parser.add_argument(
+    "--time_range_ms",
+    type=int,
+    nargs=2,
+    default=None,
+    metavar=("START", "STOP"),
+    help="only use the time blocks (events, singles histograms, ...) whose time interval "
+    "lies within [START, STOP] (ms)",
+)
+parser.add_argument(
+    "--petsird_backend",
+    choices=PETSIRD_BACKENDS,
+    default="auto",
+    help="read the time blocks with the yardl-generated Python code (petsird) or the "
+    "optional compiled package petsird_fast (C++, much faster); auto: petsird_fast if "
+    "installed",
 )
 args = parser.parse_args()
 
@@ -216,18 +238,37 @@ else:
 # %%
 # prompt and delayed events (LOR end points, TOF bins, efficiencies)
 
-# the time blocks are read with the optional compiled package petsird_fast if installed
+petsird_backend = resolve_petsird_backend(args.petsird_backend)
 print(
     "Reading time blocks with "
-    + ("petsird_fast (C++)" if petsird_fast_available() else "the yardl-generated Python code")
+    + {"petsird_fast": "petsird_fast (C++)", "petsird": "petsird (yardl-generated Python code)"}[
+        petsird_backend
+    ]
 )
 t_read = time.perf_counter()
 all_events = read_listmode_events(
-    reader, header, all_detector_centers, verbose=args.verbose, fname=str(fname)
+    reader,
+    header,
+    all_detector_centers,
+    verbose=args.verbose,
+    fname=str(fname),
+    backend=petsird_backend,
+    time_range_ms=tuple(args.time_range_ms) if args.time_range_ms is not None else None,
 )
+# outputs that depend on the events (backprojections, recon, figure) are tagged with
+# the time range in addition to the reconstruction parameters
+events_tag = params_tag
+if args.time_range_ms is not None:
+    events_tag += f"_t{args.time_range_ms[0]}-{args.time_range_ms[1]}ms"
+    print(
+        f"Time range {args.time_range_ms[0]} ... {args.time_range_ms[1]} ms: skipped "
+        f"{all_events['num_skipped_time_blocks']} time blocks outside of the range"
+    )
 print(f"Read all time blocks in {time.perf_counter() - t_read:.1f} s")
 singles_hists = all_events["singles"]
 events = all_events["prompts"]
+if events["coords0"].shape[0] == 0:
+    raise ValueError("no prompts in the file (or in the selected time range)")
 num_delayeds = all_events["delayeds"]["coords0"].shape[0]
 print(
     f"{events['coords0'].shape[0]} prompts, {num_delayeds} delayeds, "
@@ -252,13 +293,13 @@ proj = ListmodePETProjector(
     img_origin=img_origin,
 )
 ones = xp.ones(events["coords0"].shape[0], dtype="float32")
-xp.save(output_path("nontof_backproj", tag=params_tag), proj.adjoint(ones))
+xp.save(output_path("nontof_backproj", tag=events_tag), proj.adjoint(ones))
 
 if tof:
     proj.tof_parameters = tof_params
     proj.event_tofbins = xp.asarray(events["tof_bins"], dtype=xp.int16).copy()
     proj.tof = True
-    xp.save(output_path("tof_backproj", tag=params_tag), proj.adjoint(ones))
+    xp.save(output_path("tof_backproj", tag=events_tag), proj.adjoint(ones))
 del proj
 
 # %%
@@ -280,6 +321,9 @@ if args.randoms_expectation is not None:
     if scanner_info.scanner_geometry.number_of_module_types() != 1:
         # read_listmode_events() groups the events by module type pairs
         raise ValueError("--randoms_expectation is only supported for one module type")
+    if args.time_range_ms is not None:
+        # the expectation refers to the whole acquisition and to all prompts of the file
+        raise ValueError("--randoms_expectation can not be combined with --time_range_ms")
     prompts_randoms = np.load(args.randoms_expectation)
     if prompts_randoms.shape != valid.shape:
         raise ValueError(
@@ -403,7 +447,7 @@ subset_objectives = create_lm_subset_objectives(
 recon = lm_osem(subset_objectives, sens_img, args.num_epochs, xp=xp)
 
 opath = fname.with_name(
-    f"lm_osem_{args.num_epochs}_{args.num_subsets}_{params_tag}{randoms_tag}.npy"
+    f"lm_osem_{args.num_epochs}_{args.num_subsets}_{events_tag}{randoms_tag}.npy"
 )
 xp.save(opath, recon)
 print(f"LM OSEM recon saved to {opath}")
@@ -425,7 +469,7 @@ fig_geom = plot_petsird_geometry(
     background_label="LM OSEM recon",
     title=f"PETSIRD scanner geometry and the first {num_events_to_show} events of {fname.name}",
 )
-geometry_fig_path = output_path("geometry_and_events", ".png", tag=params_tag)
+geometry_fig_path = output_path("geometry_and_events", ".png", tag=events_tag)
 fig_geom.savefig(geometry_fig_path, dpi=150)
 print(f"Geometry figure saved to {geometry_fig_path}")
 

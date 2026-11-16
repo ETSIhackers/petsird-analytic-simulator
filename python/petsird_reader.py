@@ -12,14 +12,7 @@ import numpy as np
 import petsird
 from parallelproj.tof import TOFParameters
 
-from utils import FWHM_PER_SIGMA
-
-# optional compiled package to read the time blocks with the yardl-generated C++ code
-# (see petsird_fast/ in this repository)
-try:
-    import petsird_fast as _petsird_fast
-except ImportError:
-    _petsird_fast = None
+from utils import FWHM_PER_SIGMA, petsird_fast, resolve_petsird_backend
 
 # NOTE on conventions used in this module (PETSIRD >= 0.13):
 # - a DetectionBin of a module type encodes
@@ -403,11 +396,6 @@ def detection_bin_tables(
 RawEvents = dict[tuple[int, int], tuple[np.ndarray, np.ndarray, np.ndarray]]
 
 
-def petsird_fast_available() -> bool:
-    """whether the optional compiled package petsird_fast (petsird_fast/) is installed"""
-    return _petsird_fast is not None
-
-
 def read_listmode_events(
     reader: petsird.BinaryPETSIRDReader,
     header: petsird.Header,
@@ -416,15 +404,21 @@ def read_listmode_events(
     verbose: bool = False,
     with_calibration_factor: bool = True,
     fname: str | None = None,
+    backend: str = "auto",
+    time_range_ms: tuple[int, int] | None = None,
 ) -> dict[str, dict[str, np.ndarray]]:
     """read all prompt and delayed events and convert them to LOR coordinates, TOF bins
     and efficiencies, and read all singles histograms
 
-    If the file name fname is given and the optional compiled package petsird_fast is
-    installed (see petsird_fast/), the time blocks are read with the yardl-generated C++
-    code into flat arrays, which is much faster. Otherwise (or if fname is None), the
-    time blocks are read with reader (yardl-generated Python code). The results are
-    identical.
+    backend (see utils.PETSIRD_BACKENDS): with "petsird_fast" (default for "auto" if the
+    optional compiled package petsird_fast is installed and the file name fname is given),
+    the time blocks of the file fname are read with the yardl-generated C++ code into
+    flat arrays, which is much faster. With "petsird", the time blocks are read with
+    reader (yardl-generated Python code). The results are identical.
+
+    time_range_ms: (start, stop) in ms. Only time blocks (of all types) whose time
+    interval lies within [start, stop] are used, all others are skipped (their number is
+    returned as "num_skipped_time_blocks").
 
     Returns
     -------
@@ -450,14 +444,22 @@ def read_listmode_events(
     """
     scanner_info: petsird.ScannerInformation = header.scanner
 
-    if fname is not None and petsird_fast_available():
+    # without the file name, only the yardl Python reader can be used
+    backend = resolve_petsird_backend("petsird" if backend == "auto" and fname is None else backend)
+    if backend == "petsird_fast" and fname is None:
+        raise ValueError("the petsird_fast backend requires the file name fname")
+    if backend == "petsird_fast":
         if verbose:
             print("\nReading time blocks with petsird_fast (C++) ...")
-        raw_events, singles, num_ignored = _read_time_blocks_petsird_fast(fname, scanner_info)
+        raw_events, singles, num_ignored, num_skipped = _read_time_blocks_petsird_fast(
+            fname, scanner_info, time_range_ms
+        )
     else:
         if verbose:
             print("\nReading time blocks with the yardl-generated Python code ...")
-        raw_events, singles, num_ignored = _read_time_blocks_yardl(reader, scanner_info, verbose)
+        raw_events, singles, num_ignored, num_skipped = _read_time_blocks_yardl(
+            reader, scanner_info, verbose, time_range_ms
+        )
 
     for name, num in num_ignored.items():
         warnings.warn(f"Ignored {num} {name}.", UserWarning)
@@ -468,6 +470,7 @@ def read_listmode_events(
         for stream in ("prompts", "delayeds")
     }
     result["singles"] = singles
+    result["num_skipped_time_blocks"] = num_skipped
     return result
 
 
@@ -475,8 +478,9 @@ def _read_time_blocks_yardl(
     reader: petsird.BinaryPETSIRDReader,
     scanner_info: petsird.ScannerInformation,
     verbose: bool,
-) -> tuple[dict[str, RawEvents], dict[str, np.ndarray], dict[str, int]]:
-    """raw events, singles histograms and ignored content of all time blocks
+    time_range_ms: tuple[int, int] | None = None,
+) -> tuple[dict[str, RawEvents], dict[str, np.ndarray], dict[str, int], int]:
+    """raw events, singles histograms, ignored content and number of skipped time blocks
     (yardl-generated Python code)"""
     num_module_types = scanner_info.scanner_geometry.number_of_module_types()
     pairs = [(m1, m2) for m1 in range(num_module_types) for m2 in range(m1 + 1)]
@@ -501,7 +505,13 @@ def _read_time_blocks_yardl(
             return len(nested)
         return sum(_num_events(x) for x in nested)
 
+    num_skipped = 0
     for i_t, time_block in enumerate(reader.read_time_blocks()):
+        if time_range_ms is not None:
+            interval = time_block.value.time_interval
+            if interval.start < time_range_ms[0] or interval.stop > time_range_ms[1]:
+                num_skipped += 1
+                continue
         if isinstance(time_block, petsird.TimeBlock.WeightedEventTimeBlock):
             raise UnsupportedPETSIRDFeatureError(
                 "Weighted event time blocks are not supported."
@@ -585,7 +595,7 @@ def _read_time_blocks_yardl(
         else np.zeros((0, 0), dtype=np.int64),
         "durations_ms": np.array(singles_durations_ms, dtype=np.int64),
     }
-    return raw_events, singles, num_ignored
+    return raw_events, singles, num_ignored, num_skipped
 
 
 # names of the ignored content in the warnings (keys: names used by petsird_fast)
@@ -600,11 +610,13 @@ _IGNORED_NAMES = {
 
 
 def _read_time_blocks_petsird_fast(
-    fname: str, scanner_info: petsird.ScannerInformation
-) -> tuple[dict[str, RawEvents], dict[str, np.ndarray], dict[str, int]]:
-    """raw events, singles histograms and ignored content of all time blocks
+    fname: str,
+    scanner_info: petsird.ScannerInformation,
+    time_range_ms: tuple[int, int] | None = None,
+) -> tuple[dict[str, RawEvents], dict[str, np.ndarray], dict[str, int], int]:
+    """raw events, singles histograms, ignored content and number of skipped time blocks
     (yardl-generated C++ code via the optional package petsird_fast)"""
-    data = _petsird_fast.read_time_blocks(fname)
+    data = petsird_fast.read_time_blocks(fname, time_range_ms)
     other = dict(data["other"])
 
     if other.pop("weighted_event_time_blocks", 0) > 0:
@@ -643,7 +655,7 @@ def _read_time_blocks_petsird_fast(
             else np.zeros(0, dtype=np.int64)
         ),
     }
-    return raw_events, singles, num_ignored
+    return raw_events, singles, num_ignored, data["num_skipped_time_blocks"]
 
 
 def _convert_events(

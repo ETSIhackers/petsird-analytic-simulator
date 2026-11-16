@@ -1,4 +1,4 @@
-// petsird_fast: read the time blocks of PETSIRD (binary) files into flat arrays
+// petsird_fast: read / write the time blocks of PETSIRD (binary) files from / to flat arrays
 //
 // The (small) header is read with the yardl-generated Python package. This extension
 // reads all time blocks with the yardl-generated C++ code (libpetsird) and returns the
@@ -12,13 +12,19 @@
 #include <cmath>
 #include <cstdint>
 #include <map>
+#include <optional>
+#include <stdexcept>
+#include <tuple>
 #include <string>
 #include <variant>
 #include <vector>
 
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
+#include <nanobind/stl/optional.h>
+#include <nanobind/stl/pair.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/tuple.h>
 
 #include "petsird/binary/protocols.h"
 
@@ -83,8 +89,11 @@ class TimeBlockReader {
   size_t num_module_types() const { return num_module_types_; }
   bool done() const { return done_; }
 
-  // read up to max_time_blocks time blocks (0: all remaining ones)
-  nb::dict read(size_t max_time_blocks) {
+  // read up to max_time_blocks time blocks (0: all remaining ones); if start_ms / stop_ms
+  // are given, only time blocks whose time interval is within [start_ms, stop_ms] are
+  // converted (the others are counted in num_skipped_time_blocks)
+  nb::dict read(size_t max_time_blocks, std::optional<uint32_t> start_ms,
+                std::optional<uint32_t> stop_ms) {
     std::map<std::pair<size_t, size_t>, CoincidenceArrays> prompts, delayeds;
     for (size_t m1 = 0; m1 < num_module_types_; ++m1)
       for (size_t m2 = 0; m2 <= m1; ++m2) {
@@ -98,7 +107,10 @@ class TimeBlockReader {
     std::vector<uint32_t> singles_start, singles_stop;
     std::map<std::string, int64_t> counts;
 
-    size_t num_read = 0;
+    size_t num_read = 0, num_skipped = 0;
+    auto in_range = [&](const petsird::TimeInterval& t) {
+      return (!start_ms || t.start >= *start_ms) && (!stop_ms || t.stop <= *stop_ms);
+    };
     {
       // the GIL is not needed while reading (no Python objects are touched)
       nb::gil_scoped_release release;
@@ -110,6 +122,11 @@ class TimeBlockReader {
           break;
         }
         ++num_read;
+        const auto& interval = std::visit([](const auto& b) -> const petsird::TimeInterval& { return b.time_interval; }, time_block);
+        if (!in_range(interval)) {
+          ++num_skipped;
+          continue;
+        }
         if (auto* tb = std::get_if<petsird::EventTimeBlock>(&time_block)) {
           event_start.push_back(tb->time_interval.start);
           event_stop.push_back(tb->time_interval.stop);
@@ -184,6 +201,7 @@ class TimeBlockReader {
     result["singles"] = singles_dict;
     result["other"] = counts_dict;
     result["num_time_blocks"] = num_read;
+    result["num_skipped_time_blocks"] = num_skipped;
     return result;
   }
 
@@ -194,6 +212,95 @@ class TimeBlockReader {
   bool done_ = false;
 };
 
+// writes time blocks from flat arrays; the header is read from a PETSIRD file (written
+// with the yardl-generated Python code, see petsird_fast.TimeBlockWriter)
+class TimeBlockWriter {
+ public:
+  using Indices = nb::ndarray<const uint32_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
+  using Counts = nb::ndarray<const uint64_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
+
+  TimeBlockWriter(const std::string& fname, const std::string& header_fname) : writer_(fname) {
+    petsird::binary::PETSIRDReader header_reader(header_fname);
+    header_reader.ReadHeader(header_);
+    petsird::TimeBlock unused;
+    while (header_reader.ReadTimeBlocks(unused)) {
+    }
+    header_reader.Close();
+    num_module_types_ = header_.scanner.scanner_geometry.replicated_modules.size();
+    writer_.WriteHeader(header_);
+  }
+
+  // prompts / delayeds: {(type_1, type_2): (det_bin0, det_bin1, tof_idx)} (uint32 arrays);
+  // delayeds None: no delayed events in this time block (empty list)
+  void add_event_time_block(uint32_t start, uint32_t stop, nb::dict prompts, nb::object delayeds) {
+    petsird::EventTimeBlock tb;
+    tb.time_interval.start = start;
+    tb.time_interval.stop = stop;
+    fill(tb.prompt_events, prompts);
+    if (!delayeds.is_none()) fill(tb.delayed_events, nb::cast<nb::dict>(delayeds));
+    pending_.emplace_back(std::move(tb));
+  }
+
+  // counts: singles counts of all detection bins, one uint64 array per module type
+  void add_singles_histogram_time_block(uint32_t start, uint32_t stop, nb::list counts) {
+    petsird::SinglesHistogramTimeBlock tb;
+    tb.time_interval.start = start;
+    tb.time_interval.stop = stop;
+    for (auto c : counts) {
+      auto a = nb::cast<Counts>(c);
+      tb.singles_per_detection_bin_histogram.emplace_back(a.data(), a.data() + a.shape(0));
+    }
+    pending_.emplace_back(std::move(tb));
+  }
+
+  // write all added time blocks (one at a time, which gives the same file as the
+  // yardl-generated Python writer)
+  void flush() {
+    if (pending_.empty()) return;
+    {
+      nb::gil_scoped_release release;
+      for (const auto& tb : pending_) writer_.WriteTimeBlocks(tb);
+    }
+    pending_.clear();
+  }
+
+  void close() {
+    if (closed_) return;
+    flush();
+    writer_.EndTimeBlocks();
+    writer_.Close();
+    closed_ = true;
+  }
+
+ private:
+  void fill(petsird::LowerTriangularMatrix<petsird::ListOfCoincidenceEvents>& matrix, nb::dict events) {
+    matrix.resize(num_module_types_);
+    for (size_t m1 = 0; m1 < num_module_types_; ++m1) matrix[m1].resize(m1 + 1);
+    for (auto [key, value] : events) {
+      auto pair = nb::cast<std::pair<size_t, size_t>>(key);
+      if (pair.first >= num_module_types_ || pair.second > pair.first)
+        throw std::invalid_argument("module type pairs have to be (type_1, type_2) with type_2 <= type_1");
+      auto arrays = nb::cast<std::tuple<Indices, Indices, Indices>>(value);
+      const auto& [b0, b1, tof] = arrays;
+      size_t n = b0.shape(0);
+      if (b1.shape(0) != n || tof.shape(0) != n)
+        throw std::invalid_argument("det_bin0, det_bin1 and tof_idx have different lengths");
+      auto& list = matrix[pair.first][pair.second];
+      list.resize(n);
+      for (size_t i = 0; i < n; ++i) {
+        list[i].detection_bins = {b0.data()[i], b1.data()[i]};
+        list[i].tof_idx = tof.data()[i];
+      }
+    }
+  }
+
+  petsird::binary::PETSIRDWriter writer_;
+  petsird::Header header_;
+  size_t num_module_types_ = 0;
+  std::vector<petsird::TimeBlock> pending_;
+  bool closed_ = false;
+};
+
 }  // namespace
 
 NB_MODULE(_petsird_fast, m) {
@@ -202,7 +309,20 @@ NB_MODULE(_petsird_fast, m) {
       .def(nb::init<const std::string&>(), nb::arg("fname"),
            "open a PETSIRD binary file and read its header (C++)")
       .def("read", &TimeBlockReader::read, nb::arg("max_time_blocks") = 0,
-           "read up to max_time_blocks time blocks (0: all remaining ones)")
+           nb::arg("start_ms").none() = nb::none(), nb::arg("stop_ms").none() = nb::none(),
+           "read up to max_time_blocks time blocks (0: all remaining ones); with start_ms / "
+           "stop_ms, only time blocks with a time interval within [start_ms, stop_ms] are "
+           "converted")
       .def_prop_ro("num_module_types", &TimeBlockReader::num_module_types)
       .def_prop_ro("done", &TimeBlockReader::done);
+  nb::class_<TimeBlockWriter>(m, "TimeBlockWriter")
+      .def(nb::init<const std::string&, const std::string&>(), nb::arg("fname"),
+           nb::arg("header_fname"),
+           "create a PETSIRD binary file with the header of the PETSIRD file header_fname")
+      .def("add_event_time_block", &TimeBlockWriter::add_event_time_block, nb::arg("start"),
+           nb::arg("stop"), nb::arg("prompts"), nb::arg("delayeds").none() = nb::none())
+      .def("add_singles_histogram_time_block", &TimeBlockWriter::add_singles_histogram_time_block,
+           nb::arg("start"), nb::arg("stop"), nb::arg("counts"))
+      .def("flush", &TimeBlockWriter::flush, "write all added time blocks as one batch")
+      .def("close", &TimeBlockWriter::close);
 }

@@ -61,7 +61,8 @@ jobs:
             --phantom "$PHANTOM" \
             --img_shape 55,55,19 \
             --num_true_counts "$NUM_TRUE_COUNTS" \
-            --save_lm_backprojection
+            --save_lm_backprojection \
+            --petsird_summary
 
       - name: Reconstruct PETSIRD listmode data (TOF, no attenuation correction, smoke test)
         working-directory: python

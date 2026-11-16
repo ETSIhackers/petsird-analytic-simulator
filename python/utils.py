@@ -23,6 +23,40 @@ def check_petsird_version(min_version: tuple[int, int, int] = (0, 13, 2)) -> Non
 
 check_petsird_version()
 
+# optional compiled package to read / write the time blocks of PETSIRD files with the
+# yardl-generated C++ code (see petsird_fast/ in this repository)
+# (from the repository root, the source folder petsird_fast/ can be imported as an empty
+# namespace package, hence the check for the compiled classes)
+try:
+    import petsird_fast
+
+    petsird_fast.TimeBlockReader, petsird_fast.TimeBlockWriter  # noqa: B018
+except (ImportError, AttributeError):
+    petsird_fast = None
+
+# backends to read / write PETSIRD time blocks: yardl-generated Python code (petsird) or
+# yardl-generated C++ code (petsird_fast); "auto": petsird_fast if installed
+PETSIRD_BACKENDS = ("auto", "petsird", "petsird_fast")
+
+
+def petsird_fast_available() -> bool:
+    """whether the optional compiled package petsird_fast is installed"""
+    return petsird_fast is not None
+
+
+def resolve_petsird_backend(backend: str = "auto") -> str:
+    """'petsird' or 'petsird_fast' for a backend in PETSIRD_BACKENDS"""
+    if backend not in PETSIRD_BACKENDS:
+        raise ValueError(f"unknown PETSIRD backend {backend}, available: {PETSIRD_BACKENDS}")
+    if backend == "auto":
+        return "petsird_fast" if petsird_fast_available() else "petsird"
+    if backend == "petsird_fast" and not petsird_fast_available():
+        raise ImportError(
+            "the PETSIRD backend petsird_fast is not installed (see petsird_fast/README.md)"
+        )
+    return backend
+
+
 # ratio between the FWHM and the standard deviation of a Gaussian: 2 * sqrt(2 * ln(2))
 FWHM_PER_SIGMA = 2 * np.sqrt(2 * np.log(2))
 

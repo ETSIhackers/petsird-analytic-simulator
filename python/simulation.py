@@ -16,7 +16,7 @@ from parallelproj.tof import TOFParameters
 
 from efficiencies import EfficiencyModel, to_petsird_detection_efficiencies
 from scanner import ScannerConfig, create_petsird_scanner_geometry, crystal_bulk_material
-from utils import FWHM_PER_SIGMA
+from utils import FWHM_PER_SIGMA, petsird_fast, resolve_petsird_backend
 
 
 def tof_parameters(
@@ -346,6 +346,7 @@ def write_petsird_file(
     time_block_duration_ms: int,
     delayeds: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
     singles_counts: np.ndarray | None = None,
+    backend: str = "auto",
 ) -> None:
     """write the coincidences (split evenly into time blocks) into a PETSIRD file
 
@@ -356,7 +357,18 @@ def write_petsird_file(
     (num_time_blocks, num_detection_bins) (optional, the header must have
     singles_histogram_level ALL). They are written as a singles histogram time block with
     the same time interval after every event time block.
+    backend (see utils.PETSIRD_BACKENDS): write the time blocks with the yardl-generated
+    Python code (petsird) or C++ code (petsird_fast, much faster). Both write the same
+    time blocks in the same batches (one per event time block).
     """
+    backend = resolve_petsird_backend(backend)
+    if backend == "petsird_fast":
+        _write_petsird_file_fast(
+            fname, header, det_bin_0, det_bin_1, tof_idx, num_time_blocks,
+            time_block_duration_ms, delayeds, singles_counts,
+        )
+        return
+
 
     def to_events(chunk):
         return [
@@ -398,3 +410,29 @@ def write_petsird_file(
                     )
                 )
             writer.write_time_blocks(tuple(time_blocks))
+
+
+def _write_petsird_file_fast(
+    fname, header, det_bin_0, det_bin_1, tof_idx, num_time_blocks, time_block_duration_ms,
+    delayeds, singles_counts,
+) -> None:
+    """write_petsird_file with the optional compiled package petsird_fast"""
+    chunks = np.array_split(np.arange(det_bin_0.size), num_time_blocks)
+    if delayeds is not None:
+        delayed_chunks = np.array_split(np.arange(delayeds[0].size), num_time_blocks)
+
+    with petsird_fast.TimeBlockWriter(fname, header) as writer:
+        for i_t, idx in enumerate(chunks):
+            print(f"Writing time block {i_t + 1}/{len(chunks)} (petsird_fast)")
+            start, stop = i_t * time_block_duration_ms, (i_t + 1) * time_block_duration_ms
+            sl = slice(idx[0], idx[-1] + 1) if idx.size > 0 else slice(0, 0)
+            prompts = {(0, 0): (det_bin_0[sl], det_bin_1[sl], tof_idx[sl])}
+            delayed = None
+            if delayeds is not None:
+                d = delayed_chunks[i_t]
+                dsl = slice(d[0], d[-1] + 1) if d.size > 0 else slice(0, 0)
+                delayed = {(0, 0): tuple(x[dsl] for x in delayeds)}
+            writer.add_event_time_block(start, stop, prompts, delayed)
+            if singles_counts is not None:
+                writer.add_singles_histogram_time_block(start, stop, [singles_counts[i_t]])
+            writer.flush()

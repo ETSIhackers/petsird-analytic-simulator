@@ -47,7 +47,12 @@ from simulation import (
     to_petsird_coincidences,
     write_petsird_file,
 )
-from utils import FWHM_PER_SIGMA, check_petsird_version
+from utils import (
+    FWHM_PER_SIGMA,
+    PETSIRD_BACKENDS,
+    check_petsird_version,
+    resolve_petsird_backend,
+)
 
 check_petsird_version()
 
@@ -174,8 +179,25 @@ visual_group.add_argument(
 
 general_group = parser.add_argument_group("General Options")
 general_group.add_argument("--seed", type=int, default=0, help="random seed for reproducibility")
+general_group.add_argument(
+    "--petsird_backend",
+    choices=PETSIRD_BACKENDS,
+    default="auto",
+    help="write the time blocks with the yardl-generated Python code (petsird) or the "
+    "optional compiled package petsird_fast (C++, much faster, byte-identical files); "
+    "auto: petsird_fast if installed",
+)
+output_group.add_argument(
+    "--petsird_summary",
+    action="store_true",
+    help="write a human-readable summary of the PETSIRD file (petsird_summary.txt, output "
+    "of petsird.helpers.analysis, which reads all events with the yardl-generated Python "
+    "code and is slow for large files)",
+)
 
 args = parser.parse_args()
+# the backend that is used (e.g. auto -> petsird_fast), also stored in sim_parameters.json
+args.petsird_backend = resolve_petsird_backend(args.petsird_backend)
 
 img_shape = args.img_shape
 voxel_size = args.voxel_size
@@ -183,7 +205,10 @@ voxel_size = args.voxel_size
 num_energy_bins = 1
 
 if args.output_dir is None:
-    output_dir = Path("data") / f"sim_{args.phantom}_{args.num_true_counts}_{args.seed}"
+    output_dir = (
+        Path("data")
+        / f"sim_{args.phantom}_{args.num_true_counts}_{args.seed}_{args.petsird_backend}"
+    )
 else:
     output_dir = Path(args.output_dir)
 output_dir.mkdir(parents=True, exist_ok=True)
@@ -405,8 +430,10 @@ if not args.skip_writing:
         args.event_block_duration,
         delayeds=petsird_delayeds,
         singles_counts=singles_counts if args.random_fraction > 0 else None,
+        backend=args.petsird_backend,
     )
 
+if args.petsird_summary and not args.skip_writing:
     # human-readable summary of the written file (output of petsird.helpers.analysis)
     summary = subprocess.run(
         [sys.executable, "-m", "petsird.helpers.analysis", "-i", str(output_dir / args.fname)],

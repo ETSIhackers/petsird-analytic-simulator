@@ -1,6 +1,6 @@
 # petsird_fast (prototype)
 
-Fast reading of the time blocks of PETSIRD binary files into flat NumPy arrays, using
+Fast reading / writing of the time blocks of PETSIRD binary files from / to flat NumPy arrays, using
 the yardl-generated C++ code of PETSIRD (`libpetsird` from conda-forge) through a small
 [nanobind](https://github.com/wjakob/nanobind) extension.
 
@@ -54,7 +54,27 @@ data["other"]                       # counts of everything that is not converted
 # large files: chunks of time blocks
 for chunk in petsird_fast.iter_time_blocks(fname, max_time_blocks=100):
     ...
+
+# only the time blocks whose time interval lies within [start, stop] (ms)
+data = petsird_fast.read_time_blocks(fname, time_range_ms=(0, 500))
+data["num_skipped_time_blocks"]
 ```
+
+Writing (the header is written with the yardl Python package into a temporary file, the
+time blocks with the yardl-generated C++ code; the files are byte-identical to the ones
+of the yardl Python writer):
+
+```python
+with petsird_fast.TimeBlockWriter(fname, header) as writer:
+    for start, stop, ... in time_blocks:
+        writer.add_event_time_block(start, stop, {(0, 0): (det_bin0, det_bin1, tof_idx)},
+                                    delayeds={(0, 0): (...)})            # optional
+        writer.add_singles_histogram_time_block(start, stop, [counts])   # optional
+        writer.flush()   # writes the added time blocks
+```
+
+The simulator / reconstruction of this repository use petsird_fast automatically if
+it is installed (`--petsird_backend {auto,petsird,petsird_fast}`).
 
 All other time block types (dead time, external signals, bed / gantry movement with
 identity or non-identity transforms, weighted events, singles per singles unit) and
@@ -105,7 +125,11 @@ output per event.
   nanobind's `ndarray` (DLPack) can later return them for other frameworks
   (cupy, pytorch), or fill buffers (e.g. pinned or device memory) provided by the caller,
   without changing the structure of the result.
-- **Later: writing.** A bulk writer (arrays in, time blocks out) would speed up the
-  simulator in the same way.
+- **Writing.** The header goes through a temporary file written by the yardl Python
+  package, which avoids binding the header types. Every time block is written separately
+  (as the yardl Python writer does), which gives byte-identical files. Writing the 12M
+  events of the default simulation takes 0.4 s instead of 35 s.
+- **Time ranges.** The binary format has no index, so all time blocks are still read
+  (fast), but only those within the time range are converted to arrays.
 - **Packaging.** On the long term a conda-forge package, possibly as an additional
   output of the PETSIRD feedstock(s), built against the same `libpetsird` version.

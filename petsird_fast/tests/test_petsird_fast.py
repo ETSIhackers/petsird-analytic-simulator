@@ -194,12 +194,13 @@ def test_missing_file_raises(tmp_path):
 
 def test_read_listmode_events_identical_with_and_without_petsird_fast(tmp_path):
     """python/petsird_reader.read_listmode_events gives identical results (and warnings)
-    with the petsird_fast backend (fname given) and the yardl Python backend"""
+    with the petsird_fast and the petsird (yardl Python) backends"""
     import warnings
 
     import petsird_reader
+    from utils import petsird_fast_available
 
-    assert petsird_reader.petsird_fast_available()
+    assert petsird_fast_available()
     rng = np.random.default_rng(3)
     header = make_header()
     blocks = []
@@ -233,7 +234,8 @@ def test_read_listmode_events_identical_with_and_without_petsird_fast(tmp_path):
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             result = petsird_reader.read_listmode_events(
-                reader, h, centers, fname=str(fname) if use_fast else None
+                reader, h, centers, fname=str(fname),
+                backend="petsird_fast" if use_fast else "petsird",
             )
         return result, sorted(str(x.message) for x in w)
 
@@ -249,3 +251,83 @@ def test_read_listmode_events_identical_with_and_without_petsird_fast(tmp_path):
             np.testing.assert_array_equal(fast[stream][name], values)
     for name, values in ref["singles"].items():
         np.testing.assert_array_equal(fast["singles"][name], values)
+
+
+@pytest.mark.parametrize("num_module_types", [1, 2])
+def test_writer_gives_same_bytes_as_yardl_python_writer(tmp_path, num_module_types):
+    """TimeBlockWriter (C++) writes byte-identical files to the yardl Python writer"""
+    rng = np.random.default_rng(4)
+    header = make_header(num_module_types)
+    pairs = [(m1, m2) for m1 in range(num_module_types) for m2 in range(m1 + 1)]
+
+    def arrays(n):
+        return tuple(rng.integers(0, 96, n).astype(np.uint32) for _ in range(3))
+
+    blocks = []
+    for k in range(3):
+        prompts = {pair: arrays(int(rng.integers(0, 30))) for pair in pairs}
+        delayeds = None if k == 1 else {pair: arrays(5) for pair in pairs}
+        singles = [rng.integers(0, 2**40, 96).astype(np.uint64) for _ in range(num_module_types)]
+        blocks.append((10 * k, 10 * (k + 1), prompts, delayeds, singles))
+
+    def events(arrs):
+        b0, b1, t = arrs
+        return [petsird.CoincidenceEvent(detection_bins=[int(a), int(b)], tof_idx=int(c)) for a, b, c in zip(b0, b1, t)]
+
+    ref = tmp_path / "python.bin"
+    with petsird.BinaryPETSIRDWriter(str(ref)) as writer:
+        writer.write_header(header)
+        for start, stop, prompts, delayeds, singles in blocks:
+            interval = petsird.TimeInterval(start=start, stop=stop)
+            writer.write_time_blocks(
+                (
+                    petsird.TimeBlock.EventTimeBlock(
+                        petsird.EventTimeBlock(
+                            time_interval=interval,
+                            prompt_events=lower_triangular(num_module_types, lambda m1, m2: events(prompts[(m1, m2)])),
+                            delayed_events=[]
+                            if delayeds is None
+                            else lower_triangular(num_module_types, lambda m1, m2: events(delayeds[(m1, m2)])),
+                        )
+                    ),
+                    petsird.TimeBlock.SinglesHistogramTimeBlock(
+                        petsird.SinglesHistogramTimeBlock(
+                            time_interval=interval,
+                            singles_per_detection_bin_histogram=[s.tolist() for s in singles],
+                        )
+                    ),
+                )
+            )
+
+    fast = tmp_path / "fast.bin"
+    with petsird_fast.TimeBlockWriter(fast, header) as writer:
+        for start, stop, prompts, delayeds, singles in blocks:
+            writer.add_event_time_block(start, stop, prompts, delayeds)
+            writer.add_singles_histogram_time_block(start, stop, singles)
+            writer.flush()
+
+    assert fast.read_bytes() == ref.read_bytes()
+
+
+def test_simulator_write_backends_give_identical_files(tmp_path):
+    """simulation.write_petsird_file writes byte-identical files with both backends"""
+    from simulation import write_petsird_file
+
+    rng = np.random.default_rng(5)
+    header = make_header()
+    header.scanner.singles_histogram_level = petsird.SinglesHistogramLevelType.ALL
+    prompts = tuple(rng.integers(0, 96, 200) for _ in range(3))
+    delayeds = tuple(rng.integers(0, 96, 50) for _ in range(3))
+    singles = rng.integers(0, 1000, (3, 96))
+    files = {}
+    for backend in ("petsird", "petsird_fast"):
+        files[backend] = tmp_path / f"{backend}.bin"
+        write_petsird_file(files[backend], header, *prompts, 3, 100, delayeds=delayeds, singles_counts=singles, backend=backend)
+    assert files["petsird"].read_bytes() == files["petsird_fast"].read_bytes()
+
+
+def test_writer_rejects_invalid_module_type_pair(tmp_path):
+    a = np.zeros(2, dtype=np.uint32)
+    with pytest.raises(ValueError):
+        with petsird_fast.TimeBlockWriter(tmp_path / "x.bin", make_header()) as writer:
+            writer.add_event_time_block(0, 1, {(0, 1): (a, a, a)})
