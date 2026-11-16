@@ -22,6 +22,15 @@ conda activate petsird-fast
 python -m pip install --no-build-isolation ./petsird_fast
 ```
 
+`petsird_fast/environment.yml` is a complete environment for local testing: it contains
+everything of the top-level `environment.yml` (simulator, reconstruction, tests) plus
+`libpetsird` and the build tools, so that both test suites run in it:
+
+```bash
+python -m pytest                     # simulator / reconstruction
+python -m pytest petsird_fast/tests  # petsird_fast
+```
+
 The `libpetsird` 0.13.2 headers require C++20 (through xtensor), which the CMake
 configuration sets.
 

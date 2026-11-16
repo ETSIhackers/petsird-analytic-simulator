@@ -1,17 +1,31 @@
-# build / test environment of the petsird_fast prototype (linux-64, osx-arm64)
+# complete environment for local testing (linux-64, osx-arm64):
+# simulator / reconstruction of this repository (../environment.yml) and building /
+# testing the petsird_fast prototype
+#
+#   conda env create -f petsird_fast/environment.yml
+#   conda activate petsird-fast
+#   python -m pip install --no-build-isolation ./petsird_fast
+#   python -m pytest                    # tests of the simulator / reconstruction
+#   python -m pytest petsird_fast/tests # tests of petsird_fast
 name: petsird-fast
 channels:
   - conda-forge
 dependencies:
-  - python>=3.10
-  - libpetsird=0.13.2
+  # simulator / reconstruction (as in ../environment.yml)
+  - python>=3.12
+  - numpy>=1.24.3
+  - matplotlib>=3.8.0
+  - array-api-compat>=1.7
+  - parallelproj>=2.0.2,<3
+  - ipython
+  - pytest
+  # PETSIRD: the yardl-generated Python package and C++ library of the same version
   - petsird=0.13.2
+  - libpetsird=0.13.2
+  # building petsird_fast
   - cxx-compiler
   - cmake>=3.20
   - make
   - nanobind>=2
   - scikit-build-core>=0.10
   - pip
-  - numpy
-  - pytest
-  - parallelproj>=2.0.2,<3
