@@ -3,7 +3,7 @@
 1. raw events: yardl-generated Python reader (one Python object per event) vs
    petsird_fast (C++, flat arrays)
 2. end to end: python/petsird_reader.read_listmode_events() (LOR coordinates, TOF bins,
-   efficiencies, ...) vs the same conversion of the petsird_fast arrays
+   efficiencies, ...) with the yardl Python backend vs the petsird_fast backend
 
 Usage (from the repository root):
     python petsird_fast/scripts/benchmark.py FILE.bin
@@ -19,12 +19,7 @@ import petsird
 import petsird_fast
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "python"))
-from petsird_reader import (  # noqa: E402
-    _convert_events,
-    get_all_detector_centers,
-    get_calibration_factor,
-    read_listmode_events,
-)
+from petsird_reader import get_all_detector_centers, read_listmode_events  # noqa: E402
 
 fname = sys.argv[1]
 
@@ -74,27 +69,14 @@ def end_to_end_yardl():
 
 
 def end_to_end_fast():
-    data = petsird_fast.read_time_blocks(fname)
-    calibration_factor = get_calibration_factor(header.scanner)
-    return {
-        s: _convert_events(
-            {
-                pair: [np.stack([a["det_bin0"], a["det_bin1"], a["tof_idx"]], 1).astype(np.int64)]
-                for pair, a in data[s].items()
-                if a["det_bin0"].size > 0
-            },
-            header.scanner,
-            centers,
-            calibration_factor,
-            True,
-            s,
-        )
-        for s in ("prompts", "delayeds")
-    }
+    # read_listmode_events uses petsird_fast if the file name is given
+    reader = petsird.BinaryPETSIRDReader(fname)
+    h = reader.read_header()
+    return read_listmode_events(reader, h, centers, fname=fname)
 
 
 ref, t_ref = timed("end to end: read_listmode_events (yardl Python)", end_to_end_yardl, n)
-new, t_new = timed("end to end: petsird_fast + same conversion", end_to_end_fast, n)
+new, t_new = timed("end to end: read_listmode_events (petsird_fast)", end_to_end_fast, n)
 for s in ("prompts", "delayeds"):
     for k, v in new[s].items():
         assert np.array_equal(v, ref[s][k]), (s, k)

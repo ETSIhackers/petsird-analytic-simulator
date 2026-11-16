@@ -206,6 +206,11 @@ and warns about information that is ignored:
 - single, triple and quadruple events, singles histograms per singles unit (level
   MODULE), external signals and non-detecting volumes
 
+The time blocks are read with the yardl-generated Python code (about 3 µs per event).
+If the optional compiled package [`petsird_fast`](petsird_fast/README.md) (prototype,
+yardl-generated C++ code via `libpetsird`) is installed, it is used automatically
+instead, which is about 30x faster end to end with identical results.
+
 After the reconstruction, the same visualization of the PETSIRD geometry and the first
 events is shown on top of the reconstructed image (and saved as
 `my_petsird_file_geometry_and_events_<fingerprint>_<hash>.png`).

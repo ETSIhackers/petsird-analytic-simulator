@@ -25,6 +25,7 @@ from petsird_reader import (
     get_all_detector_centers,
     get_num_data_bins,
     get_tof_parameters,
+    petsird_fast_available,
     EVENT_ARRAYS,
     UnsupportedPETSIRDFeatureError,
     read_listmode_events,
@@ -229,6 +230,11 @@ else:
 # %%
 # prompt and delayed events (LOR end points, TOF bins, efficiencies)
 
+# the time blocks are read with the optional compiled package petsird_fast if installed
+print(
+    "Reading time blocks with "
+    + ("petsird_fast (C++)" if petsird_fast_available() else "the yardl-generated Python code")
+)
 streams = ("prompts", "delayeds")
 # cached as flat dictionary with keys "<stream>_<array>"
 flat_events = load_or_compute(
@@ -236,7 +242,7 @@ flat_events = load_or_compute(
     compute=lambda: {
         f"{stream}_{k}": v
         for stream, arrays in read_listmode_events(
-            reader, header, all_detector_centers, verbose=args.verbose
+            reader, header, all_detector_centers, verbose=args.verbose, fname=str(fname)
         ).items()
         for k, v in arrays.items()
     },

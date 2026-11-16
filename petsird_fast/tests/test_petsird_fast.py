@@ -190,3 +190,62 @@ def test_other_time_blocks_are_counted(tmp_path):
 def test_missing_file_raises(tmp_path):
     with pytest.raises(Exception):
         petsird_fast.read_time_blocks(tmp_path / "does_not_exist.bin")
+
+
+def test_read_listmode_events_identical_with_and_without_petsird_fast(tmp_path):
+    """python/petsird_reader.read_listmode_events gives identical results (and warnings)
+    with the petsird_fast backend (fname given) and the yardl Python backend"""
+    import warnings
+
+    import petsird_reader
+
+    assert petsird_reader.petsird_fast_available()
+    rng = np.random.default_rng(3)
+    header = make_header()
+    blocks = []
+    for k in range(3):
+        interval = petsird.TimeInterval(start=10 * k, stop=10 * (k + 1))
+        blocks += [
+            petsird.TimeBlock.EventTimeBlock(
+                petsird.EventTimeBlock(
+                    time_interval=interval,
+                    prompt_events=[[random_events(rng, 40)]],
+                    delayed_events=[[random_events(rng, 10)]],
+                )
+            ),
+            petsird.TimeBlock.SinglesHistogramTimeBlock(
+                petsird.SinglesHistogramTimeBlock(
+                    time_interval=interval,
+                    singles_per_detection_bin_histogram=[rng.integers(0, 1000, 96).tolist()],
+                )
+            ),
+            petsird.TimeBlock.ExternalSignalTimeBlock(
+                petsird.ExternalSignalTimeBlock(time_interval=interval, signal_id=1, signal_values=[1.0])
+            ),
+        ]
+    fname = tmp_path / "events.bin"
+    write_file(fname, header, blocks)
+
+    def read(use_fast: bool):
+        reader = petsird.BinaryPETSIRDReader(str(fname))
+        h = reader.read_header()
+        centers = petsird_reader.get_all_detector_centers(h.scanner.scanner_geometry)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            result = petsird_reader.read_listmode_events(
+                reader, h, centers, fname=str(fname) if use_fast else None
+            )
+        return result, sorted(str(x.message) for x in w)
+
+    ref, ref_warnings = read(False)
+    fast, fast_warnings = read(True)
+    assert fast_warnings == ref_warnings
+    # random events: some are unordered and in module pairs that are not in coincidence
+    assert any("not ordered" in w for w in ref_warnings)
+    assert any("external signal" in w for w in ref_warnings)
+    for stream in ("prompts", "delayeds"):
+        for name, values in ref[stream].items():
+            assert fast[stream][name].dtype == values.dtype
+            np.testing.assert_array_equal(fast[stream][name], values)
+    for name, values in ref["singles"].items():
+        np.testing.assert_array_equal(fast["singles"][name], values)

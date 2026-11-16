@@ -72,14 +72,18 @@ Benchmark on a default simulation of this repository (`01_analytic_petsird_lm_si
 
 | | time | per event |
 |---|---|---|
-| yardl Python: events to arrays | 32.6 s | 2.7 µs |
-| petsird_fast: events to arrays | 0.38 s | 32 ns (85x) |
-| end to end `read_listmode_events` (yardl Python) | 36.8 s | 3.1 µs |
-| end to end, petsird_fast + the same NumPy conversion | 2.65 s | 0.22 µs (14x) |
+| yardl Python: events to arrays | 33.9 s | 2.8 µs |
+| petsird_fast: events to arrays | 0.35 s | 29 ns (98x) |
+| end to end `read_listmode_events` (yardl Python backend) | 34.4 s | 2.9 µs |
+| end to end `read_listmode_events` (petsird_fast backend) | 1.17 s | 98 ns (29x) |
 
-All arrays are identical. With petsird_fast, the remaining time is spent in the NumPy
-conversion of `python/petsird_reader.py` (LOR end points, efficiencies, ...), which can
-be optimized separately.
+All arrays are identical. `python/petsird_reader.read_listmode_events` uses petsird_fast
+automatically if it is installed and the file name is given (`fname=...`, as in
+`02_reconstruct_petsird.py`), and falls back to the yardl-generated Python code
+otherwise. With petsird_fast, the remaining time is the NumPy conversion to LOR end
+points, efficiencies etc. via per-detection-bin lookup tables
+(`petsird_reader.DetectionBinTables`), which is limited by writing about 50 bytes of
+output per event.
 
 ## Design notes
 
