@@ -68,7 +68,9 @@ def read_first_events(
 ) -> np.ndarray:
     """read the first prompt events of a PETSIRD file
 
-    The header must have been read already. Returns an array of shape (num_events, 5)
+    The header must have been read already. Note that the yardl-generated Python reader
+    deserializes the complete first event time block (slow for large time blocks); if
+    the events were read already, use petsird_reader.first_events() instead. Returns an array of shape (num_events, 5)
     with the columns (module type 0, module type 1, detection bin 0, detection bin 1, tof_idx).
     """
     events = []

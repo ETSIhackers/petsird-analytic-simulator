@@ -6,12 +6,13 @@ Everything is derived from the PETSIRD data following the PETSIRD definitions on
 
 import math
 import warnings
+from dataclasses import dataclass
 
 import numpy as np
 import petsird
 from parallelproj.tof import TOFParameters
 
-from utils import FWHM_PER_SIGMA
+from utils import FWHM_PER_SIGMA, Progress, petsird_fast, resolve_petsird_backend
 
 # NOTE on conventions used in this module (PETSIRD >= 0.13):
 # - a DetectionBin of a module type encodes
@@ -315,6 +316,25 @@ def detection_bin_offsets(scanner_info: petsird.ScannerInformation) -> np.ndarra
     return np.concatenate([[0], np.cumsum(num_bins)]).astype(np.int64)
 
 
+def first_events(
+    events: dict[str, np.ndarray], scanner_info: petsird.ScannerInformation, num_events: int
+) -> np.ndarray:
+    """the first events of events read with read_listmode_events() in the format of
+    geometry_plots.read_first_events(): array of shape (num_events, 5) with the columns
+    (module type 0, module type 1, detection bin 0, detection bin 1, tof_idx)
+
+    (for multiple module types, the events are ordered by module type pair)
+    """
+    offsets = detection_bin_offsets(scanner_info)
+    columns = []
+    for name in ("det_bin0", "det_bin1"):
+        global_bins = events[name][:num_events]
+        module_type = np.searchsorted(offsets, global_bins, side="right") - 1
+        columns += [module_type, global_bins - offsets[module_type]]
+    m0, b0, m1, b1 = columns
+    return np.stack([m0, m1, b0, b1, events["tof_bins"][:num_events]], axis=1).astype(np.int64)
+
+
 # names of the arrays describing listmode events (see read_listmode_events)
 EVENT_ARRAYS = (
     "coords0",
@@ -325,7 +345,76 @@ EVENT_ARRAYS = (
     "energy_idx1",
     "det_bin0",
     "det_bin1",
+    "event_index",
 )
+
+
+@dataclass
+class DetectionBinTables:
+    """lookup tables indexed by the detection bins of every module type (from the header)
+
+    They convert detection bins of events to LOR end points and efficiencies with 1D
+    lookups (no expansion into module / element / energy indices). The tables are small
+    (one entry per detection bin / module pair matrix element) and could also be moved to
+    a GPU to do the lookups there.
+    """
+
+    # per module type: ADPs (num_detection_bins, 3), detection bin efficiencies
+    # (num_detection_bins,), number of detection bins per module and energy bins
+    adps: list[np.ndarray]
+    effs: list[np.ndarray]
+    bins_per_module: list[int]
+    num_energy_bins: list[int]
+    # per module type pair (type_1, type_2 <= type_1): dense SGID LUT and the flattened
+    # module pair efficiencies [sgid, detection bin in module 1, detection bin in module 2]
+    sgid_luts: dict[tuple[int, int], np.ndarray]
+    module_pair_effs: dict[tuple[int, int], np.ndarray]
+    # global detection bin index offsets of all module types (see detection_bin_offsets)
+    bin_offsets: np.ndarray
+    calibration_factor: float
+
+
+def detection_bin_tables(
+    scanner_info: petsird.ScannerInformation,
+    all_detector_centers: list[np.ndarray],
+    with_calibration_factor: bool = True,
+) -> DetectionBinTables:
+    """lookup tables of all detection bins (see DetectionBinTables)"""
+    num_module_types = scanner_info.scanner_geometry.number_of_module_types()
+    infos = [module_type_info(scanner_info, m) for m in range(num_module_types)]
+    return DetectionBinTables(
+        # detection bin = energy_idx + (element_idx + module_idx * num_det_els) * num_energy_bins
+        adps=[
+            np.repeat(all_detector_centers[m].reshape(-1, 3), infos[m][2], axis=0)
+            for m in range(num_module_types)
+        ],
+        effs=[
+            get_detection_bin_efficiencies(scanner_info, m).ravel()
+            for m in range(num_module_types)
+        ],
+        bins_per_module=[info[1] * info[2] for info in infos],
+        num_energy_bins=[info[2] for info in infos],
+        sgid_luts={
+            (m1, m2): get_module_pair_sgid_lut(scanner_info, m1, m2)
+            for m1 in range(num_module_types)
+            for m2 in range(m1 + 1)
+        },
+        module_pair_effs={
+            (m1, m2): get_module_pair_efficiencies(scanner_info, m1, m2).reshape(-1)
+            for m1 in range(num_module_types)
+            for m2 in range(m1 + 1)
+        },
+        bin_offsets=detection_bin_offsets(scanner_info),
+        calibration_factor=(
+            get_calibration_factor(scanner_info) if with_calibration_factor else 1.0
+        ),
+    )
+
+
+# raw coincidences of one stream per module type pair: (detection bin 0, detection bin 1,
+# tof_idx) as uint32 arrays and the index of the events among all events of the stream and
+# module type pair in the file (int64, file order, also counting skipped time blocks)
+RawEvents = dict[tuple[int, int], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]
 
 
 def read_listmode_events(
@@ -335,9 +424,22 @@ def read_listmode_events(
     store_energy_bins: bool = True,
     verbose: bool = False,
     with_calibration_factor: bool = True,
+    fname: str | None = None,
+    backend: str = "auto",
+    time_range_ms: tuple[int, int] | None = None,
 ) -> dict[str, dict[str, np.ndarray]]:
     """read all prompt and delayed events and convert them to LOR coordinates, TOF bins
     and efficiencies, and read all singles histograms
+
+    backend (see utils.PETSIRD_BACKENDS): with "petsird_fast" (default for "auto" if the
+    optional compiled package petsird_fast is installed and the file name fname is given),
+    the time blocks of the file fname are read with the yardl-generated C++ code into
+    flat arrays, which is much faster. With "petsird", the time blocks are read with
+    reader (yardl-generated Python code). The results are identical.
+
+    time_range_ms: (start, stop) in ms. Only time blocks (of all types) whose time
+    interval lies within [start, stop] are used, all others are skipped (their number is
+    returned as "num_skipped_time_blocks").
 
     Returns
     -------
@@ -356,27 +458,62 @@ def read_listmode_events(
         (empty if store_energy_bins is False)
     det_bin0, det_bin1 : (num_events,) int64 arrays with the global detection bin
         indices (see detection_bin_offsets) of the two detection bins
+    event_index : (num_events,) int64 array with the index of every event among all events
+        of its stream and module type pair in the file (file order, i.e. also counting the
+        events of time blocks outside of time_range_ms)
+    The result also contains "event_time_ms": {"selected": ..., "all": ...}, the summed
+    durations of the selected / all event time blocks (ms).
 
     The efficiencies are computed in a vectorized way following the definition in
     petsird.DetectionEfficiencies (equivalent to petsird.helpers.get_detection_efficiency).
     The TOF bins are only meaningful if all module type pairs use the same TOF binning.
     """
-
     scanner_info: petsird.ScannerInformation = header.scanner
-    num_module_types = scanner_info.scanner_geometry.number_of_module_types()
 
-    calibration_factor = (
-        get_calibration_factor(scanner_info) if with_calibration_factor else 1.0
-    )
+    # without the file name, only the yardl Python reader can be used
+    backend = resolve_petsird_backend("petsird" if backend == "auto" and fname is None else backend)
+    if backend == "petsird_fast" and fname is None:
+        raise ValueError("the petsird_fast backend requires the file name fname")
+    if backend == "petsird_fast":
+        if verbose:
+            print("\nReading time blocks with petsird_fast (C++) ...")
+        raw_events, singles, num_ignored, num_skipped, event_time_ms = (
+            _read_time_blocks_petsird_fast(fname, scanner_info, time_range_ms)
+        )
+    else:
+        if verbose:
+            print("\nReading time blocks with the yardl-generated Python code ...")
+        raw_events, singles, num_ignored, num_skipped, event_time_ms = _read_time_blocks_yardl(
+            reader, scanner_info, verbose, time_range_ms
+        )
 
-    # raw detection bins and TOF indices for all streams and module type pairs
-    raw_events: dict[str, dict[tuple[int, int], list[np.ndarray]]] = {
-        stream: {(m1, m2): [] for m1 in range(num_module_types) for m2 in range(m1 + 1)}
+    for name, num in num_ignored.items():
+        warnings.warn(f"Ignored {num} {name}.", UserWarning)
+
+    tables = detection_bin_tables(scanner_info, all_detector_centers, with_calibration_factor)
+    result = {
+        stream: _convert_events(raw_events[stream], tables, store_energy_bins, stream)
         for stream in ("prompts", "delayeds")
     }
+    result["singles"] = singles
+    result["num_skipped_time_blocks"] = num_skipped
+    result["event_time_ms"] = event_time_ms
+    return result
 
-    if verbose:
-        print("\nReading prompt and delayed events from time blocks ...")
+
+def _read_time_blocks_yardl(
+    reader: petsird.BinaryPETSIRDReader,
+    scanner_info: petsird.ScannerInformation,
+    verbose: bool,
+    time_range_ms: tuple[int, int] | None = None,
+) -> tuple[dict[str, RawEvents], dict[str, np.ndarray], dict[str, int], int, dict[str, int]]:
+    """raw events, singles histograms, ignored content, number of skipped time blocks and
+    durations of the selected / all event time blocks (yardl-generated Python code)"""
+    num_module_types = scanner_info.scanner_geometry.number_of_module_types()
+    pairs = [(m1, m2) for m1 in range(num_module_types) for m2 in range(m1 + 1)]
+    chunks: dict[str, dict[tuple[int, int], list[np.ndarray]]] = {
+        stream: {pair: [] for pair in pairs} for stream in ("prompts", "delayeds")
+    }
 
     # singles histograms (level ALL) of all time blocks
     singles_counts: list[np.ndarray] = []
@@ -395,7 +532,36 @@ def read_listmode_events(
             return len(nested)
         return sum(_num_events(x) for x in nested)
 
+    num_skipped = 0
+    num_read_events = 0
+    # number of events per stream and module type pair in all event time blocks so far
+    next_index = {stream: {pair: 0 for pair in pairs} for stream in chunks}
+    index_chunks: dict[str, dict[tuple[int, int], list[np.ndarray]]] = {
+        stream: {pair: [] for pair in pairs} for stream in chunks
+    }
+    event_time_ms = {"selected": 0, "all": 0}
+
+    def _nested(time_block, stream):
+        return time_block.value.prompt_events if stream == "prompts" else time_block.value.delayed_events
+
+    progress = Progress("Reading time blocks (petsird)")
     for i_t, time_block in enumerate(reader.read_time_blocks()):
+        progress.update(1, events=num_read_events)
+        interval = time_block.value.time_interval
+        is_event_block = isinstance(time_block, petsird.TimeBlock.EventTimeBlock)
+        if is_event_block:
+            event_time_ms["all"] += interval.stop - interval.start
+        if time_range_ms is not None and (
+            interval.start < time_range_ms[0] or interval.stop > time_range_ms[1]
+        ):
+            num_skipped += 1
+            if is_event_block:
+                for stream in chunks:
+                    nested = _nested(time_block, stream)
+                    for m1, m2 in pairs:
+                        if len(nested) > 0:
+                            next_index[stream][(m1, m2)] += len(nested[m1][m2])
+            continue
         if isinstance(time_block, petsird.TimeBlock.WeightedEventTimeBlock):
             raise UnsupportedPETSIRDFeatureError(
                 "Weighted event time blocks are not supported."
@@ -413,11 +579,11 @@ def read_listmode_events(
                 )
             continue
         if isinstance(time_block, petsird.TimeBlock.DeadTimeTimeBlock):
-            _count_ignored("dead time time blocks (dead time is not corrected)")
+            _count_ignored(_IGNORED_NAMES["dead_time_time_blocks"])
             continue
         if isinstance(time_block, petsird.TimeBlock.SinglesHistogramTimeBlock):
             if scanner_info.singles_histogram_level != petsird.SinglesHistogramLevelType.ALL:
-                _count_ignored("singles histogram time blocks (not per detection bin)")
+                _count_ignored(_IGNORED_NAMES["singles_unit_histogram_time_blocks"])
                 continue
             interval = time_block.value.time_interval
             singles_durations_ms.append(interval.stop - interval.start)
@@ -431,83 +597,217 @@ def read_listmode_events(
             )
             continue
         if isinstance(time_block, petsird.TimeBlock.ExternalSignalTimeBlock):
-            _count_ignored("external signal time blocks")
+            _count_ignored(_IGNORED_NAMES["external_signal_time_blocks"])
             continue
         if not isinstance(time_block, petsird.TimeBlock.EventTimeBlock):
             _count_ignored(f"time blocks of type {type(time_block).__name__}")
             continue
 
-        _count_ignored("single events", _num_events(time_block.value.single_events))
-        _count_ignored("triple events", _num_events(time_block.value.triple_events))
+        _count_ignored(_IGNORED_NAMES["single_events"], _num_events(time_block.value.single_events))
+        _count_ignored(_IGNORED_NAMES["triple_events"], _num_events(time_block.value.triple_events))
         _count_ignored(
-            "quadruple events", _num_events(time_block.value.quadruple_events)
+            _IGNORED_NAMES["quadruple_events"], _num_events(time_block.value.quadruple_events)
         )
 
-        if verbose:
-            interval = time_block.value.time_interval
-            print(
-                f"Processing time block {i_t} with time interval {interval.start} ... {interval.stop}"
-            )
-
+        event_time_ms["selected"] += interval.stop - interval.start
         for stream, nested_events in (
             ("prompts", time_block.value.prompt_events),
             ("delayeds", time_block.value.delayed_events),
         ):
             if len(nested_events) == 0:
                 continue
-            for m1, m2 in raw_events[stream]:
+            for m1, m2 in pairs:
                 events = nested_events[m1][m2]
                 if len(events) == 0:
                     continue
-                raw_events[stream][(m1, m2)].append(
+                num_read_events += len(events)
+                first = next_index[stream][(m1, m2)]
+                index_chunks[stream][(m1, m2)].append(np.arange(first, first + len(events)))
+                next_index[stream][(m1, m2)] += len(events)
+                chunks[stream][(m1, m2)].append(
                     np.array(
                         [(e.detection_bins[0], e.detection_bins[1], e.tof_idx) for e in events],
-                        dtype=np.int64,
+                        dtype=np.uint32,
                     )
                 )
 
-    for name, num in num_ignored.items():
-        warnings.warn(f"Ignored {num} {name}.", UserWarning)
+    progress.update(0, events=num_read_events)
+    progress.close()
 
-    result = {
-        stream: _convert_events(
-            raw_events[stream],
-            scanner_info,
-            all_detector_centers,
-            calibration_factor,
-            store_energy_bins,
-            stream,
-        )
-        for stream in raw_events
-    }
-    result["singles"] = {
+    raw_events: dict[str, RawEvents] = {}
+    for stream, per_pair in chunks.items():
+        raw_events[stream] = {}
+        for pair, c in per_pair.items():
+            ev = np.concatenate(c) if c else np.zeros((0, 3), dtype=np.uint32)
+            idx = index_chunks[stream][pair]
+            index = np.concatenate(idx).astype(np.int64) if idx else np.zeros(0, dtype=np.int64)
+            raw_events[stream][pair] = (ev[:, 0], ev[:, 1], ev[:, 2], index)
+
+    singles = {
         "counts": np.array(singles_counts, dtype=np.int64)
         if singles_counts
         else np.zeros((0, 0), dtype=np.int64),
         "durations_ms": np.array(singles_durations_ms, dtype=np.int64),
     }
-    return result
+    return raw_events, singles, num_ignored, num_skipped, event_time_ms
+
+
+# names of the ignored content in the warnings (keys: names used by petsird_fast)
+_IGNORED_NAMES = {
+    "dead_time_time_blocks": "dead time time blocks (dead time is not corrected)",
+    "singles_unit_histogram_time_blocks": "singles histogram time blocks (not per detection bin)",
+    "external_signal_time_blocks": "external signal time blocks",
+    "single_events": "single events",
+    "triple_events": "triple events",
+    "quadruple_events": "quadruple events",
+}
+
+
+def _event_index(coincidences: dict[str, np.ndarray]) -> np.ndarray:
+    """file order index of all events of petsird_fast coincidences (from the offsets and
+    the file order index of the first event of every event time block)"""
+    offsets = coincidences["block_offsets"]
+    counts = np.diff(offsets)
+    shift = coincidences["block_first_index"] - offsets[:-1]
+    return np.repeat(shift, counts) + np.arange(offsets[-1], dtype=np.int64)
+
+
+def _read_petsird_fast_chunks(
+    fname: str, time_range_ms: tuple[int, int] | None, chunk_size: int = 10
+) -> dict:
+    """petsird_fast.read_time_blocks() in chunks of time blocks (with progress display)"""
+    progress = Progress("Reading time blocks (petsird_fast)")
+    chunks = []
+    num_events = 0
+    for chunk in petsird_fast.iter_time_blocks(fname, chunk_size, time_range_ms):
+        chunks.append(chunk)
+        num_events += sum(
+            a["det_bin0"].size for s in ("prompts", "delayeds") for a in chunk[s].values()
+        )
+        progress.update(chunk["num_time_blocks"], events=num_events)
+    progress.close()
+    if not chunks:
+        data = petsird_fast.read_time_blocks(fname, time_range_ms)
+        for stream in ("prompts", "delayeds"):
+            for a in data[stream].values():
+                a["event_index"] = _event_index(a)
+        return data
+
+    merged: dict = {
+        "other": {},
+        "num_skipped_time_blocks": 0,
+        "selected_event_time_ms": 0,
+        "all_event_time_ms": 0,
+    }
+    for stream in ("prompts", "delayeds"):
+        merged[stream] = {
+            pair: {
+                name: np.concatenate([c[stream][pair][name] for c in chunks])
+                for name in ("det_bin0", "det_bin1", "tof_idx")
+            }
+            for pair in chunks[0][stream]
+        }
+        for pair in chunks[0][stream]:
+            merged[stream][pair]["event_index"] = np.concatenate(
+                [_event_index(c[stream][pair]) for c in chunks]
+            )
+    # singles histograms of all chunks that contain singles time blocks
+    with_singles = [c for c in chunks if c["singles"]["start"].size > 0]
+    num_types = len(chunks[0]["singles"]["counts"])
+    merged["singles"] = {
+        "counts": [
+            np.concatenate([c["singles"]["counts"][m] for c in with_singles])
+            if with_singles
+            else np.zeros((0, 0), dtype=np.uint64)
+            for m in range(num_types)
+        ],
+        "start": np.concatenate([c["singles"]["start"] for c in chunks]),
+        "stop": np.concatenate([c["singles"]["stop"] for c in chunks]),
+    }
+    for c in chunks:
+        merged["num_skipped_time_blocks"] += c["num_skipped_time_blocks"]
+        merged["selected_event_time_ms"] += c["selected_event_time_ms"]
+        merged["all_event_time_ms"] += c["all_event_time_ms"]
+        for name, n in c["other"].items():
+            merged["other"][name] = merged["other"].get(name, 0) + n
+    return merged
+
+
+def _read_time_blocks_petsird_fast(
+    fname: str,
+    scanner_info: petsird.ScannerInformation,
+    time_range_ms: tuple[int, int] | None = None,
+) -> tuple[dict[str, RawEvents], dict[str, np.ndarray], dict[str, int], int, dict[str, int]]:
+    """raw events, singles histograms, ignored content, number of skipped time blocks and
+    durations of the selected / all event time blocks (yardl-generated C++ code via the
+    optional package petsird_fast)
+
+    The file is read in chunks of time blocks to be able to show the progress.
+    """
+    data = _read_petsird_fast_chunks(fname, time_range_ms)
+    other = dict(data["other"])
+
+    if other.pop("weighted_event_time_blocks", 0) > 0:
+        raise UnsupportedPETSIRDFeatureError("Weighted event time blocks are not supported.")
+    if other.pop("bed_movement_time_blocks", 0) > 0:
+        raise UnsupportedPETSIRDFeatureError("Bed movement time blocks are not supported.")
+    if other.pop("gantry_movement_time_blocks", 0) > 0:
+        raise UnsupportedPETSIRDFeatureError("Gantry movement time blocks are not supported.")
+    other.pop("identity_bed_movement_time_blocks", None)
+    other.pop("identity_gantry_movement_time_blocks", None)
+    num_ignored = {_IGNORED_NAMES.get(k, k): v for k, v in other.items() if v > 0}
+
+    raw_events = {
+        stream: {
+            pair: (a["det_bin0"], a["det_bin1"], a["tof_idx"], a["event_index"])
+            for pair, a in data[stream].items()
+        }
+        for stream in ("prompts", "delayeds")
+    }
+
+    counts = data["singles"]["counts"]
+    num_singles_blocks = counts[0].shape[0] if counts else 0
+    if num_singles_blocks > 0 and (
+        scanner_info.singles_histogram_level != petsird.SinglesHistogramLevelType.ALL
+    ):
+        key = _IGNORED_NAMES["singles_unit_histogram_time_blocks"]
+        num_ignored[key] = num_ignored.get(key, 0) + num_singles_blocks
+        num_singles_blocks = 0
+    singles = {
+        "counts": np.concatenate(counts, axis=1).astype(np.int64)
+        if num_singles_blocks > 0
+        else np.zeros((0, 0), dtype=np.int64),
+        "durations_ms": (
+            data["singles"]["stop"].astype(np.int64) - data["singles"]["start"]
+            if num_singles_blocks > 0
+            else np.zeros(0, dtype=np.int64)
+        ),
+    }
+    event_time_ms = {
+        "selected": int(data["selected_event_time_ms"]),
+        "all": int(data["all_event_time_ms"]),
+    }
+    return raw_events, singles, num_ignored, data["num_skipped_time_blocks"], event_time_ms
 
 
 def _convert_events(
-    raw_events: dict[tuple[int, int], list[np.ndarray]],
-    scanner_info: petsird.ScannerInformation,
-    all_detector_centers: list[np.ndarray],
-    calibration_factor: float,
+    raw_events: RawEvents,
+    tables: DetectionBinTables,
     store_energy_bins: bool,
     stream: str,
 ) -> dict[str, np.ndarray]:
     """convert raw (detection bin 0, detection bin 1, tof_idx) events of all module type
-    pairs to LOR coordinates, TOF bins, efficiencies and energy bin indices"""
+    pairs to LOR coordinates, TOF bins, efficiencies and energy bin indices
+
+    All quantities are looked up with 1D indices into the detection bin tables. Only
+    the module index (for the SGID) and, if requested, the energy index are computed
+    (see petsird.helpers.expand_detection_bin).
+    """
     out: dict[str, list[np.ndarray]] = {name: [] for name in EVENT_ARRAYS}
-    bin_offsets = detection_bin_offsets(scanner_info)
 
-    for (m1, m2), chunks in raw_events.items():
-        if len(chunks) == 0:
+    for (m1, m2), (det_bin_0, det_bin_1, tof_idx, event_index) in raw_events.items():
+        if det_bin_0.size == 0:
             continue
-
-        ev = np.concatenate(chunks)
-        det_bin_0, det_bin_1, tof_idx = ev[:, 0], ev[:, 1], ev[:, 2]
 
         if m1 == m2 and np.any(det_bin_0 < det_bin_1):
             warnings.warn(
@@ -516,29 +816,21 @@ def _convert_events(
                 UserWarning,
             )
 
-        # expand detection bins (see petsird.helpers.expand_detection_bins)
-        _, num_det_els_1, num_energy_bins_1 = module_type_info(scanner_info, m1)
-        _, num_det_els_2, num_energy_bins_2 = module_type_info(scanner_info, m2)
+        bins_per_module_1 = tables.bins_per_module[m1]
+        bins_per_module_2 = tables.bins_per_module[m2]
+        mod_0 = det_bin_0 // bins_per_module_1
+        mod_1 = det_bin_1 // bins_per_module_2
 
-        mod_0 = det_bin_0 // (num_det_els_1 * num_energy_bins_1)
-        el_0 = (det_bin_0 // num_energy_bins_1) % num_det_els_1
-        en_0 = det_bin_0 % num_energy_bins_1
-        mod_1 = det_bin_1 // (num_det_els_2 * num_energy_bins_2)
-        el_1 = (det_bin_1 // num_energy_bins_2) % num_det_els_2
-        en_1 = det_bin_1 % num_energy_bins_2
-
-        out["coords0"].append(all_detector_centers[m1][mod_0, el_0])
-        out["coords1"].append(all_detector_centers[m2][mod_1, el_1])
+        # (np.take is faster than fancy indexing for row gathers)
+        out["coords0"].append(np.take(tables.adps[m1], det_bin_0, axis=0))
+        out["coords1"].append(np.take(tables.adps[m2], det_bin_1, axis=0))
         out["tof_bins"].append(tof_idx)
-        out["det_bin0"].append(bin_offsets[m1] + det_bin_0)
-        out["det_bin1"].append(bin_offsets[m2] + det_bin_1)
+        out["event_index"].append(event_index)
+        out["det_bin0"].append(tables.bin_offsets[m1] + det_bin_0.astype(np.int64))
+        out["det_bin1"].append(tables.bin_offsets[m2] + det_bin_1.astype(np.int64))
 
-        det_bin_effs_1 = get_detection_bin_efficiencies(scanner_info, m1).ravel()
-        det_bin_effs_2 = get_detection_bin_efficiencies(scanner_info, m2).ravel()
-        sgid_lut = get_module_pair_sgid_lut(scanner_info, m1, m2)
-        mp_effs = get_module_pair_efficiencies(scanner_info, m1, m2)
-
-        sgid = sgid_lut[mod_0, mod_1]
+        sgid_lut = tables.sgid_luts[(m1, m2)]
+        sgid = np.take(sgid_lut.ravel(), mod_0.astype(np.int64) * sgid_lut.shape[1] + mod_1)
         in_coinc = sgid >= 0
 
         if not np.all(in_coinc):
@@ -548,21 +840,28 @@ def _convert_events(
                 UserWarning,
             )
 
+        # flat index into the module pair efficiencies [sgid, bin in module 1, bin in module 2]
+        mp_index = (
+            np.where(in_coinc, sgid, 0).astype(np.int64) * bins_per_module_1
+            + (det_bin_0 - mod_0 * bins_per_module_1)
+        ) * bins_per_module_2 + (det_bin_1 - mod_1 * bins_per_module_2)
+
         eff = (
-            calibration_factor
-            * det_bin_effs_1[det_bin_0]
-            * det_bin_effs_2[det_bin_1]
-            * mp_effs[
-                np.where(in_coinc, sgid, 0),
-                det_bin_0 % (num_det_els_1 * num_energy_bins_1),
-                det_bin_1 % (num_det_els_2 * num_energy_bins_2),
-            ]
+            tables.calibration_factor
+            * np.take(tables.effs[m1], det_bin_0)
+            * np.take(tables.effs[m2], det_bin_1)
+            * np.take(tables.module_pair_effs[(m1, m2)], mp_index)
         )
         out["effs"].append(np.where(in_coinc, eff, 0).astype("float32"))
 
         if store_energy_bins:
-            out["energy_idx0"].append(en_0)
-            out["energy_idx1"].append(en_1)
+            for name, bins, m in (("energy_idx0", det_bin_0, m1), ("energy_idx1", det_bin_1, m2)):
+                num_energy_bins = tables.num_energy_bins[m]
+                out[name].append(
+                    bins % num_energy_bins
+                    if num_energy_bins > 1
+                    else np.zeros(bins.shape, dtype=np.uint16)
+                )
 
     shapes = {"coords0": (0, 3), "coords1": (0, 3)}
     dtypes = {
@@ -574,9 +873,10 @@ def _convert_events(
         "energy_idx1": "uint16",
         "det_bin0": "int64",
         "det_bin1": "int64",
+        "event_index": "int64",
     }
     return {
-        name: np.concatenate(x).astype(dtypes[name])
+        name: (x[0] if len(x) == 1 else np.concatenate(x)).astype(dtypes[name], copy=False)
         if len(x) > 0
         else np.zeros(shapes.get(name, (0,)), dtype=dtypes[name])
         for name, x in out.items()

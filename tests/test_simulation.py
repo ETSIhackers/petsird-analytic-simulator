@@ -150,3 +150,87 @@ def test_write_read_delayeds_and_singles(tmp_path, tiny_config, tiny_efficiency_
     assert h.scanner.singles_histogram_level == petsird.SinglesHistogramLevelType.ALL
     np.testing.assert_array_equal(events["singles"]["counts"], singles)
     np.testing.assert_array_equal(events["singles"]["durations_ms"], [50, 50])
+
+
+def test_read_time_range(tmp_path, tiny_config, tiny_efficiency_model, tiny_tof_params):
+    """only time blocks whose interval lies within the time range are read"""
+    from simulation import create_petsird_header
+
+    header = create_petsird_header(
+        tiny_config, tiny_efficiency_model, tiny_tof_params, 20.0,
+        store_delayeds=True, store_singles=True,
+    )
+    rng = np.random.default_rng(0)
+    prompts = (rng.integers(40, 48, 30), rng.integers(0, 8, 30), rng.integers(0, 3, 30))
+    delayeds = (rng.integers(40, 48, 9), rng.integers(0, 8, 9), rng.integers(0, 3, 9))
+    num_bins = tiny_config.num_modules * tiny_config.num_det_els_per_module
+    singles = rng.integers(0, 100, (3, num_bins))
+    fname = tmp_path / "range.bin"
+    # 3 time blocks [0, 50], [50, 100], [100, 150] ms with 10 prompts / 3 delayeds each
+    write_petsird_file(fname, header, *prompts, 3, 50, delayeds=delayeds, singles_counts=singles)
+
+    for backend in ("petsird", "auto"):
+        reader = petsird.BinaryPETSIRDReader(str(fname))
+        h = reader.read_header()
+        events = read_listmode_events(
+            reader, h, get_all_detector_centers(h.scanner.scanner_geometry),
+            fname=str(fname), backend=backend, time_range_ms=(50, 150),
+        )
+        # event + singles time blocks of the first interval are skipped
+        assert events["num_skipped_time_blocks"] == 2
+        np.testing.assert_array_equal(events["prompts"]["det_bin0"], prompts[0][10:])
+        np.testing.assert_array_equal(events["delayeds"]["det_bin1"], delayeds[1][3:])
+        np.testing.assert_array_equal(events["singles"]["counts"], singles[1:])
+        np.testing.assert_array_equal(events["singles"]["durations_ms"], [50, 50])
+        # file order index of the selected events, durations of selected / all event blocks
+        np.testing.assert_array_equal(events["prompts"]["event_index"], np.arange(10, 30))
+        np.testing.assert_array_equal(events["delayeds"]["event_index"], np.arange(3, 9))
+        assert events["event_time_ms"] == {"selected": 100, "all": 150}
+
+
+def test_event_index_with_time_range_over_many_time_blocks(
+    tmp_path, tiny_config, tiny_efficiency_model, tiny_tof_params
+):
+    """event_index of a time range in the middle of a file with many time blocks (petsird_fast
+    reads in chunks of 10 time blocks)"""
+    from simulation import create_petsird_header
+
+    header = create_petsird_header(tiny_config, tiny_efficiency_model, tiny_tof_params, 20.0)
+    rng = np.random.default_rng(2)
+    n = 25 * 10
+    prompts = (rng.integers(40, 48, n), rng.integers(0, 8, n), rng.integers(0, 3, n))
+    fname = tmp_path / "many.bin"
+    write_petsird_file(fname, header, *prompts, 25, 50)  # 10 prompts per time block
+
+    for backend in ("petsird", "auto"):
+        reader = petsird.BinaryPETSIRDReader(str(fname))
+        h = reader.read_header()
+        events = read_listmode_events(
+            reader, h, get_all_detector_centers(h.scanner.scanner_geometry),
+            fname=str(fname), backend=backend, time_range_ms=(400, 1100),
+        )
+        # time blocks 8 ... 21
+        np.testing.assert_array_equal(events["prompts"]["event_index"], np.arange(80, 220))
+        np.testing.assert_array_equal(events["prompts"]["det_bin0"], prompts[0][80:220])
+        assert events["event_time_ms"] == {"selected": 700, "all": 1250}
+
+
+def test_first_events_match_read_first_events(tmp_path, tiny_config, tiny_efficiency_model, tiny_tof_params):
+    """the first events taken from read_listmode_events() == read from the file"""
+    from geometry_plots import read_first_events
+    from petsird_reader import first_events
+    from simulation import create_petsird_header
+
+    header = create_petsird_header(tiny_config, tiny_efficiency_model, tiny_tof_params, 20.0)
+    rng = np.random.default_rng(1)
+    prompts = (rng.integers(40, 48, 30), rng.integers(0, 8, 30), rng.integers(0, 3, 30))
+    fname = tmp_path / "first.bin"
+    write_petsird_file(fname, header, *prompts, 2, 50)
+
+    reader = petsird.BinaryPETSIRDReader(str(fname))
+    h = reader.read_header()
+    ref = read_first_events(reader, 8)
+    reader = petsird.BinaryPETSIRDReader(str(fname))
+    h = reader.read_header()
+    events = read_listmode_events(reader, h, get_all_detector_centers(h.scanner.scanner_geometry))
+    np.testing.assert_array_equal(first_events(events["prompts"], h.scanner, 8), ref)

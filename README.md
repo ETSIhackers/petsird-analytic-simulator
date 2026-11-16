@@ -29,12 +29,13 @@ python 01_analytic_petsird_lm_simulator.py
 
 The simulation script creates a binary PETSIRD LM file and reference files for
 testing readers / reconstructions of PETSIRD data, which are all stored in the
-output directory (by default `data/sim_{phantom}_{num_true_counts}_{seed}`)
+output directory (by default `data/sim_{phantom}_{num_true_counts}_{seed}_{backend}`,
+where `backend` is `petsird` or `petsird_fast`, see `--petsird_backend`)
 
 ```
-tree --charset=ascii data/sim_uniform_cylinder_4000000_0
+tree --charset=ascii data/sim_uniform_cylinder_4000000_0_petsird_fast
 
-data/sim_uniform_cylinder_4000000_0
+data/sim_uniform_cylinder_4000000_0_petsird_fast
 |-- attenuation_image.npy
 |-- ground_truth_image.npy
 |-- petsird_geometry_and_events.png
@@ -55,7 +56,7 @@ data/sim_uniform_cylinder_4000000_0
 | `reference_sensitivity_image.npy` | sensitivity image of the forward model of the simulation (efficiencies, attenuation, image-based resolution model) |
 | `prompts_randoms_expectation.npy` | true (noise-free) expected randoms in the data bin (pair of detection bins and TOF bin) of every prompt, in the order of the prompts in the PETSIRD file: the additive contamination of a TOF LM reconstruction (multiply by the number of TOF bins for non-TOF) |
 | `randoms_expectation.json` | true (noise-free) expectation of the randoms: random fraction, expected trues and randoms, (scaled) singles of all detection bins (to test randoms corrections and estimations) |
-| `petsird_summary.txt` | human-readable summary of the PETSIRD file (output of `petsird.helpers.analysis`) |
+| `petsird_summary.txt` | (only with `--petsird_summary`) human-readable summary of the PETSIRD file (output of `petsird.helpers.analysis`, which reads all events with the yardl-generated Python code and is slow for large files) |
 | `petsird_geometry_and_events.png` | visualization of the PETSIRD geometry and the first events (see below) |
 | `lm_backprojection_tof.npy` | (only with `--save_lm_backprojection`) TOF LM backprojection of the events before writing them to PETSIRD |
 | `reference_histogram_mlem_<n>_epochs.npy` | (only with `--num_epochs_mlem n`) MLEM reconstruction of the histogrammed data with the exact forward model of the simulation |
@@ -114,6 +115,9 @@ Output Configuration:
   --output_dir OUTPUT_DIR
                         directory to save output files (default: None)
   --skip_writing        skip writing the LM data to a file (default: False)
+  --petsird_summary     write a human-readable summary of the PETSIRD file (petsird_summary.txt,
+                        output of petsird.helpers.analysis, which reads all events with the
+                        yardl-generated Python code and is slow for large files) (default: False)
 
 Image and Phantom Configuration:
   --phantom {uniform_cylinder,offcenter_cylinder,points}
@@ -144,7 +148,7 @@ Detection Efficiency Parameters:
 
 Time Block Configuration:
   --num_time_blocks NUM_TIME_BLOCKS
-                        number of time blocks to split the data into (default: 3)
+                        number of time blocks to split the data into (default: 100)
   --event_block_duration EVENT_BLOCK_DURATION
                         duration of each time block in ms (default: 100)
 
@@ -161,6 +165,10 @@ Visualization and Debugging:
 
 General Options:
   --seed SEED           random seed for reproducibility (default: 0)
+  --petsird_backend {auto,petsird,petsird_fast}
+                        write the time blocks with the yardl-generated Python code (petsird) or
+                        the optional compiled package petsird_fast (C++, much faster, byte-
+                        identical files); auto: petsird_fast if installed (default: auto)
 ```
 
 **Note:** The "reference" MLEM using histogrammed data is only run if a
@@ -206,16 +214,37 @@ and warns about information that is ignored:
 - single, triple and quadruple events, singles histograms per singles unit (level
   MODULE), external signals and non-detecting volumes
 
+The time blocks are read with the yardl-generated Python code (about 3 µs per event).
+If the optional compiled package [`petsird_fast`](petsird_fast/README.md) (prototype,
+yardl-generated C++ code via `libpetsird`) is installed, it is used automatically
+instead, which is about 30x faster end to end with identical results. Both simulator
+and reconstruction have the option `--petsird_backend {auto,petsird,petsird_fast}` to
+choose the backend explicitly (the simulator writes byte-identical files with both).
+
 After the reconstruction, the same visualization of the PETSIRD geometry and the first
 events is shown on top of the reconstructed image (and saved as
 `my_petsird_file_geometry_and_events_<fingerprint>_<hash>.png`).
 
-All files written by the reconstruction script (cached detector positions, events
-and sensitivity images, backprojections and reconstructions) are tagged with a
-fingerprint of the listmode file (`<fingerprint>`, computed from the file size and
-its first and last 4 MiB) and a hash of the reconstruction parameters (`<hash>`).
-Re-running a simulation into the same directory therefore never reuses cached files
-of the previous listmode file.
+All files written by the reconstruction script (cached sensitivity images,
+backprojections and reconstructions) are tagged with a fingerprint of the listmode file
+(`<fingerprint>`, computed from the file size and its first and last 4 MiB) and a hash
+of the reconstruction parameters (`<hash>`). Re-running a simulation into the same
+directory therefore never reuses cached files of the previous listmode file. Cache files
+are written atomically, and a cache file that can not be loaded is recomputed. The
+events are not cached: they are read from the listmode file in every run.
+
+### Time ranges
+
+```
+python 02_reconstruct_petsird.py my_petsird_file.bin --time_range_ms 0 500
+```
+
+only uses the time blocks (events, singles histograms, ...) whose time interval lies
+within [0, 500] ms. The backprojections, reconstructions and figures are tagged with
+`_t0-500ms`. With the oracle randoms correction (`--randoms_expectation`), the true
+expected randoms of the selected prompts (over the whole acquisition) are scaled with the
+fraction of the acquisition time that is selected (the simulated randoms are constant
+over time).
 
 ### NON-TOF NAC recon
 
@@ -287,8 +316,14 @@ file. Two estimators are available:
 The estimated singles are saved as
 `my_petsird_file_randoms_singles_<method>_<fingerprint>.npy`. For simulated data,
 `--randoms_from_singles` calculates the randoms from the singles histograms (per
-detection bin, level ALL) as `2 tau sum_k C_a,k C_b,k / dt_k` (singles counts `C` in
-time blocks `k` of duration `dt_k`). PETSIRD has no field for the coincidence window
+detection bin, level ALL). For static scans (constant singles rates, the default
+`--randoms_from_singles static`), the singles counts `C_a` are summed over all time
+blocks and the randoms are `2 tau C_a C_b / T` (acquisition time `T`): one product per
+event, like the estimates from the delayeds (about 100x faster than per time block for
+100 time blocks). `--randoms_from_singles time_blocks` uses
+`2 tau sum_k C_a,k C_b,k / dt_k` (singles counts `C` in time blocks `k` of duration
+`dt_k`), which is also correct for time-varying singles rates (e.g. decay, for which the
+static estimate is too low). PETSIRD has no field for the coincidence window
 `2 tau`, which is therefore assumed to be the range covered by the TOF bins (true for the
 simulated data; if TOF bins outside of the coincidence window are discarded, the randoms
 have to be rescaled accordingly). Only one event and one singles energy bin are
@@ -301,6 +336,34 @@ zero singles (which is the ML estimate), and the LM OSEM then uses a small eps i
 expected counts of all events (only needed for very low numbers of delayeds).
 Reconstructions without attenuation correction are expected to be biased low
 (and to show "cupping").
+
+## TOF histo-images
+
+```
+python 04_tof_histo_image.py my_petsird_file.bin [--stream {prompts,delayeds}] [--tof_position {center,uniform}]
+```
+
+places every event of the prompt (or delayed) stream at the center of its TOF bin along
+its LOR (most likely emission position, following the PETSIRD TOF definition) and
+accumulates the positions in an image (trilinear or nearest-voxel splatting, see
+`python/histo_images.py`). This is a fast TOF backprojection with a point-like TOF
+kernel (8M events in a few seconds), useful as a quick look at the data and to check the
+TOF convention of a file. The image and a figure with three central cuts are saved next
+to the listmode file (`<stem>_tof_histo_image_<stream>_<fingerprint>.npy / .png`).
+
+The centers of all TOF bins of a LOR are anchored at the LOR midpoint, and on a ring
+scanner the midpoints of many LORs coincide (e.g. at the scanner center and on the
+scanner axis). With exact TOF bin centers, the image therefore shows a spike / lines at
+these positions. `--tof_position uniform` places the events uniformly within their TOF
+bins instead, which removes most of this artifact. A (much faster) alternative that is
+often good enough is a Gaussian post filter of the image, `--postfilter_fwhm_mm FWHM`.
+`--attenuation_image att.npy` (1 / mm, on the grid of the histo-image) weights every
+event with the inverse attenuation factor `1 / exp(-int mu)` of its LOR. The histo-image
+is then approximately the activity times the geometric sensitivity without attenuation
+(it is not divided by the sensitivity).
+Non-TOF data are not supported.
+Options: `--efficiency_weighted` (weights 1 / efficiency), `--time_range_ms`,
+`--petsird_backend`.
 
 ## Simulated data from the CI
 
@@ -326,9 +389,10 @@ flat modules (no installation needed, the scripts import them directly):
 | `simulation.py` | forward model, histogram to listmode conversion, ordering of the coincidences, PETSIRD header and writing |
 | `petsird_reader.py` | reading and interpreting PETSIRD data (supported features, ADPs, efficiencies, TOF, events) |
 | `reconstruction.py` | image grid, sensitivity image and LM OSEM reconstruction |
+| `histo_images.py` | TOF histo-images: events at the center of their TOF bin, splatting into an image |
 | `randoms.py` | randoms model (product of singles), fans of the detection bins, Casey-type and ML estimation of the singles from the delayeds, randoms from singles histograms |
 | `geometry_plots.py` | visualization of the PETSIRD geometry and of events |
-| `viewer.py` | interactive 3-axis viewer |
+| `viewer.py` | interactive 3-axis viewer (incl. a box to apply an isotropic Gaussian filter with a given FWHM in mm) |
 | `utils.py` | small generic helpers (version check, FWHM / sigma, file fingerprint, caching) |
 
 ## Tests

@@ -61,7 +61,8 @@ jobs:
             --phantom "$PHANTOM" \
             --img_shape 55,55,19 \
             --num_true_counts "$NUM_TRUE_COUNTS" \
-            --save_lm_backprojection
+            --save_lm_backprojection \
+            --petsird_summary
 
       - name: Reconstruct PETSIRD listmode data (TOF, no attenuation correction, smoke test)
         working-directory: python
@@ -90,6 +91,12 @@ jobs:
             --num_subsets 5 \
             --attenuation_image "$OUT_DIR/attenuation_image.npy" \
             --randoms_from_singles
+
+      - name: TOF histo-images of the prompts and delayeds
+        working-directory: python
+        run: |
+          python 04_tof_histo_image.py "$OUT_DIR/simulated_petsird_lm_file.bin" --img_shape 55 55 19 --skip_plots
+          python 04_tof_histo_image.py "$OUT_DIR/simulated_petsird_lm_file.bin" --img_shape 55 55 19 --skip_plots --stream delayeds --tof_position uniform
 
       - name: Check PETSIRD file and reconstructions
         run: |
