@@ -1,0 +1,15 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "petsird-fast"
+version = "0.0.1"
+description = "Prototype: fast reading of PETSIRD time blocks into flat arrays using libpetsird (C++)"
+requires-python = ">=3.10"
+dependencies = ["numpy"]
+
+[tool.scikit-build]
+minimum-version = "0.10"
+cmake.build-type = "Release"
+wheel.packages = ["petsird_fast"]

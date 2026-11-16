@@ -1,0 +1,17 @@
+# build / test environment of the petsird_fast prototype (linux-64, osx-arm64)
+name: petsird-fast
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.10
+  - libpetsird=0.13.2
+  - petsird=0.13.2
+  - cxx-compiler
+  - cmake>=3.20
+  - make
+  - nanobind>=2
+  - scikit-build-core>=0.10
+  - pip
+  - numpy
+  - pytest
+  - parallelproj>=2.0.2,<3
