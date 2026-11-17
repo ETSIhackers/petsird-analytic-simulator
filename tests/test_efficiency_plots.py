@@ -10,7 +10,6 @@ from petsird.helpers import get_detection_efficiency  # noqa: E402
 
 from efficiency_plots import (  # noqa: E402
     REFERENCE_COLUMNS,
-    detecting_element_layout,
     efficiency_reference_table,
     fan_efficiencies,
     plot_detection_bin_efficiencies,
@@ -19,16 +18,6 @@ from efficiency_plots import (  # noqa: E402
     plot_sgid_luts,
     write_reference_table,
 )
-
-
-def test_layout_of_tiny_scanner(tiny_config, tiny_header):
-    layout = detecting_element_layout(tiny_header.scanner, 0)
-    shape = (tiny_config.num_modules, tiny_config.num_det_els_per_module)
-    assert all(v.shape == shape for v in layout.values())
-    # 2 depth layers (block_shape[1] = 2), front layer closer to the scanner axis
-    assert set(np.unique(layout["layer"])) == {0, 1}
-    assert np.all(layout["depth"][layout["layer"] == 0] < layout["depth"][layout["layer"] == 1])
-    assert np.all((layout["angle_deg"] >= -180) & (layout["angle_deg"] <= 180))
 
 
 def test_reference_table_matches_petsird_helpers(tmp_path, tiny_header):

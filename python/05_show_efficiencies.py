@@ -1,12 +1,11 @@
 """visualize the detection efficiencies encoded in a PETSIRD file
 
-Generic for any PETSIRD file (only the header is read). Writes next to the listmode file
+Generic for any PETSIRD file (only the header is read). All plots are in index space
+(module / detecting element numbers). Writes next to the listmode file
 (<stem>_efficiencies_<fingerprint>_*):
-- crystals.png: detection bin efficiencies at the positions of the detecting elements
-  (angle around the scanner axis vs axial position, one panel per depth layer)
+- crystals.png: detection bin efficiencies, module x detecting element
 - sgid_lut.png: module pair SGID LUTs (module pairs in coincidence, symmetry groups)
-- module_pairs.png: module pair efficiency matrix of every SGID (elements sorted by
-  layer, angle, axial position)
+- module_pairs.png: module pair efficiency matrix of every SGID
 - fans.png: total efficiency of all LORs of some detection bins
 - reference.csv: decoded efficiencies (and all their components) of probe and random
   LORs computed with the official petsird.helpers, to compare with other readers

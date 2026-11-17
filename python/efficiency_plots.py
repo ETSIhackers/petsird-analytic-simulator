@@ -1,19 +1,14 @@
 """visualization of the detection efficiencies encoded in a PETSIRD file
 
-Generic for any PETSIRD file (only the header is used). The efficiencies are shown in
-geometric coordinates (positions of the detecting elements from their ADPs), such that
-errors in the interpretation of the index order (flipped / swapped indices, wrong energy
-bin stride, transposed matrices) change the smooth structures of the efficiencies into
-visibly scrambled or mirrored patterns.
+Generic for any PETSIRD file (only the header is used). All plots are in index space,
+i.e. they show the encoded arrays as a reader indexes them (module / detecting element
+numbers), which works for any arrangement of the modules. The positions of the detection
+bins (ADPs) are part of the reference table.
 
-- detecting_element_layout: angle around the scanner axis, axial position and depth
-  layer of every detecting element (from the ADPs)
-- plot_detection_bin_efficiencies: "unrolled ring" maps (angle vs axial position) of the
-  detection bin efficiencies, one per depth layer
-- plot_sgid_luts: module pair SGID LUTs (module pairs in coincidence and their symmetry
-  group)
-- plot_module_pair_efficiencies: module pair efficiency matrix of every SGID, with the
-  detecting elements sorted geometrically (layer, angle, axial position)
+- plot_detection_bin_efficiencies: detection bin efficiencies, module x detecting element
+- plot_sgid_luts: module pair SGID LUTs (module pairs in coincidence, symmetry groups)
+- plot_module_pair_efficiencies: module pair efficiency matrix of every SGID,
+  values[element of the first module, element of the second module]
 - fan_efficiencies / plot_fans: total efficiency of all LORs of a detection bin
 - efficiency_reference_table: decoded efficiencies of LORs, computed with the official
   petsird.helpers (independent of the readers of this repository), to compare readers
@@ -37,30 +32,6 @@ from petsird_reader import (
 )
 
 
-def detecting_element_layout(
-    scanner: petsird.ScannerInformation, module_type: int
-) -> dict[str, np.ndarray]:
-    """geometric layout of the detecting elements of a module type (from their ADPs)
-
-    Returns arrays of shape (num_modules, num_det_els):
-    angle_deg: angle of the ADP around the scanner axis (z), in [-180, 180)
-    z: axial position (mm)
-    depth: position along the outward (transaxial) direction of the module (mm), relative
-        to the module center
-    layer: index of the depth layer (detecting elements with the same depth, rounded to
-        0.1 mm; a single layer if the depths do not form a few distinct values)
-    """
-    adps = get_all_detector_centers(scanner.scanner_geometry)[module_type].astype(np.float64)
-    angle = np.degrees(np.arctan2(adps[..., 1], adps[..., 0]))
-    center = adps.mean(axis=1, keepdims=True)
-    normal = center[..., :2] / np.linalg.norm(center[..., :2], axis=-1, keepdims=True)
-    depth = np.sum((adps[..., :2] - center[..., :2]) * normal, axis=-1)
-    depths = np.round(depth, 1)
-    unique = np.unique(depths)
-    layer = np.searchsorted(unique, depths) if unique.size <= 8 else np.zeros(depths.shape, int)
-    return {"angle_deg": angle, "z": adps[..., 2], "depth": depth, "layer": layer}
-
-
 def _detection_bin_effs(scanner, module_type, energy_bin):
     """detection bin efficiencies (num_modules, num_det_els) of one energy bin"""
     tables = detection_bin_tables(scanner, get_all_detector_centers(scanner.scanner_geometry))
@@ -68,45 +39,42 @@ def _detection_bin_effs(scanner, module_type, energy_bin):
     return tables.effs[module_type].reshape(num_modules, num_det_els, num_energy_bins)[..., energy_bin]
 
 
-def _module_angles(layout: dict[str, np.ndarray]) -> np.ndarray:
-    """mean angle (deg, circular mean) of the detecting elements of every module"""
-    rad = np.radians(layout["angle_deg"])
-    return np.degrees(np.arctan2(np.sin(rad).mean(axis=1), np.cos(rad).mean(axis=1)))
+def _index_ticks(set_ticks, n: int, num_ticks: int = 12) -> None:
+    """integer ticks (index numbers) at about num_ticks positions of an axis of length n"""
+    step = max(1, int(np.ceil(n / num_ticks)))
+    set_ticks(np.arange(0, n, step))
 
 
-def _annotate_modules(ax, layout: dict[str, np.ndarray]) -> None:
-    """module numbers above the detecting elements of every module"""
-    for m, angle in enumerate(_module_angles(layout)):
-        ax.annotate(
-            f"m{m}", (angle, 1.0), xycoords=("data", "axes fraction"), xytext=(0, 2),
-            textcoords="offset points", ha="center", va="bottom", fontsize=8, fontweight="bold",
-        )
+def _module_element_image(ax, values, cmap, vmin=None, vmax=None, zero_marker=True):
+    """image of values[module, element] (rows: modules, columns: detecting elements)"""
+    num_modules, num_det_els = values.shape
+    im = ax.imshow(values, cmap=cmap, vmin=vmin, vmax=vmax, aspect="auto", interpolation="nearest")
+    if zero_marker:
+        rows, cols = np.nonzero(values == 0)
+        if rows.size > 0:
+            ax.scatter(cols, rows, marker="x", s=10, c="red", linewidths=0.8, label="efficiency 0")
+            ax.legend(loc="upper right", fontsize=8)
+    _index_ticks(ax.set_xticks, num_det_els, 18)
+    _index_ticks(ax.set_yticks, num_modules, 24)
+    ax.set_xlabel("detecting element")
+    ax.set_ylabel("module")
+    return im
 
 
 def plot_detection_bin_efficiencies(
     scanner: petsird.ScannerInformation, module_type: int = 0, energy_bin: int = 0
 ) -> plt.Figure:
-    """unrolled ring maps (angle vs axial position) of the detection bin efficiencies,
-    one panel per depth layer; dead elements (efficiency 0) are marked with x"""
-    layout = detecting_element_layout(scanner, module_type)
+    """detection bin efficiencies as image module x detecting element (one energy bin);
+    efficiency 0 is marked with a red x"""
     effs = _detection_bin_effs(scanner, module_type, energy_bin)
-    layers = np.unique(layout["layer"])
-    fig, axs = plt.subplots(len(layers), 1, figsize=(13, 2.6 * len(layers) + 0.8), layout="constrained", squeeze=False)
-    vmax = np.percentile(effs[effs > 0], 99) if np.any(effs > 0) else 1
-    for ax, lay in zip(axs[:, 0], layers):
-        sel = layout["layer"] == lay
-        sc = ax.scatter(layout["angle_deg"][sel], layout["z"][sel], c=effs[sel], marker="s", s=14, cmap="viridis", vmin=0, vmax=vmax)
-        dead = sel & (effs == 0)
-        ax.scatter(layout["angle_deg"][dead], layout["z"][dead], marker="x", s=14, c="red", label="efficiency 0")
-        ax.set_title(f"depth layer {lay} (depth {layout['depth'][sel].mean():+.1f} mm from module center)", fontsize=10, pad=14)
-        ax.set_xlabel("angle of the ADP around the scanner axis (deg)")
-        ax.set_ylabel("z (mm)")
-        ax.set_xlim(-180, 180)
-        _annotate_modules(ax, layout)
-        if np.any(dead):
-            ax.legend(loc="upper right", fontsize=8)
-        fig.colorbar(sc, ax=ax, label="efficiency")
-    fig.suptitle(f"detection bin efficiencies (module type {module_type}, energy bin {energy_bin}) at the positions of the detecting elements")
+    fig, ax = plt.subplots(figsize=(13, 4.2), layout="constrained")
+    im = _module_element_image(ax, effs, "viridis", vmin=0)
+    fig.colorbar(im, ax=ax, label="efficiency")
+    ax.set_title(
+        f"detection bin efficiencies (module type {module_type}, energy bin {energy_bin}): "
+        "detection_bin_efficiencies[type][(module * num_elements + element) * num_energy_bins + energy]",
+        fontsize=10,
+    )
     return fig
 
 
@@ -123,27 +91,12 @@ def plot_sgid_luts(scanner: petsird.ScannerInformation) -> plt.Figure:
             for (i, j), v in np.ndenumerate(lut):
                 if v >= 0:
                     ax.text(j, i, str(v), ha="center", va="center", fontsize=7)
+        _index_ticks(ax.set_xticks, lut.shape[1], 24)
+        _index_ticks(ax.set_yticks, lut.shape[0], 24)
         ax.set_xlabel(f"module (type {m2}) of the second detection bin")
         ax.set_ylabel(f"module (type {m1}) of the first detection bin")
         ax.set_title(f"SGID LUT, module types ({m1}, {m2})\n(white: not in coincidence)", fontsize=10)
     return fig
-
-
-def _geometric_order(scanner, module_type):
-    """order of the detecting elements of a module by (layer, angle within module, z), and
-    the layer boundaries in this order (module 0 is used for the angles)"""
-    layout = detecting_element_layout(scanner, module_type)
-    angle = layout["angle_deg"][0] - layout["angle_deg"][0].mean()
-    order = np.lexsort((layout["z"][0], np.round(angle, 3), layout["layer"][0]))
-    boundaries = np.nonzero(np.diff(layout["layer"][0][order]))[0] + 0.5
-    return order, boundaries
-
-
-def _element_ticks(set_ticks, order: np.ndarray, num_ticks: int = 12, rotation: int = 0) -> None:
-    """ticks with the detecting element numbers at every n-th position of a sorted axis"""
-    step = max(1, int(np.ceil(order.size / num_ticks)))
-    positions = np.arange(0, order.size, step)
-    set_ticks(positions, [str(order[p]) for p in positions], rotation=rotation)
 
 
 def plot_module_pair_efficiencies(
@@ -151,16 +104,13 @@ def plot_module_pair_efficiencies(
     module_types: tuple[int, int] = (0, 0),
     energy_bins: tuple[int, int] = (0, 0),
 ) -> plt.Figure:
-    """module pair efficiency matrices of all SGIDs, values[element of the first module,
-    element of the second module], elements sorted by (layer, angle, z) (white lines:
-    layer boundaries)"""
+    """module pair efficiency matrices of all SGIDs,
+    values[element of the first module, element of the second module] (selected energy bins)"""
     m1, m2 = module_types
     mp = get_module_pair_efficiencies(scanner, m1, m2)
     _, n1, e1 = module_type_info(scanner, m1)
     _, n2, e2 = module_type_info(scanner, m2)
     mp = mp.reshape(-1, n1, e1, n2, e2)[:, :, energy_bins[0], :, energy_bins[1]]
-    order1, b1 = _geometric_order(scanner, m1)
-    order2, b2 = _geometric_order(scanner, m2)
     num_sgids = mp.shape[0]
     ncols = min(4, num_sgids)
     nrows = int(np.ceil(num_sgids / ncols))
@@ -170,21 +120,18 @@ def plot_module_pair_efficiencies(
         if k >= num_sgids:
             ax.axis("off")
             continue
-        im = ax.imshow(mp[k][np.ix_(order1, order2)], cmap="viridis", vmin=0, vmax=vmax, interpolation="nearest")
-        for b in b1:
-            ax.axhline(b, color="w", lw=0.8)
-        for b in b2:
-            ax.axvline(b, color="w", lw=0.8)
+        im = ax.imshow(mp[k], cmap="viridis", vmin=0, vmax=vmax, interpolation="nearest")
         ax.set_title(f"SGID {k}", fontsize=10)
-        _element_ticks(ax.set_xticks, order2, rotation=90)
-        _element_ticks(ax.set_yticks, order1)
+        _index_ticks(ax.set_xticks, n2)
+        _index_ticks(ax.set_yticks, n1)
         ax.tick_params(labelsize=6, length=2)
-    axs[0, 0].set_ylabel("detecting element of the first module\n(sorted by layer, angle, z)")
-    axs[-1, 0].set_xlabel("detecting element of the second module (sorted by layer, angle, z)")
+        ax.tick_params(axis="x", labelrotation=90)
+    axs[0, 0].set_ylabel("detecting element of the first module")
+    axs[-1, 0].set_xlabel("detecting element of the second module")
     fig.colorbar(im, ax=axs, shrink=0.6, label="module pair efficiency")
     fig.suptitle(
-        f"module pair efficiencies (module types {module_types}, energy bins {energy_bins}); tick labels: "
-        "detecting element numbers, white lines: depth layer boundaries (front layer first)"
+        f"module pair efficiencies values[element of the first module][element of the second module] "
+        f"(module types {module_types}, energy bins {energy_bins})"
     )
     return fig
 
@@ -209,25 +156,19 @@ def fan_efficiencies(scanner: petsird.ScannerInformation, detection_bin: int, mo
 
 
 def plot_fans(scanner: petsird.ScannerInformation, detection_bins: list[int], module_type: int = 0, energy_bin: int = 0) -> plt.Figure:
-    """total efficiency of all LORs of some detection bins, at the positions of the other
-    detection bins (front layer, energy bin energy_bin)"""
-    layout = detecting_element_layout(scanner, module_type)
+    """total efficiency of all LORs of some detection bins, as image module x detecting
+    element of the second detection bin (energy bin energy_bin; white: not in coincidence)"""
     num_modules, num_det_els, num_energy_bins = module_type_info(scanner, module_type)
-    front = layout["layer"] == 0
-    fig, axs = plt.subplots(len(detection_bins), 1, figsize=(13, 2.7 * len(detection_bins) + 0.6), layout="constrained", squeeze=False)
+    fig, axs = plt.subplots(len(detection_bins), 1, figsize=(13, 3.6 * len(detection_bins) + 0.4), layout="constrained", squeeze=False)
     for ax, a in zip(axs[:, 0], detection_bins):
         fan = fan_efficiencies(scanner, a, module_type).reshape(num_modules, num_det_els, num_energy_bins)[..., energy_bin]
-        sc = ax.scatter(layout["angle_deg"][front], layout["z"][front], c=fan[front], marker="s", s=14, cmap="magma")
+        im = _module_element_image(ax, fan, "magma", zero_marker=False)
         ma, rest = divmod(a, num_det_els * num_energy_bins)
         el = rest // num_energy_bins
-        ax.scatter(layout["angle_deg"][ma, el], layout["z"][ma, el], marker="*", s=160, c="cyan", edgecolors="k", label=f"detection bin {a} (module {ma}, element {el})")
+        ax.scatter([el], [ma], marker="*", s=160, c="cyan", edgecolors="k", label=f"detection bin {a} (module {ma}, element {el})")
         ax.legend(loc="upper right", fontsize=8)
-        ax.set_xlim(-180, 180)
-        _annotate_modules(ax, layout)
-        ax.set_xlabel("angle around the scanner axis (deg)")
-        ax.set_ylabel("z (mm)")
-        fig.colorbar(sc, ax=ax, label="LOR efficiency")
-    fig.suptitle(f"total efficiency of all LORs of a detection bin, at the second detection bin (front layer, energy bin {energy_bin}; empty: not in coincidence)")
+        fig.colorbar(im, ax=ax, label="LOR efficiency")
+    fig.suptitle(f"total efficiency of all LORs of a detection bin, at the second detection bin (energy bin {energy_bin}; white: not in coincidence)")
     return fig
 
 

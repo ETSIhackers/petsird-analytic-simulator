@@ -421,26 +421,33 @@ listmode file, `<stem>_efficiencies_<fingerprint>_*`):
 
 | output | content |
 |---|---|
-| `crystals.png` | detection bin efficiencies at the positions of the detecting elements (angle of the ADP around the scanner axis vs z), one panel per depth layer, efficiency 0 marked in red |
+| `crystals.png` | detection bin efficiencies as image module x detecting element (selected energy bin), efficiency 0 marked in red |
 | `sgid_lut.png` | module pair SGID LUT (lower-triangular, white: not in coincidence) |
-| `module_pairs.png` | module pair efficiency matrix of every SGID (rows: element of the first module, columns: of the second module), elements sorted by (layer, angle, z), white lines: layer boundaries |
-| `fans.png` | total efficiency of all LORs of some detection bins, at the position of the second detection bin |
+| `module_pairs.png` | module pair efficiency matrix `values[element of the first module][element of the second module]` of every SGID |
+| `fans.png` | total efficiency of all LORs of some detection bins (`--fan_bins`), as image module x detecting element of the second detection bin |
 | `reference.csv` | probe and random LORs: detection bins, their (module, element, energy) decomposition and ADPs, SGID, detection bin and module pair efficiencies, calibration factor and total efficiency, computed with the official `petsird.helpers` |
 
-The plots use geometric positions (from the ADPs) instead of indices, so errors in the
-index order turn smooth structures into scrambled or mirrored patterns. To check your
-own reader, compute the columns of `reference.csv` for the same LORs and compare: the
-first differing column shows which step of the decoding is wrong.
+All plots are in index space (module and detecting element numbers, as a reader indexes
+the encoded arrays), which works for any arrangement of the modules; the positions of
+the detection bins (ADPs) are in `reference.csv`. To check your own reader, compute the
+columns of `reference.csv` for the same LORs and compare: the first differing column
+shows which step of the decoding is wrong.
 
-For the simulated data (structured efficiency model), correct decoding shows:
-- `crystals.png`: smooth sinusoidal module gains around the ring (brightest around module
-  2), a tangential ramp within every module, an axial profile with lower end planes, a
-  brighter front layer, and a red 3 x 3 dead patch in the front layer of module 7
+For the simulated data (structured efficiency model, detecting element index
+`= 18 * tangential + 9 * layer + axial` for the 10 x 2 x 9 elements of a module), correct
+decoding shows:
+- `crystals.png`: in every module (row), a period of 18 elements (9 brighter front layer
+  elements followed by 9 darker back layer elements, each with an axial profile) whose
+  brightness increases along the element index (tangential ramp); smoothly varying module
+  rows (sinusoidal gains, module 2 brightest); and the dead patch (red) in module 7 at
+  elements 75-77, 93-95 and 111-113
 - `sgid_lut.png`: SGIDs constant along the diagonals (one SGID per module offset)
-- `module_pairs.png`: alternating levels between consecutive SGIDs, much higher values
-  in the (front layer -> back layer) block than in the (back -> front) block, and
-  SGIDs of offsets `d` and `12 - d` that are transposes of each other
-- `fans.png`: smooth structures (no checkerboard) within every module in coincidence
+- `module_pairs.png`: a checkerboard of 9 x 9 blocks (front -> back layer blocks much
+  higher than back -> front), alternating levels between consecutive SGIDs, a symmetric
+  matrix for opposite modules (SGID 3) and SGIDs `k` and `6 - k` that are transposes of
+  each other (module offsets `d` and `12 - d`)
+- `fans.png`: only the modules in coincidence with the module of the detection bin, with
+  the same 18-element periodicity and the dead patch
 
 ## Simulated data from the CI
 
