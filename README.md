@@ -97,6 +97,13 @@ The following phantoms are available (`--phantom`):
   position. Since the phantom has no symmetry, axis flips, swaps and mirroring
   (e.g. in readers of the PETSIRD data) are visible in the reconstructions.
 - `points`: point sources (in a centered water cylinder)
+- `uniform_cylinder_text`: `uniform_cylinder` with hidden low-contrast letters
+  (`--phantom_text`, default `PET`, `--phantom_text_contrast`, default 0.15), see
+  [Reconstruction challenge](#reconstruction-challenge)
+
+`--phantom_image activity.nii` (and optionally `--phantom_attenuation_image mu.nii`,
+default: water where the activity is > 0) simulates any activity image (NIfTI in the
+scanner coordinate system, resampled onto the simulation grid if needed) instead.
 
 All phantoms are embedded in a water body (linear attenuation coefficient
 0.0096 / mm) whose attenuation is included in the simulated data. The attenuation
@@ -121,8 +128,22 @@ Output Configuration:
                         yardl-generated Python code and is slow for large files) (default: False)
 
 Image and Phantom Configuration:
-  --phantom {uniform_cylinder,offcenter_cylinder,points}
-                        phantom to simulate (default: uniform_cylinder)
+  --phantom {uniform_cylinder,offcenter_cylinder,points,uniform_cylinder_text}
+                        phantom to simulate (ignored if --phantom_image is given) (default:
+                        uniform_cylinder)
+  --phantom_text PHANTOM_TEXT
+                        letters of the phantom uniform_cylinder_text (one per axial section)
+                        (default: PET)
+  --phantom_text_contrast PHANTOM_TEXT_CONTRAST
+                        contrast of the letters of the phantom uniform_cylinder_text (default:
+                        0.15)
+  --phantom_image PHANTOM_IMAGE
+                        activity image (NIfTI, in the scanner coordinate system) to simulate
+                        instead of --phantom, resampled onto the simulation grid if needed
+                        (default: None)
+  --phantom_attenuation_image PHANTOM_ATTENUATION_IMAGE
+                        attenuation image (NIfTI, 1/mm) of --phantom_image (default: water where
+                        the activity is > 0) (default: None)
   --img_shape IMG_SHAPE
                         shape of the image to simulate (default: (55, 55, 21))
   --voxel_size VOXEL_SIZE
@@ -441,6 +462,33 @@ and position, from its NIfTI affine) unless `--img_shape` / `--voxel_size` are g
 In that case (or for rotated grids), the attenuation image is resampled onto the
 reconstruction grid (centered at the scanner iso center) with trilinear interpolation,
 so an attenuation image on any grid in the scanner coordinate system can be used.
+
+## Reconstruction challenge
+
+The phantom `uniform_cylinder_text` hides a 3-letter word in a uniform cylinder: one
+letter (cap height 40 mm, 6 mm thick axially, 15% contrast) in each of 3 equally spaced
+axial sections (z = -14, 0, +14 mm for the default image, about the centers of the 3
+axial module positions), the first letter at the lowest z. The letters read along +x
+and are upright when the transaxial slices are shown with x to the right and y
+**downwards** (as in `viewer.py`).
+
+The contrast is chosen such that the letters are only readable if the detection
+efficiencies are decoded correctly: reconstructions that ignore the module pair
+efficiencies or the detection bin efficiencies, or all of them (`02 --efficiencies`),
+are dominated by artifacts (rings, sectors, a strong central blob) that hide the letters
+completely. Mirrored letters or a wrong letter order reveal flipped axes or swapped
+axial module positions.
+
+Challenge file (20M trues, random fraction 0.2, 25M prompts + 5M delayeds, ~150 MB):
+
+```
+python 01_analytic_petsird_lm_simulator.py --phantom uniform_cylinder_text --num_true_counts 20000000 --random_fraction 0.2
+```
+
+Give participants the listmode file and the attenuation image. With this repository's
+reconstruction (`02 --attenuation_image attenuation_image.nii --randoms_from_singles
+--num_epochs 2 --num_subsets 10`), the letters are readable after a Gaussian post filter
+of about 4 mm FWHM (box "FWHM [mm]" of the viewer).
 
 ## Image files
 

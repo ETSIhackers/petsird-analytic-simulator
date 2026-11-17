@@ -30,8 +30,8 @@ from parallelproj.projectors import ListmodePETProjector
 
 from efficiencies import EFFICIENCY_MODELS, generate_efficiency_model, lor_efficiencies
 from geometry_plots import plot_petsird_geometry
-from image_io import ImageGrid, save_image
-from phantoms import PHANTOMS, create_phantom
+from image_io import ImageGrid, centered_grid, load_image_on_grid, save_image
+from phantoms import MU_WATER, PHANTOMS, create_phantom
 from randoms import coincidence_window_ns, randoms_of_events
 from scanner import ScannerConfig, create_parallelproj_lor_descriptor
 from reconstruction import histogram_mlem
@@ -106,7 +106,33 @@ image_group.add_argument(
     type=str,
     default="uniform_cylinder",
     choices=list(PHANTOMS),
-    help="phantom to simulate",
+    help="phantom to simulate (ignored if --phantom_image is given)",
+)
+image_group.add_argument(
+    "--phantom_text",
+    type=str,
+    default="PET",
+    help="letters of the phantom uniform_cylinder_text (one per axial section)",
+)
+image_group.add_argument(
+    "--phantom_text_contrast",
+    type=float,
+    default=0.15,
+    help="contrast of the letters of the phantom uniform_cylinder_text",
+)
+image_group.add_argument(
+    "--phantom_image",
+    type=str,
+    default=None,
+    help="activity image (NIfTI, in the scanner coordinate system) to simulate instead of "
+    "--phantom, resampled onto the simulation grid if needed",
+)
+image_group.add_argument(
+    "--phantom_attenuation_image",
+    type=str,
+    default=None,
+    help="attenuation image (NIfTI, 1/mm) of --phantom_image (default: water where the "
+    "activity is > 0)",
 )
 image_group.add_argument(
     "--img_shape", type=parse_int_tuple, default=(55, 55, 21), help="shape of the image to simulate"
@@ -243,10 +269,11 @@ voxel_size = args.voxel_size
 # all events are in one energy bin (detection bin = detecting element)
 num_energy_bins = 1
 
+phantom_name = args.phantom if args.phantom_image is None else Path(args.phantom_image).stem
 if args.output_dir is None:
     output_dir = (
         Path("data")
-        / f"sim_{args.phantom}_{args.num_true_counts}_{args.seed}_{args.petsird_backend}"
+        / f"sim_{phantom_name}_{args.num_true_counts}_{args.seed}_{args.petsird_backend}"
     )
 else:
     output_dir = Path(args.output_dir)
@@ -269,7 +296,22 @@ scanner_config = ScannerConfig(
 )
 lor_desc = create_parallelproj_lor_descriptor(scanner_config)
 
-img, att_img = create_phantom(args.phantom, img_shape, voxel_size)
+if args.phantom_image is None:
+    phantom_kwargs = (
+        dict(text=args.phantom_text, contrast=args.phantom_text_contrast)
+        if args.phantom == "uniform_cylinder_text"
+        else {}
+    )
+    img, att_img = create_phantom(args.phantom, img_shape, voxel_size, **phantom_kwargs)
+else:
+    phantom_grid = centered_grid(img_shape, voxel_size)
+    img = load_image_on_grid(args.phantom_image, phantom_grid, "phantom activity image")
+    if args.phantom_attenuation_image is not None:
+        att_img = load_image_on_grid(
+            args.phantom_attenuation_image, phantom_grid, "phantom attenuation image"
+        )
+    else:
+        att_img = np.where(img > 0, MU_WATER, 0).astype(np.float32)
 
 tof_params = tof_parameters(args.tof_fwhm_mm, img_shape, voxel_size)
 tof_proj = create_tof_projector(lor_desc, img_shape, voxel_size, tof_params)
