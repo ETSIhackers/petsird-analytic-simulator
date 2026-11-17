@@ -2,10 +2,11 @@
 
 All events of the prompt or delayed stream are placed at the center of their TOF bin
 along their LOR (most likely emission position; or uniformly within their TOF bin with
---tof_position uniform) and accumulated in an image
-(see histo_images.py). This is a fast TOF backprojection with a point-like TOF kernel,
-useful as a quick look at the data and to check the TOF convention of a file.
-Non-TOF data (a single TOF bin) are not supported.
+--tof_position uniform) and accumulated in an image, using the TOF listmode back
+projector of parallelproj with a narrow TOF kernel (see histo_images.py). This is a
+fast TOF backprojection, useful as a quick look at the data and to check the TOF
+convention of a file. Non-TOF data (a single TOF bin) are not supported, and the TOF
+bins have to be equidistant and symmetric around 0 (as for the reconstruction).
 
 The image is written next to the listmode file
 (<stem>_tof_histo_image_<stream>_<fingerprint>[_t<start>-<stop>ms].nii, NIfTI with the
@@ -14,16 +15,18 @@ with a figure of three orthogonal cuts.
 """
 
 import argparse
+import time
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import petsird
 
-from histo_images import splat, tof_bin_center_positions
+from histo_images import tof_histo_image
 from petsird_reader import (
     check_header_support,
     get_all_detector_centers,
+    get_tof_parameters,
     read_listmode_events,
 )
 from image_io import grid_from_affine, load_image, load_image_on_grid, save_image
@@ -54,21 +57,20 @@ parser.add_argument(
     "--attenuation_image is used if given, as in 02)",
 )
 parser.add_argument(
-    "--interpolation",
-    choices=["trilinear", "nearest"],
-    default="trilinear",
-    help="distribution of an event to the voxels (trilinear reduces the aliasing of the "
-    "discrete TOF bin centers)",
-)
-parser.add_argument(
     "--tof_position",
     choices=["center", "uniform"],
     default="center",
-    help="position of an event along its LOR: center of its TOF bin, or uniformly "
-    "distributed within its TOF bin (removes the spikes / lines at positions where the "
-    "midpoints of many LORs coincide, e.g. the scanner center)",
+    help="position of an event along its LOR: center of its TOF bin (point-like TOF "
+    "kernel), or uniformly distributed within its TOF bin (box kernel; removes the spikes "
+    "/ lines at positions where the midpoints of many LORs coincide, e.g. the scanner "
+    "center). Both kernels are convolved with a Gaussian of --kernel_sigma_mm.",
 )
-parser.add_argument("--seed", type=int, default=0, help="random seed for --tof_position uniform")
+parser.add_argument(
+    "--kernel_sigma_mm",
+    type=float,
+    default=None,
+    help="sigma of the Gaussian of the TOF kernel (default: half of the smallest voxel size)",
+)
 parser.add_argument(
     "--postfilter_fwhm_mm",
     type=float,
@@ -170,23 +172,30 @@ if args.efficiency_weighted:
     events = {k: v[valid] for k, v in events.items()}
     weights = weights[valid] / events["effs"]
 
-positions = tof_bin_center_positions(
-    events["coords0"],
-    events["coords1"],
-    events["tof_bins"],
-    tof_bin_edges,
-    uniform_jitter=np.random.default_rng(args.seed) if args.tof_position == "uniform" else None,
+t0 = time.perf_counter()
+image = np.asarray(
+    tof_histo_image(
+        np.ascontiguousarray(events["coords0"]),
+        np.ascontiguousarray(events["coords1"]),
+        events["tof_bins"],
+        get_tof_parameters(scanner_info, 0, 0),
+        img_shape,
+        voxel_size,
+        img_origin,
+        weights=weights,
+        tof_position=args.tof_position,
+        sigma_mm=args.kernel_sigma_mm,
+    )
 )
-image, num_outside = splat(
-    positions, img_shape, voxel_size, img_origin, weights=weights, interpolation=args.interpolation
-)
+t_image = time.perf_counter() - t0
 if args.postfilter_fwhm_mm > 0:
     image = GaussianFilterOperator(
         img_shape, sigma=args.postfilter_fwhm_mm / (FWHM_PER_SIGMA * np.asarray(voxel_size))
     )(image)
 print(
-    f"TOF histo-image of {num_events:,} {args.stream} ({num_outside:,} outside of the image "
-    f"{img_shape} with voxel size {voxel_size} mm)"
+    f"TOF histo-image of {num_events:,} {args.stream} in {t_image:.1f} s (sum of the image "
+    f"{image.sum():,.0f}; the rest is outside of the image {img_shape} with voxel size "
+    f"{voxel_size} mm)"
 )
 
 tag = lm_file_fingerprint(fname)
@@ -216,7 +225,7 @@ for ax, cut, label in zip(
     ax.set_title(f"central {label} slice")
     fig.colorbar(im, ax=ax, shrink=0.8)
 fig.suptitle(
-    f"TOF histo-image ({args.stream}, {args.tof_position} TOF position, {args.interpolation}"
+    f"TOF histo-image ({args.stream}, {args.tof_position} TOF position"
     + (f", {args.postfilter_fwhm_mm:g} mm FWHM post filter" if args.postfilter_fwhm_mm > 0 else "")
     + f") of {fname.name}"
 )
