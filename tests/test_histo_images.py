@@ -1,7 +1,9 @@
 import numpy as np
 import pytest
 
-from histo_images import splat, tof_bin_center_positions, tof_bin_centers
+from parallelproj.tof import TOFParameters
+
+from histo_images import tof_bin_center_positions, tof_bin_centers, tof_histo_image
 from scanner import create_parallelproj_lor_descriptor
 from simulation import ListmodeEvents, to_petsird_coincidences
 
@@ -52,26 +54,68 @@ def test_positions_of_simulated_events(tiny_config, tiny_tof_params):
     np.testing.assert_allclose(positions, expected, atol=1e-4)
 
 
-def test_splat_nearest_and_trilinear():
-    shape, voxel, origin = (4, 4, 4), (2.0, 2.0, 2.0), np.zeros(3)
-    on_voxel = np.array([[2.0, 4.0, 6.0]])  # voxel (1, 2, 3)
-    between = np.array([[3.0, 4.0, 6.0]])  # halfway between voxels (1,2,3) and (2,2,3)
-    outside = np.array([[100.0, 0.0, 0.0]])
-    for interpolation in ("nearest", "trilinear"):
-        img, n_out = splat(on_voxel, shape, voxel, origin, interpolation=interpolation)
-        assert img[1, 2, 3] == pytest.approx(1) and img.sum() == pytest.approx(1) and n_out == 0
-    img, _ = splat(between, shape, voxel, origin, weights=[2.0], interpolation="trilinear")
-    assert img[1, 2, 3] == pytest.approx(1) and img[2, 2, 3] == pytest.approx(1)
-    img, n_out = splat(np.vstack([on_voxel, outside]), shape, voxel, origin)
-    assert n_out == 1 and img.sum() == pytest.approx(1)
+SHAPE, VOXEL = (41, 41, 21), (2.0, 2.0, 2.0)
+ORIGIN = -0.5 * (np.asarray(SHAPE) - 1) * np.asarray(VOXEL)
+TOF = TOFParameters(num_tofbins=3, tofbin_width=10.0, sigma_tof=1.0)  # = EDGES
+
+
+def _histo(a, b, bins, **kw):
+    return tof_histo_image(a, b, np.asarray(bins), TOF, SHAPE, VOXEL, ORIGIN, **kw)
+
+
+def _center_of_mass(img):
+    idx = np.indices(img.shape).reshape(3, -1)
+    com = (idx * img.ravel()).sum(1) / img.sum()
+    return com * np.asarray(VOXEL) + ORIGIN
+
+
+def _random_events(n, seed=0):
+    rng = np.random.default_rng(seed)
+    d = rng.normal(size=(n, 3))
+    d[:, 2] *= 0.3
+    d /= np.linalg.norm(d, axis=1, keepdims=True)
+    c = rng.uniform(-8, 8, (n, 3))
+    c[:, 2] = rng.uniform(-4, 4, n)
+    return c - 100 * d, c + 100 * d, rng.integers(0, 3, n)
+
+
+def test_center_mode_matches_tof_bin_centers():
+    """every event (oblique LORs) is placed at the center of its TOF bin (PETSIRD
+    convention, reference: tof_bin_center_positions) with weight 1"""
+    a, b, bins = _random_events(30)
+    expected = tof_bin_center_positions(a, b, bins, EDGES)
+    for i in range(len(bins)):
+        img = np.asarray(_histo(a[i : i + 1], b[i : i + 1], bins[i : i + 1]))
+        assert img.sum() == pytest.approx(1, rel=1e-4)
+        np.testing.assert_allclose(_center_of_mass(img), expected[i], atol=0.3)
+
+
+def test_uniform_mode_spreads_over_the_tof_bin():
+    a, b = np.array([[-100.0, 0.0, 0.0]]), np.array([[100.0, 0.0, 0.0]])
+    center = np.asarray(_histo(a, b, [2]))
+    uniform = np.asarray(_histo(a, b, [2], tof_position="uniform"))
+    for img in (center, uniform):
+        assert img.sum() == pytest.approx(1, rel=1e-4)
+        np.testing.assert_allclose(_center_of_mass(img), [10, 0, 0], atol=0.2)
+    x = np.arange(SHAPE[0]) * VOXEL[0] + ORIGIN[0]
+    profile_c, profile_u = center.sum((1, 2)), uniform.sum((1, 2))
+    # center: (almost) all within +-2 mm, uniform: flat between the bin edges 5 ... 15 mm
+    assert profile_c[np.abs(x - 10) <= 2].sum() > 0.95
+    inner = np.abs(x - 10) <= 3
+    assert profile_u[inner].min() > 0.8 * profile_u[inner].max()
+    assert profile_u[np.abs(x - 10) > 8].sum() < 0.01
     with pytest.raises(ValueError):
-        splat(on_voxel, shape, voxel, origin, interpolation="cubic")
+        _histo(a, b, [2], tof_position="cubic")
 
 
-def test_uniform_jitter_stays_within_tof_bin():
-    rng = np.random.default_rng(0)
-    a = np.zeros((1000, 3)); a[:, 0] = -100
-    b = np.zeros((1000, 3)); b[:, 0] = 100
-    p = tof_bin_center_positions(a, b, np.full(1000, 2), EDGES, uniform_jitter=rng)
-    assert np.all((p[:, 0] >= 5) & (p[:, 0] <= 15)) and abs(p[:, 0].mean() - 10) < 0.5
-    np.testing.assert_allclose(p[:, 1:], 0)
+def test_swapped_detection_bins_and_weights():
+    """swapping the detection bins and mirroring the TOF bin gives the same image (PETSIRD
+    convention), weights scale the contributions, events outside are not counted"""
+    a, b, bins = _random_events(500, seed=1)
+    img = np.asarray(_histo(a, b, bins))
+    np.testing.assert_allclose(np.asarray(_histo(b, a, 2 - bins)), img, atol=1e-5)
+    assert img.sum() == pytest.approx(500, rel=1e-3)
+    w = np.random.default_rng(2).uniform(0.5, 2, 500)
+    assert np.asarray(_histo(a, b, bins, weights=w)).sum() == pytest.approx(w.sum(), rel=1e-3)
+    outside = np.array([[-100.0, 500.0, 0.0]]), np.array([[100.0, 500.0, 0.0]])
+    assert np.asarray(_histo(*outside, [1])).sum() == 0

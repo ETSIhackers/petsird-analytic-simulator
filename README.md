@@ -578,18 +578,36 @@ python 04_tof_histo_image.py my_petsird_file.bin [--stream {prompts,delayeds}] [
 
 places every event of the prompt (or delayed) stream at the center of its TOF bin along
 its LOR (most likely emission position, following the PETSIRD TOF definition) and
-accumulates the positions in an image (trilinear or nearest-voxel splatting, see
-`python/histo_images.py`). This is a fast TOF backprojection with a point-like TOF
-kernel (8M events in a few seconds), useful as a quick look at the data and to check the
-TOF convention of a file. The image and a figure with three central cuts are saved next
-to the listmode file (`<stem>_tof_histo_image_<stream>_<fingerprint>.nii / .png`).
+accumulates them in an image. This is a TOF backprojection with a point-like TOF kernel,
+useful as a quick look at the data and to check the TOF convention of a file. The image
+and a figure with three central cuts are saved next to the listmode file
+(`<stem>_tof_histo_image_<stream>_<fingerprint>.nii / .png`).
 
-The centers of all TOF bins of a LOR are anchored at the LOR midpoint, and for detectors arranged
-around the scanner axis the midpoints of many LORs coincide (e.g. at the scanner center and on the
-scanner axis). With exact TOF bin centers, the image therefore shows a spike / lines at
-these positions. `--tof_position uniform` places the events uniformly within their TOF
-bins instead, which removes most of this artifact. A (much faster) alternative that is
-often good enough is a Gaussian post filter of the image, `--postfilter_fwhm_mm FWHM`.
+The histo-image is calculated with the TOF listmode back projector of parallelproj (the
+same as in the reconstruction, with the TOF bins of the file) and a narrow TOF kernel
+(see `python/histo_images.py`):
+- `--tof_position center` (default): point-like kernel at the TOF bin center (emulated
+  by subdividing every TOF bin into narrow bins with the same centers)
+- `--tof_position uniform`: uniform kernel over the TOF bin (box of one bin width)
+
+Both kernels are convolved with a narrow Gaussian (`--kernel_sigma_mm`, default half a
+voxel), because the projector normalizes the kernel over the image planes crossed by the
+LOR (up to sqrt(3) voxels apart), which a narrower kernel can miss. The image is in
+counts (every event inside of the image contributes its weight). The TOF bins have to be
+equidistant and symmetric around 0 (as for the reconstruction).
+For the 25M prompts of the challenge file (see above), the histo-image takes 4 s
+(4 CPU cores; previously 10 s with a NumPy implementation), the complete script 7 s
+including reading the file with petsird_fast; with CuPy arrays the projector runs on
+a GPU.
+
+The centers of all TOF bins of a LOR are anchored at the LOR midpoint, and for detectors
+arranged around the scanner axis the midpoints of many LORs coincide (e.g. at the
+scanner center and on the scanner axis). With point-like kernels, the image therefore
+shows a spike / lines at these positions. `--tof_position uniform` reduces them (central
+voxel / neighborhood 1.45 instead of 1.6 for the challenge file); a remainder is a
+property of the back projector (LORs through the scanner center all sample the central
+voxel), as in the TOF backprojection of the reconstruction. A Gaussian post filter of
+the image (`--postfilter_fwhm_mm FWHM`) removes it.
 `--attenuation_image att.nii` (1 / mm, resampled onto the grid of the histo-image if needed) weights every
 event with the inverse attenuation factor `1 / exp(-int mu)` of its LOR. The histo-image
 is then approximately the activity times the geometric sensitivity without attenuation
@@ -669,7 +687,7 @@ flat modules (no installation needed, the scripts import them directly):
 | `petsird_reader.py` | reading and interpreting PETSIRD data (supported features, ADPs, efficiencies, TOF, events) |
 | `reconstruction.py` | image grid, sensitivity image and LM OSEM reconstruction |
 | `image_io.py` | NIfTI image files (grid in the PETSIRD scanner coordinate system), resampling of images onto other grids |
-| `histo_images.py` | TOF histo-images: events at the center of their TOF bin, splatting into an image |
+| `histo_images.py` | TOF histo-images: TOF listmode back projection (parallelproj) with a point-like or uniform TOF kernel |
 | `efficiency_plots.py` | visualization of the encoded detection efficiencies and reference table of decoded LOR efficiencies (05) |
 | `randoms.py` | randoms model (product of singles), fans of the detection bins, Casey-type and ML estimation of the singles from the delayeds, randoms from singles histograms |
 | `geometry_plots.py` | visualization of the PETSIRD geometry and of events |
