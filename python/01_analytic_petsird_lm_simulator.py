@@ -138,6 +138,19 @@ physics_group.add_argument(
     "realization in the delayed coincidences (0 means no randoms and no delayeds)",
 )
 
+scanner_group = parser.add_argument_group("Scanner Geometry")
+scanner_group.add_argument(
+    "--modules_per_panel",
+    type=int,
+    choices=(1, 2),
+    default=2,
+    help="2: 6 flat panels of 2 modules (only symmetric under a rotation by one panel, "
+    "i.e. 60 deg), 1: 12 modules equally spaced on the circle (previous geometry)",
+)
+scanner_group.add_argument(
+    "--panel_gap", type=float, default=4.0, help="gap between the modules of a panel (mm)"
+)
+
 efficiency_group = parser.add_argument_group("Detection Efficiency Parameters")
 efficiency_group.add_argument(
     "--efficiency_model",
@@ -229,7 +242,7 @@ np.random.seed(args.seed)
 # %%
 # scanner, phantom, efficiencies and forward model
 
-scanner_config = ScannerConfig()
+scanner_config = ScannerConfig(modules_per_panel=args.modules_per_panel, panel_gap=args.panel_gap)
 lor_desc = create_parallelproj_lor_descriptor(scanner_config)
 
 img, att_img = create_phantom(args.phantom, img_shape, voxel_size)

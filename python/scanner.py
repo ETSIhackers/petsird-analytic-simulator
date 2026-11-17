@@ -45,12 +45,27 @@ def crystal_bulk_material() -> petsird.BulkMaterial:
 
 @dataclass(frozen=True)
 class ScannerConfig:
-    """block modules (cuboids of detecting elements) arranged on a circle"""
+    """block modules (cuboids of detecting elements) arranged in flat panels on a circle
 
-    # number of block modules on the circle
+    The scanner consists of num_modules / modules_per_panel flat panels, equally spaced
+    on a circle. Each panel contains modules_per_panel modules side by side (in the
+    tangential direction, separated by panel_gap), all facing the same direction (the
+    panel normal). With modules_per_panel = 1, the modules are equally spaced on the
+    circle and face the scanner center.
+
+    The default (6 panels of 2 modules) only has the symmetry of a rotation by one
+    panel (60 deg), not by one module, such that module pairs with the same module
+    index offset are in general not geometrically equivalent (see efficiencies.py).
+    """
+
+    # number of block modules
     num_modules: int = 12
-    # distance from the scanner center to the center of the block modules (mm)
+    # distance from the scanner center to the center of the panels (mm)
     radius: float = 100.0
+    # number of modules per flat panel (1: modules equally spaced on the circle)
+    modules_per_panel: int = 2
+    # gap between neighboring modules of a panel (mm)
+    panel_gap: float = 4.0
     # number of detecting elements per module in the 3 module directions
     # (tangential, radial, axial)
     block_shape: tuple[int, int, int] = (10, 2, 9)
@@ -59,9 +74,20 @@ class ScannerConfig:
     # module pairs with a circular distance <= this value are not in coincidence
     min_coincidence_distance: int = 3
 
+    def __post_init__(self):
+        if self.modules_per_panel < 1 or self.num_modules % self.modules_per_panel != 0:
+            raise ValueError(
+                f"num_modules ({self.num_modules}) has to be a multiple of modules_per_panel "
+                f"({self.modules_per_panel})"
+            )
+
     @property
     def num_det_els_per_module(self) -> int:
         return math.prod(self.block_shape)
+
+    @property
+    def num_panels(self) -> int:
+        return self.num_modules // self.modules_per_panel
 
 
 def circular_distance(i_mod_1: int, i_mod_2: int, num_modules: int) -> int:
@@ -73,14 +99,24 @@ def circular_distance(i_mod_1: int, i_mod_2: int, num_modules: int) -> int:
 def module_transforms(config: ScannerConfig) -> list[np.ndarray]:
     """4x4 affine transformations from the module to the scanner coordinate system
 
-    The modules are translated by the radius along the y-axis and then rotated around
-    the z-axis (scanner axis).
+    The modules are translated by the radius along the y-axis (and within their panel
+    along the x-axis) and then rotated around the z-axis (scanner axis) by the angle of
+    their panel. The module index increases counterclockwise (seen from +z), also
+    within a panel.
     """
-    translation = np.eye(4, dtype="float32")
-    translation[1, -1] = config.radius
+    n = config.modules_per_panel
+    # tangential module center distance within a panel
+    pitch = config.block_shape[0] * config.block_spacing[0] + config.panel_gap
+
+    panel_angles = np.linspace(0, 2 * np.pi, config.num_panels, endpoint=False)
 
     transforms = []
-    for phi in np.linspace(0, 2 * np.pi, config.num_modules, endpoint=False):
+    for i_mod in range(config.num_modules):
+        phi = panel_angles[i_mod // n]
+        translation = np.eye(4, dtype="float32")
+        # counterclockwise = towards -x for the panel at phi = 0
+        translation[0, -1] = ((n - 1) / 2 - (i_mod % n)) * pitch
+        translation[1, -1] = config.radius
         rotation = np.asarray(
             [
                 [math.cos(phi), -math.sin(phi), 0, 0],

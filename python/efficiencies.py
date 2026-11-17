@@ -7,10 +7,11 @@ The efficiency model is defined once (EfficiencyModel) and converted into
 such that both are consistent by construction.
 
 efficiency(LOR) = det_el_effs[module 1, element 1] * det_el_effs[module 2, element 2]
-                  * module_pair_effs[offset(module 1, module 2)][element 1, element 2]
+                  * module_pair_effs[class(module 1, module 2)][element 1, element 2]
 
 where module 1 is the module with the higher index ("first" module in the PETSIRD
-convention of lower-triangular module pairs).
+convention of lower-triangular module pairs) and class is the symmetry class of the
+module pair (see module_pair_class), encoded as one PETSIRD symmetry group (SGID).
 """
 
 from dataclasses import dataclass
@@ -24,36 +25,67 @@ from scanner import ScannerConfig, coincident_module_pairs
 
 
 def module_offset(i_mod_1: int, i_mod_2: int, num_modules: int) -> int:
-    """offset (i_mod_1 - i_mod_2) mod num_modules between the first and second module of a pair
-
-    For our scanner with rotationally symmetric modules, two module pairs with the
-    same offset are related by a rotation that maps the first (second) module of one
-    pair onto the first (second) module of the other pair. Therefore, all module pairs
-    with the same offset have the same module pair efficiencies, i.e. they form a
-    PETSIRD symmetry group.
-    Note: since PETSIRD stores module pairs (of the same type) in lower-triangular order
-    (first module index >= second module index), a rotation can swap the order of the
-    modules, which maps offset d to num_modules - d. The module pair efficiencies of
-    offset num_modules - d are therefore the transpose of the ones of offset d.
-    """
+    """offset (i_mod_1 - i_mod_2) mod num_modules between the first and second module of a pair"""
     return (i_mod_1 - i_mod_2) % num_modules
+
+
+def module_pair_class(
+    i_mod_1: int, i_mod_2: int, num_modules: int, modules_per_panel: int
+) -> tuple[int, int, int]:
+    """symmetry class (p1, p2, d) of the module pair (first module i_mod_1, second module i_mod_2)
+
+    p1, p2: position of the first / second module in its panel (index mod modules_per_panel)
+    d: module offset (i_mod_1 - i_mod_2) mod num_modules
+
+    The scanner is symmetric under a rotation by one panel, which maps module i onto
+    module i + modules_per_panel (mod num_modules) and keeps the positions in the panels.
+    Module pairs that are mapped onto each other with the same order of the first and
+    second module have the same class and therefore the same module pair efficiencies.
+    Since PETSIRD stores module pairs (of the same type) in lower-triangular order (first
+    module index >= second module index), a rotation can swap the order of the modules,
+    which maps class (p1, p2, d) to class (p2, p1, num_modules - d) (transposed_class):
+    its module pair efficiencies are the transposed ones.
+    With one module per panel, the class is given by the offset only (p1 = p2 = 0).
+    """
+    return (
+        i_mod_1 % modules_per_panel,
+        i_mod_2 % modules_per_panel,
+        module_offset(i_mod_1, i_mod_2, num_modules),
+    )
+
+
+def transposed_class(cls: tuple[int, int, int], num_modules: int) -> tuple[int, int, int]:
+    """class of the module pairs with swapped first / second module"""
+    p1, p2, d = cls
+    return (p2, p1, (num_modules - d) % num_modules)
+
+
+def _class_order(cls: tuple[int, int, int]) -> tuple[int, int, int]:
+    """SGIDs are ordered by module offset, then by the panel positions"""
+    p1, p2, d = cls
+    return (d, p1, p2)
 
 
 @dataclass
 class EfficiencyModel:
     # detecting element efficiencies, shape (num_modules, num_det_els_per_module)
     det_el_effs: np.ndarray
-    # module pair efficiencies: offset -> matrix (num_det_els, num_det_els) indexed by
-    # [element in first module, element in second module]
-    module_pair_effs: dict[int, np.ndarray]
+    # module pair efficiencies: class (p1, p2, d) -> matrix (num_det_els, num_det_els)
+    # indexed by [element in first module, element in second module]
+    module_pair_effs: dict[tuple[int, int, int], np.ndarray]
+    modules_per_panel: int = 1
 
     @property
     def num_modules(self) -> int:
         return self.det_el_effs.shape[0]
 
-    def sgid(self, offset: int) -> int:
-        """symmetry group ID of a module offset (one SGID per offset)"""
-        return sorted(self.module_pair_effs).index(offset)
+    def pair_class(self, i_mod_1: int, i_mod_2: int) -> tuple[int, int, int]:
+        """class of the module pair (first module i_mod_1, second module i_mod_2)"""
+        return module_pair_class(i_mod_1, i_mod_2, self.num_modules, self.modules_per_panel)
+
+    def sgid(self, cls: tuple[int, int, int]) -> int:
+        """symmetry group ID of a module pair class (one SGID per class)"""
+        return sorted(self.module_pair_effs, key=_class_order).index(cls)
 
 
 # efficiency models of generate_efficiency_model
@@ -108,13 +140,27 @@ def _structured_det_el_effs(config: ScannerConfig) -> np.ndarray:
     return effs.reshape(num_modules, -1).astype("float32")
 
 
-def _structured_module_pair_effs(config: ScannerConfig, d: int) -> np.ndarray:
-    """structured (exaggerated) module pair efficiencies of module offset d
+def _class_level(config: ScannerConfig, cls: tuple[int, int, int]) -> float:
+    """level of the module pair efficiencies of a class
 
-    eff[e1, e2] = level(d) * tangential(t1, t2) * axial(a1, a2) * layers(r1, r2) * (1 + jitter)
+    level(p1, p2, d) = 1 + 0.5 (-1)^d + 0.3 (u_p1 - u_p2) + 0.2 (u_p1 + u_p2)
+
+    (u_p: position in the panel normalized to [0, 1]): alternating between module
+    offsets and different for module pairs with the same offset but different positions
+    in their panels (e.g. 1.0 / 0.4 for classes (1, 0, 3) / (0, 1, 3) of the default scanner).
+    """
+    p1, p2, d = cls
+    u = _normalized_index(config.modules_per_panel)
+    return 1 + 0.5 * (-1) ** d + 0.3 * (u[p1] - u[p2]) + 0.2 * (u[p1] + u[p2])
+
+
+def _structured_module_pair_effs(config: ScannerConfig, level: float) -> np.ndarray:
+    """structured (exaggerated) module pair efficiencies of a module pair class
+
+    eff[e1, e2] = level * tangential(t1, t2) * axial(a1, a2) * layers(r1, r2) * (1 + jitter)
 
     for the detecting elements e1 (first module of the pair) and e2 (second module):
-    - level(d) = 1 + 0.5 (-1)^d: alternating between module offsets (symmetry groups)
+    - level: see _class_level (different between classes / symmetry groups)
     - tangential(t1, t2) = 1 + 0.5 cos(pi (u_t1 + u_t2)) + 0.3 (u_t1 - u_t2): depends on
       the radial position of the LOR in the module pair (ring artifacts), not symmetric
     - axial(a1, a2) = 1.3 - 0.6 |u_a1 - u_a2|: oblique LORs less efficient
@@ -134,7 +180,7 @@ def _structured_module_pair_effs(config: ScannerConfig, d: int) -> np.ndarray:
     )
     axial = 1.3 - 0.6 * np.abs(u_a[:, None] - u_a[None, :])
     layers = 1 + 0.6 * (u_r[None, :] - u_r[:, None])
-    m = (1 + 0.5 * (-1) ** d) * tangential * axial * layers
+    m = level * tangential * axial * layers
     return m * (1 + np.random.uniform(-0.1, 0.1, m.shape))
 
 
@@ -154,12 +200,13 @@ def generate_efficiency_model(
     model "random" (previous model):
     - detecting element efficiencies: uniform in [0.2, 2.2], x3 in the first module,
       /3 in the last module, elements with efficiency < 0.21 are "dead" (0)
-    - module pair efficiencies: random non-symmetric matrices with a level alternating
-      between module offsets
+    - module pair efficiencies: random non-symmetric matrices with the level of the
+      class (_class_level)
 
     In both models, the module pair efficiencies are consistent with the rotational
-    symmetry of the scanner (matrix of offset n - d = transpose of offset d, symmetric
-    matrix for opposite modules), such that they can be encoded with one SGID per offset.
+    symmetry of the scanner (see module_pair_class: matrix of the transposed class =
+    transposed matrix, symmetric matrix if a class is its own transposed class), such
+    that they can be encoded with one SGID per module pair class.
     """
     if model not in EFFICIENCY_MODELS:
         raise ValueError(f"unknown efficiency model {model}, available: {EFFICIENCY_MODELS}")
@@ -177,27 +224,36 @@ def generate_efficiency_model(
         det_el_effs[-1, :] /= 3
         det_el_effs[det_el_effs < 0.21] = 0
 
-    offsets = sorted(
-        {module_offset(j, i, config.num_modules) for i, j in coincident_module_pairs(config)}
+    classes = sorted(
+        {
+            module_pair_class(j, i, config.num_modules, config.modules_per_panel)
+            for i, j in coincident_module_pairs(config)
+        },
+        key=_class_order,
     )
     module_pair_effs = {}
-    for d in offsets:
+    for cls in classes:
+        transposed = transposed_class(cls, config.num_modules)
         if uniform_sg_eff:
-            module_pair_effs[d] = np.ones((num_det_els, num_det_els), dtype="float32")
-        elif (config.num_modules - d) in module_pair_effs:
-            module_pair_effs[d] = module_pair_effs[config.num_modules - d].T.copy()
+            module_pair_effs[cls] = np.ones((num_det_els, num_det_els), dtype="float32")
+        elif transposed in module_pair_effs:
+            module_pair_effs[cls] = module_pair_effs[transposed].T.copy()
         else:
+            level = _class_level(config, cls)
             if model == "structured":
-                m = _structured_module_pair_effs(config, d)
+                m = _structured_module_pair_effs(config, level)
             else:
-                # level alternating between offsets (same level for d and num_modules - d)
-                m = (1 + 0.5 * (-1) ** d) * np.random.uniform(0.5, 1.5, (num_det_els, num_det_els))
-            if 2 * d == config.num_modules:
-                # opposite modules: matrix has to be symmetric
+                m = level * np.random.uniform(0.5, 1.5, (num_det_els, num_det_els))
+            if transposed == cls:
+                # e.g. opposite modules of equally spaced modules: matrix has to be symmetric
                 m = 0.5 * (m + m.T)
-            module_pair_effs[d] = m.astype("float32")
+            module_pair_effs[cls] = m.astype("float32")
 
-    return EfficiencyModel(det_el_effs=det_el_effs, module_pair_effs=module_pair_effs)
+    return EfficiencyModel(
+        det_el_effs=det_el_effs,
+        module_pair_effs=module_pair_effs,
+        modules_per_panel=config.modules_per_panel,
+    )
 
 
 def lor_efficiencies(
@@ -216,9 +272,7 @@ def lor_efficiencies(
 
     effs = np.ones((lor_desc.num_block_pairs, num_det_els**2), dtype="float32")
     for i, (start_mod, end_mod) in enumerate(lor_desc.all_block_pairs):
-        mp_eff = model.module_pair_effs[
-            module_offset(int(end_mod), int(start_mod), model.num_modules)
-        ]
+        mp_eff = model.module_pair_effs[model.pair_class(int(end_mod), int(start_mod))]
         effs[i, ...] = (
             mp_eff[end_el, start_el]
             * model.det_el_effs[start_mod, start_el]
@@ -241,17 +295,17 @@ def to_petsird_detection_efficiencies(
     sgid_lut = construct_lower_triangular_matrix(config.num_modules, dtype=int, value=-1)
     for i, j in coincident_module_pairs(config):
         # lower triangular: first module index >= second module index
-        sgid_lut[j][i] = model.sgid(module_offset(j, i, config.num_modules))
+        sgid_lut[j][i] = model.sgid(model.pair_class(j, i))
 
     module_pair_efficiencies_vector = [
         petsird.ModulePairEfficiencies(
             values=np.kron(
-                model.module_pair_effs[d],
+                model.module_pair_effs[cls],
                 np.ones((num_energy_bins, num_energy_bins), dtype="float32"),
             ).tolist(),
-            sgid=model.sgid(d),
+            sgid=model.sgid(cls),
         )
-        for d in sorted(model.module_pair_effs)
+        for cls in sorted(model.module_pair_effs, key=_class_order)
     ]
 
     return petsird.DetectionEfficiencies(

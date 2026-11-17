@@ -139,6 +139,14 @@ Physics / simulation parameters:
                         independent realization in the delayed coincidences (0 means no randoms
                         and no delayeds) (default: 0.5)
 
+Scanner Geometry:
+  --modules_per_panel {1,2}
+                        2: 6 flat panels of 2 modules (only symmetric under a rotation by one
+                        panel, i.e. 60 deg), 1: 12 modules equally spaced on the circle (previous
+                        geometry) (default: 2)
+  --panel_gap PANEL_GAP
+                        gap between the modules of a panel (mm) (default: 4.0)
+
 Detection Efficiency Parameters:
   --efficiency_model {structured,random}
                         structured: exaggerated, structured detecting element and module pair
@@ -180,6 +188,26 @@ General Options:
 value > 0 is given via `--num_epochs_mlem`. Otherwise it is skipped to save
 time.
 
+### Simulated scanner
+
+12 modules of 10 x 2 x 9 (tangential x radial x axial) LYSO crystals (4.5 x 10 x 4.5 mm),
+arranged by default (`--modules_per_panel 2`) in 6 flat panels of 2 modules each (panel
+center 100 mm from the scanner axis, 4 mm gap between the modules of a panel). The module
+index increases counterclockwise (also within a panel), so modules `2k` and `2k + 1` form
+panel `k`, rotated by `60 * k` degrees. Module pairs with a circular index distance
+of at least 3 are in coincidence. `--modules_per_panel 1` gives the previous geometry
+of 12 modules equally spaced on the circle, facing the scanner center.
+
+The transaxial view of `petsird_geometry_and_events.png` (written by the simulator)
+shows the geometry as encoded in the PETSIRD file.
+
+The paired geometry is deliberately less symmetric: it is only symmetric under a
+rotation by one panel (60 deg), not by one module (30 deg). Two module pairs with the
+same module index offset are therefore in general not equivalent (e.g. modules 3 / 0
+are 2 panels apart, modules 4 / 1 are 1 panel apart, both have offset 3), and readers
+that assume the module pair efficiencies only depend on the module offset give wrong
+results.
+
 ### Notes on the PETSIRD encoding
 
 - Coincidences are stored ordered, i.e. `detection_bins[0] >= detection_bins[1]`.
@@ -188,15 +216,40 @@ time.
 - All tables over pairs of module (types) (TOF bin edges and resolution, prompt events,
   module pair SGID LUT, module pair efficiencies) are lower-triangular.
 - The detecting elements are boxes oriented along their local x-axis (pointing away
-  from the scanner center) with the average detection point at the crystal center.
+  from the scanner center, along the normal of their panel) with the average detection
+  point at the crystal center.
   Their material (LYSO, `material_id` 1) is defined in `ScannerInformation.bulk_materials`.
 - The detection efficiencies consist of detection bin (crystal) efficiencies,
   module pair (symmetry group) efficiencies and a calibration factor of 1.
-  Module pairs are grouped into symmetry groups by their offset
-  `(i_mod_1 - i_mod_2) mod 12` (first module = module with the higher index).
-  Consistent with the rotational symmetry of the scanner, the module pair efficiency
-  matrix `values[bin in first module][bin in second module]` of offset `12 - d` is the
-  transpose of the one of offset `d`.
+  Module pairs are grouped into symmetry groups by their class `(p1, p2, d)` with
+  the position `p1` / `p2` of the first / second module in its panel (`i_mod mod 2`) and
+  the offset `d = (i_mod_1 - i_mod_2) mod 12` (first module = module with the higher
+  index). A rotation by one panel maps module `i` to `i + 2` and keeps the class, but can
+  swap the order of the modules of a pair, which maps class `(p1, p2, d)` to
+  `(p2, p1, 12 - d)` with the transposed module pair efficiency matrix
+  `values[bin in first module][bin in second module]`. The SGIDs are ordered by
+  `(d, p1, p2)`, which gives 14 symmetry groups (7 with `--modules_per_panel 1`, one per
+  offset):
+
+  | SGID | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 |
+  |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+  | class `(p1, p2, d)` | 0,1,3 | 1,0,3 | 0,0,4 | 1,1,4 | 0,1,5 | 1,0,5 | 0,0,6 | 1,1,6 | 0,1,7 | 1,0,7 | 0,0,8 | 1,1,8 | 0,1,9 | 1,0,9 |
+  | transposed SGID | 13 | 12 | 10 | 11 | 9 | 8 | 6 (symmetric) | 7 (symmetric) | 5 | 4 | 2 | 3 | 1 | 0 |
+
+  and the SGID LUT (rows: first module, columns: second module, `.`: not in coincidence)
+
+  ```
+       0  1  2  3  4  5  6  7  8
+   3:  1
+   4:  2  0
+   5:  5  3  1
+   6:  6  4  2  0
+   7:  9  7  5  3  1
+   8: 10  8  6  4  2  0
+   9: 13 11  9  7  5  3  1
+  10:  . 12 10  8  6  4  2  0
+  11:  .  . 13 11  9  7  5  3  1
+  ```
 - The efficiencies are non-physical and deliberately exaggerated and structured
   (`--efficiency_model structured`, default, see `python/efficiencies.py`), such that
   ignoring or misinterpreting them gives clear, recognizable artifacts, and with as few
@@ -206,7 +259,8 @@ time.
     tangential ramp (0.5 ... 1.3) x layer factor (front 1.4, back 0.6) x axial profile
     (off-center peak, low end planes) x 10% jitter, and a dead patch of 3 x 3 crystals
     in the front layer of module 7
-  - module pair efficiency = level alternating with the module offset (1.5 / 0.5) x a
+  - module pair efficiency = level of the class (alternating with the module offset
+    and different for the two classes of an offset, between 0.4 and 1.9) x a
     function of the tangential positions of both crystals (i.e. of the radial position
     of the LOR) x an axial factor (oblique LORs lower) x a strongly non-symmetric layer
     factor (front -> back 1.6, back -> front 0.4) x 10% jitter
@@ -441,11 +495,14 @@ decoding shows:
   brightness increases along the element index (tangential ramp); smoothly varying module
   rows (sinusoidal gains, module 2 brightest); and the dead patch (red) in module 7 at
   elements 75-77, 93-95 and 111-113
-- `sgid_lut.png`: SGIDs constant along the diagonals (one SGID per module offset)
+- `sgid_lut.png`: SGIDs alternating between two values along each diagonal (module
+  offset), as in the LUT above (one SGID per module offset, i.e. constant along the
+  diagonals, with `--modules_per_panel 1`)
 - `module_pairs.png`: a checkerboard of 9 x 9 blocks (front -> back layer blocks much
-  higher than back -> front), alternating levels between consecutive SGIDs, a symmetric
-  matrix for opposite modules (SGID 3) and SGIDs `k` and `6 - k` that are transposes of
-  each other (module offsets `d` and `12 - d`)
+  higher than back -> front), different levels between the SGIDs, symmetric matrices for
+  opposite modules (SGIDs 6 and 7) and transposed matrices for the transposed SGIDs of
+  the table above (with `--modules_per_panel 1`: SGID 3 symmetric, SGIDs `k` and `6 - k`
+  transposed)
 - `fans.png`: only the modules in coincidence with the module of the detection bin, with
   the same 18-element periodicity and the dead patch
 
