@@ -79,7 +79,12 @@ parser = argparse.ArgumentParser(
 )
 parser.add_argument("fname", type=str, help="Path to the PETSIRD listmode file")
 parser.add_argument(
-    "--img_shape", type=int, nargs=3, default=None, help="Shape of the image to be reconstructed"
+    "--img_shape",
+    type=int,
+    nargs=3,
+    default=None,
+    help="shape of the image to be reconstructed (default: the shape of --attenuation_image if "
+    "given, otherwise a grid covering the scanner FOV)",
 )
 parser.add_argument(
     "--voxel_size", type=float, nargs=3, default=[2.0, 2.0, 2.0], help="Voxel size in mm"
@@ -199,28 +204,33 @@ all_detector_centers = get_all_detector_centers(scanner_info.scanner_geometry)
 # %%
 # image grid, resolution model, attenuation image
 
-img_shape, img_origin = default_image_grid(
-    all_detector_centers,
-    voxel_size,
-    tuple(args.img_shape) if args.img_shape is not None else None,
-)
+att_img: np.ndarray | None = None
+if args.attenuation_image is not None:
+    print(f"Loading attenuation image from {args.attenuation_image}")
+    att_img = np.load(args.attenuation_image)
+
+# image shape: --img_shape, else the shape of the attenuation image, else the default
+# grid of the scanner (the image is always centered at the scanner iso center)
+if args.img_shape is not None:
+    requested_img_shape = tuple(args.img_shape)
+elif att_img is not None:
+    requested_img_shape = tuple(att_img.shape)
+else:
+    requested_img_shape = None
+img_shape, img_origin = default_image_grid(all_detector_centers, voxel_size, requested_img_shape)
 img_origin = xp.asarray(img_origin)
 
 if args.verbose:
     print(f"Image shape: {img_shape}, origin: {img_origin}, voxel size: {voxel_size}")
 
+if att_img is not None and att_img.shape != img_shape:
+    raise ValueError(
+        f"Attenuation image shape {att_img.shape} does not match image shape {img_shape}"
+    )
+
 res_model = GaussianFilterOperator(
     img_shape, sigma=args.fwhm_mm / (FWHM_PER_SIGMA * np.asarray(voxel_size))
 )
-
-att_img: np.ndarray | None = None
-if args.attenuation_image is not None:
-    print(f"Loading attenuation image from {args.attenuation_image}")
-    att_img = np.load(args.attenuation_image)
-    if att_img.shape != img_shape:
-        raise ValueError(
-            f"Attenuation image shape {att_img.shape} does not match image shape {img_shape}"
-        )
 
 # header with the detection efficiency factors that are used (events and sensitivity)
 effs_header = select_efficiencies(header, args.efficiencies)

@@ -100,3 +100,18 @@ def test_histogram_mlem_converges_for_consistent_data():
     sens = A.adjoint(np.ones(3, dtype="float32"))
     recon = histogram_mlem(A, A(x_true), sens, num_epochs=500)
     np.testing.assert_allclose(recon, x_true, rtol=1e-2)
+
+
+def test_default_image_grid_of_default_scanners():
+    """square transaxial FOV also for the non-cylindrical (flat panel) default scanner,
+    equal to the default image shape of the simulator, the axial FOV covers all ADPs"""
+    from scanner import ScannerConfig, create_petsird_scanner_geometry
+
+    for config, expected in (
+        (ScannerConfig(), (55, 55, 21)),
+        (ScannerConfig(modules_per_panel=1, num_axial_modules=1, block_shape=(10, 2, 9)), (55, 55, 19)),
+    ):
+        centers = get_all_detector_centers(create_petsird_scanner_geometry(config))
+        img_shape, img_origin = default_image_grid(centers, (2.0, 2.0, 2.0))
+        assert img_shape == expected
+        np.testing.assert_allclose(img_origin + 0.5 * (np.asarray(img_shape) - 1) * 2.0, 0, atol=1e-3)

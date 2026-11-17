@@ -123,7 +123,7 @@ Image and Phantom Configuration:
   --phantom {uniform_cylinder,offcenter_cylinder,points}
                         phantom to simulate (default: uniform_cylinder)
   --img_shape IMG_SHAPE
-                        shape of the image to simulate (default: (55, 55, 19))
+                        shape of the image to simulate (default: (55, 55, 21))
   --voxel_size VOXEL_SIZE
                         voxel size in mm used in the simulation (default: (2.0, 2.0, 2.0))
 

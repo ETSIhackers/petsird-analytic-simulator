@@ -172,9 +172,10 @@ def default_image_grid(
     """image shape and origin (center of voxel [0,0,0]) for a reconstruction
 
     The image is centered at the scanner iso center (mean of all ADPs of the first
-    module type). If no image shape is given, the transaxial FOV covers 53% of the
-    extent of the ADPs and the axial FOV (the axis whose extent differs most from the
-    others) all ADPs (with an odd number of voxels).
+    module type). If no image shape is given, the (square) transaxial FOV covers 53% of
+    the smaller transaxial extent of the ADPs (the scanners are not necessarily
+    cylindrical, e.g. flat panels) and the axial FOV (the axis whose extent differs
+    most from the others) all ADPs (with an odd number of voxels).
     """
     adps = all_detector_centers[0].reshape(-1, 3)
 
@@ -191,7 +192,8 @@ def default_image_grid(
                 )
             )
         )
-        shape = (0.53 * scanner_bbox / np.array(voxel_size)).astype(int)
+        transaxial_extent = min(scanner_bbox[i] for i in range(3) if i != i_ax)
+        shape = (0.53 * transaxial_extent / np.array(voxel_size)).astype(int)
         shape[i_ax] = int(scanner_bbox[i_ax] / voxel_size[i_ax])
         if shape[i_ax] % 2 == 0:
             shape[i_ax] += 1

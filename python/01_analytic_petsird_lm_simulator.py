@@ -107,7 +107,7 @@ image_group.add_argument(
     help="phantom to simulate",
 )
 image_group.add_argument(
-    "--img_shape", type=parse_int_tuple, default=(55, 55, 19), help="shape of the image to simulate"
+    "--img_shape", type=parse_int_tuple, default=(55, 55, 21), help="shape of the image to simulate"
 )
 image_group.add_argument(
     "--voxel_size",

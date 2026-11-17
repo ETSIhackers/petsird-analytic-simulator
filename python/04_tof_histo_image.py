@@ -113,9 +113,17 @@ if tof_bin_edges.size - 1 < 2:
     raise ValueError("TOF histo-images require TOF data (more than one TOF bin)")
 
 all_detector_centers = get_all_detector_centers(scanner_info.scanner_geometry)
-img_shape, img_origin = default_image_grid(
-    all_detector_centers, voxel_size, tuple(args.img_shape) if args.img_shape else None
-)
+att_img = None
+if args.attenuation_image is not None:
+    att_img = np.load(args.attenuation_image).astype(np.float32)
+# image shape: --img_shape, else the shape of the attenuation image, else the default grid
+if args.img_shape:
+    requested_img_shape = tuple(args.img_shape)
+elif att_img is not None:
+    requested_img_shape = tuple(att_img.shape)
+else:
+    requested_img_shape = None
+img_shape, img_origin = default_image_grid(all_detector_centers, voxel_size, requested_img_shape)
 
 backend = resolve_petsird_backend(args.petsird_backend)
 time_range = tuple(args.time_range_ms) if args.time_range_ms is not None else None
@@ -131,8 +139,7 @@ if num_events == 0:
 weights = None
 if args.efficiency_weighted or args.attenuation_image is not None:
     weights = np.ones(events["coords0"].shape[0])
-if args.attenuation_image is not None:
-    att_img = np.load(args.attenuation_image).astype(np.float32)
+if att_img is not None:
     if att_img.shape != img_shape:
         raise ValueError(
             f"attenuation image shape {att_img.shape} does not match image shape {img_shape}"
