@@ -31,7 +31,7 @@ python -m pytest                     # simulator / reconstruction
 python -m pytest petsird_fast/tests  # petsird_fast
 ```
 
-The `libpetsird` 0.13.2 headers require C++20 (through xtensor), which the CMake
+The `libpetsird` 0.13.x headers require C++20 (through xtensor), which the CMake
 configuration sets.
 
 ## Usage

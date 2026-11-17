@@ -20,8 +20,8 @@ dependencies:
   - ipython
   - pytest
   # PETSIRD: the yardl-generated Python package and C++ library of the same version
-  - petsird=0.13.2
-  - libpetsird=0.13.2
+  - petsird=0.13.3
+  - libpetsird=0.13.3
   # building petsird_fast
   - cxx-compiler
   - cmake>=3.20
