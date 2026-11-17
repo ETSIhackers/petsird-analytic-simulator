@@ -409,6 +409,39 @@ Non-TOF data are not supported.
 Options: `--efficiency_weighted` (weights 1 / efficiency), `--time_range_ms`,
 `--petsird_backend`.
 
+## Encoded detection efficiencies
+
+```
+python 05_show_efficiencies.py my_petsird_file.bin [--energy_bin 0] [--fan_bins 0 270]
+```
+
+visualizes the detection efficiencies encoded in any PETSIRD file (only the header is
+read) and writes a reference table to compare other readers with (all files next to the
+listmode file, `<stem>_efficiencies_<fingerprint>_*`):
+
+| output | content |
+|---|---|
+| `crystals.png` | detection bin efficiencies at the positions of the detecting elements (angle of the ADP around the scanner axis vs z), one panel per depth layer, efficiency 0 marked in red |
+| `sgid_lut.png` | module pair SGID LUT (lower-triangular, white: not in coincidence) |
+| `module_pairs.png` | module pair efficiency matrix of every SGID (rows: element of the first module, columns: of the second module), elements sorted by (layer, angle, z), white lines: layer boundaries |
+| `fans.png` | total efficiency of all LORs of some detection bins, at the position of the second detection bin |
+| `reference.csv` | probe and random LORs: detection bins, their (module, element, energy) decomposition and ADPs, SGID, detection bin and module pair efficiencies, calibration factor and total efficiency, computed with the official `petsird.helpers` |
+
+The plots use geometric positions (from the ADPs) instead of indices, so errors in the
+index order turn smooth structures into scrambled or mirrored patterns. To check your
+own reader, compute the columns of `reference.csv` for the same LORs and compare: the
+first differing column shows which step of the decoding is wrong.
+
+For the simulated data (structured efficiency model), correct decoding shows:
+- `crystals.png`: smooth sinusoidal module gains around the ring (brightest around module
+  2), a tangential ramp within every module, an axial profile with lower end planes, a
+  brighter front layer, and a red 3 x 3 dead patch in the front layer of module 7
+- `sgid_lut.png`: SGIDs constant along the diagonals (one SGID per module offset)
+- `module_pairs.png`: alternating levels between consecutive SGIDs, much higher values
+  in the (front layer -> back layer) block than in the (back -> front) block, and
+  SGIDs of offsets `d` and `12 - d` that are transposes of each other
+- `fans.png`: smooth structures (no checkerboard) within every module in coincidence
+
 ## Simulated data from the CI
 
 Every CI run uploads all outputs of the simulation and the reconstructions (the
@@ -434,6 +467,7 @@ flat modules (no installation needed, the scripts import them directly):
 | `petsird_reader.py` | reading and interpreting PETSIRD data (supported features, ADPs, efficiencies, TOF, events) |
 | `reconstruction.py` | image grid, sensitivity image and LM OSEM reconstruction |
 | `histo_images.py` | TOF histo-images: events at the center of their TOF bin, splatting into an image |
+| `efficiency_plots.py` | visualization of the encoded detection efficiencies and reference table of decoded LOR efficiencies (05) |
 | `randoms.py` | randoms model (product of singles), fans of the detection bins, Casey-type and ML estimation of the singles from the delayeds, randoms from singles histograms |
 | `geometry_plots.py` | visualization of the PETSIRD geometry and of events |
 | `viewer.py` | interactive 3-axis viewer (incl. a box to apply an isotropic Gaussian filter with a given FWHM in mm) |
