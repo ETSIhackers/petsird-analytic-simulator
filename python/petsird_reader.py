@@ -4,6 +4,7 @@ Everything is derived from the PETSIRD data following the PETSIRD definitions on
 (independent of how the data were simulated).
 """
 
+import copy
 import math
 import warnings
 from dataclasses import dataclass
@@ -209,7 +210,8 @@ def get_module_pair_efficiencies(
 ) -> np.ndarray:
     """module pair efficiencies as array of shape (num_SGIDs, num_det_bins_in_module_1, num_det_bins_in_module_2)
 
-    If no module pair efficiencies are given, they are considered to be 1 (for a single SGID 0).
+    If no module pair efficiencies are given, they are considered to be 1 (for all SGIDs
+    of the module pair SGID LUT).
     """
     _, num_det_els_1, num_energy_bins_1 = module_type_info(scanner_info, module_type_1)
     _, num_det_els_2, num_energy_bins_2 = module_type_info(scanner_info, module_type_2)
@@ -222,7 +224,8 @@ def get_module_pair_efficiencies(
         or len(det_effs.module_pair_efficiencies_vectors[module_type_1][module_type_2])
         == 0
     ):
-        return np.ones((1,) + shape, dtype="float32")
+        num_sgids = max(1, int(get_module_pair_sgid_lut(scanner_info, module_type_1, module_type_2).max()) + 1)
+        return np.ones((num_sgids,) + shape, dtype="float32")
 
     mp_effs_vector = det_effs.module_pair_efficiencies_vectors[module_type_1][
         module_type_2
@@ -232,6 +235,48 @@ def get_module_pair_efficiencies(
         mp_effs[x.sgid] = np.asarray(x.values, dtype="float32").reshape(shape)
 
     return mp_effs
+
+
+# which detection efficiency factors are used (see select_efficiencies)
+EFFICIENCY_MODES = ("all", "module_pairs", "detection_bins", "none")
+
+
+def select_efficiencies(header: petsird.Header, mode: str = "all") -> petsird.Header:
+    """header in which only some of the detection efficiency factors are used
+
+    mode (see EFFICIENCY_MODES):
+    - "all": calibration factor x detection bin efficiencies x module pair efficiencies
+    - "module_pairs": only the module pair (SGID) efficiencies
+    - "detection_bins": only the detection bin efficiencies
+    - "none": all efficiencies are 1
+    The unused tables are emptied, which means efficiency 1 following the PETSIRD
+    definition, and the calibration factor is 1 for all modes except "all". The module
+    pair SGID LUT is always kept, i.e. only module pairs in coincidence (SGID >= 0) are
+    used in all modes. The events (read_listmode_events) and the sensitivity image of a
+    reconstruction both use the returned header, such that they are consistent.
+    Returns a (shallow) copy of the header (the original header is not modified).
+    """
+    if mode not in EFFICIENCY_MODES:
+        raise ValueError(f"unknown efficiency mode {mode}, available: {EFFICIENCY_MODES}")
+    if mode == "all":
+        return header
+    det_effs = header.scanner.detection_efficiencies
+    new_effs = petsird.DetectionEfficiencies(
+        method_description=f"{det_effs.method_description} (only {mode} efficiencies used)",
+        calibration_factor=1.0,
+        detection_bin_efficiencies=det_effs.detection_bin_efficiencies
+        if mode == "detection_bins"
+        else [],
+        module_pair_sgidlut=det_effs.module_pair_sgidlut,
+        module_pair_efficiencies_vectors=det_effs.module_pair_efficiencies_vectors
+        if mode == "module_pairs"
+        else [],
+    )
+    scanner = copy.copy(header.scanner)
+    scanner.detection_efficiencies = new_effs
+    new_header = copy.copy(header)
+    new_header.scanner = scanner
+    return new_header
 
 
 def get_calibration_factor(scanner_info: petsird.ScannerInformation) -> float:

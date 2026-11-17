@@ -59,7 +59,6 @@ jobs:
           python 01_analytic_petsird_lm_simulator.py \
             --output_dir "$OUT_DIR" \
             --phantom "$PHANTOM" \
-            --img_shape 55,55,19 \
             --num_true_counts "$NUM_TRUE_COUNTS" \
             --save_lm_backprojection \
             --petsird_summary
@@ -76,20 +75,18 @@ jobs:
         working-directory: python
         run: |
           python 02_reconstruct_petsird.py "$OUT_DIR/simulated_petsird_lm_file.bin" \
-            --img_shape 55 55 19 \
             --num_epochs 1 \
             --num_subsets 5 \
-            --attenuation_image "$OUT_DIR/attenuation_image.npy" \
+            --attenuation_image "$OUT_DIR/attenuation_image.nii" \
             --randoms_from_delayeds ml
 
       - name: Reconstruct PETSIRD listmode data (TOF, attenuation and randoms correction from singles)
         working-directory: python
         run: |
           python 02_reconstruct_petsird.py "$OUT_DIR/simulated_petsird_lm_file.bin" \
-            --img_shape 55 55 19 \
             --num_epochs 1 \
             --num_subsets 5 \
-            --attenuation_image "$OUT_DIR/attenuation_image.npy" \
+            --attenuation_image "$OUT_DIR/attenuation_image.nii" \
             --randoms_from_singles
 
       - name: TOF histo-images of the prompts and delayeds
@@ -97,6 +94,11 @@ jobs:
         run: |
           python 04_tof_histo_image.py "$OUT_DIR/simulated_petsird_lm_file.bin" --img_shape 55 55 19 --skip_plots
           python 04_tof_histo_image.py "$OUT_DIR/simulated_petsird_lm_file.bin" --img_shape 55 55 19 --skip_plots --stream delayeds --tof_position uniform
+
+      - name: Encoded detection efficiencies (figures and reference table)
+        working-directory: python
+        run: |
+          python 05_show_efficiencies.py "$OUT_DIR/simulated_petsird_lm_file.bin" --skip_plots
 
       - name: Check PETSIRD file and reconstructions
         run: |

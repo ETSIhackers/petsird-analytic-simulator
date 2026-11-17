@@ -34,6 +34,7 @@ from parallelproj.operators import (
 from parallelproj.projectors import ListmodePETProjector
 from parallelproj.tof import TOFParameters
 
+from image_io import ImageGrid
 from petsird_reader import (
     get_calibration_factor,
     get_detection_bin_efficiencies,
@@ -172,9 +173,10 @@ def default_image_grid(
     """image shape and origin (center of voxel [0,0,0]) for a reconstruction
 
     The image is centered at the scanner iso center (mean of all ADPs of the first
-    module type). If no image shape is given, the transaxial FOV covers 53% of the
-    extent of the ADPs and the axial FOV (the axis whose extent differs most from the
-    others) all ADPs (with an odd number of voxels).
+    module type). If no image shape is given, the (square) transaxial FOV covers 53% of
+    the smaller transaxial extent of the ADPs (the scanners are not necessarily
+    cylindrical, e.g. flat panels) and the axial FOV (the axis whose extent differs
+    most from the others) all ADPs (with an odd number of voxels).
     """
     adps = all_detector_centers[0].reshape(-1, 3)
 
@@ -191,7 +193,8 @@ def default_image_grid(
                 )
             )
         )
-        shape = (0.53 * scanner_bbox / np.array(voxel_size)).astype(int)
+        transaxial_extent = min(scanner_bbox[i] for i in range(3) if i != i_ax)
+        shape = (0.53 * transaxial_extent / np.array(voxel_size)).astype(int)
         shape[i_ax] = int(scanner_bbox[i_ax] / voxel_size[i_ax])
         if shape[i_ax] % 2 == 0:
             shape[i_ax] += 1
@@ -202,20 +205,56 @@ def default_image_grid(
     return tuple(img_shape), img_origin
 
 
+# default voxel size (mm) of reconstructions / histo-images
+DEFAULT_VOXEL_SIZE = (2.0, 2.0, 2.0)
+
+
+def reconstruction_grid(
+    all_detector_centers: list[np.ndarray],
+    img_shape: tuple[int, int, int] | None = None,
+    voxel_size: tuple[float, float, float] | None = None,
+    input_grid: ImageGrid | None = None,
+) -> ImageGrid:
+    """image grid of a reconstruction (or histo-image)
+
+    - img_shape and / or voxel_size given: grid centered at the scanner iso center
+      (default_image_grid, default voxel size DEFAULT_VOXEL_SIZE)
+    - otherwise, if an input image (e.g. attenuation image) is given: its grid
+    - otherwise: the default grid of the scanner (default_image_grid)
+    """
+    if img_shape is None and voxel_size is None and input_grid is not None:
+        return input_grid
+    voxel_size = tuple(float(v) for v in (voxel_size or DEFAULT_VOXEL_SIZE))
+    shape, origin = default_image_grid(all_detector_centers, voxel_size, img_shape)
+    return ImageGrid(tuple(int(n) for n in shape), voxel_size, tuple(float(o) for o in origin))
+
+
 def recon_params_hash(
     img_shape: tuple[int, int, int],
     voxel_size: tuple[float, float, float],
     tof: bool,
     att_img: np.ndarray | None,
     fwhm_mm: float,
+    efficiencies: str = "all",
+    img_origin: tuple[float, float, float] | None = None,
 ) -> str:
-    """short hash of all parameters that affect the sensitivity image (used in file names)"""
+    """short hash of all parameters that affect the sensitivity image (used in file names)
+
+    efficiencies: efficiency mode (see petsird_reader.select_efficiencies), only part of
+    the hash if it is not "all" (such that hashes of the default are unchanged)
+    img_origin: center of voxel [0, 0, 0] (mm), part of the hash if given
+    """
     hash_obj = hashlib.sha256()
     hash_obj.update(str(img_shape).encode())
     hash_obj.update(f"{voxel_size[0]:.6f},{voxel_size[1]:.6f},{voxel_size[2]:.6f}".encode())
     hash_obj.update(str(tof).encode())
     hash_obj.update(f"{fwhm_mm:.6f}".encode())
     hash_obj.update(att_img.tobytes() if att_img is not None else b"no_attenuation")
+    if efficiencies != "all":
+        hash_obj.update(f"efficiencies={efficiencies}".encode())
+    if img_origin is not None:
+        o = [float(v) for v in img_origin]
+        hash_obj.update(f"origin={o[0]:.3f},{o[1]:.3f},{o[2]:.3f}".encode())
     return hash_obj.hexdigest()[:6]
 
 

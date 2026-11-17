@@ -284,11 +284,11 @@ def plot_petsird_geometry(
         "events (3D, projected): line from detection bin 0 (open circle) to 1, "
         "filled circle + thick line: center of TOF bin +/- FWHM/2"
     )
-    z_ring = _plot_plane_view(
+    z_plane = _plot_plane_view(
         fig, ax_trans, geom, decoded, 2, background, background_label, cmap
     )
     ax_trans.set_title(
-        f"transaxial view of the detecting elements with ADPs at z = {z_ring:.1f} mm\n"
+        f"transaxial view of the detecting elements with ADPs at z = {z_plane:.1f} mm\n"
         "boxes (black line: front face, arrow: box axis), dots: ADPs, m<i>: module index\n"
         + events_text.replace(", filled", ",\nfilled"),
         fontsize="small",
@@ -305,7 +305,11 @@ def plot_petsird_geometry(
     # ---------------------------------------------------------------------------
     # transaxial zoom on module 0 (of the first module type) with element indices
     g = geom[0]
-    els = np.nonzero(np.isclose(g["adp"][0, :, 2], z_ring, atol=1e-3))[0]
+    # plane through the ADPs of module 0 closest to its axial center (module 0 is not
+    # necessarily at the z of the transaxial view)
+    z_mod = g["adp"][0, :, 2]
+    z_zoom = z_mod[np.argmin(np.abs(z_mod - 0.5 * (z_mod.min() + z_mod.max())))]
+    els = np.nonzero(np.isclose(z_mod, z_zoom, atol=1e-3))[0]
     if els.size > 0:
         _draw_boxes(ax_zoom, g, 0, els, (0, 1), cmap(0), arrow_width=0.004)
         for i_el in els:
@@ -319,7 +323,7 @@ def plot_petsird_geometry(
     ax_zoom.set_xlabel("x (mm)")
     ax_zoom.set_ylabel("y (mm)")
     ax_zoom.set_title(
-        f"module 0 (transaxial, z = {z_ring:.1f} mm): detecting element indices,\n"
+        f"module 0 (transaxial, z = {z_zoom:.1f} mm): detecting element indices,\n"
         "front faces (black), box axes (arrows), ADPs (dots)",
         fontsize="small",
     )

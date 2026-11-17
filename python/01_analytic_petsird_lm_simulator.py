@@ -24,12 +24,14 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from parallelproj import to_numpy_array
 from parallelproj.operators import GaussianFilterOperator
 from parallelproj.projectors import ListmodePETProjector
 
-from efficiencies import generate_efficiency_model, lor_efficiencies
+from efficiencies import EFFICIENCY_MODELS, generate_efficiency_model, lor_efficiencies
 from geometry_plots import plot_petsird_geometry
-from phantoms import PHANTOMS, create_phantom
+from image_io import ImageGrid, centered_grid, load_image_on_grid, save_image
+from phantoms import MU_WATER, PHANTOMS, create_phantom
 from randoms import coincidence_window_ns, randoms_of_events
 from scanner import ScannerConfig, create_parallelproj_lor_descriptor
 from reconstruction import histogram_mlem
@@ -104,10 +106,36 @@ image_group.add_argument(
     type=str,
     default="uniform_cylinder",
     choices=list(PHANTOMS),
-    help="phantom to simulate",
+    help="phantom to simulate (ignored if --phantom_image is given)",
 )
 image_group.add_argument(
-    "--img_shape", type=parse_int_tuple, default=(55, 55, 19), help="shape of the image to simulate"
+    "--phantom_text",
+    type=str,
+    default="PET",
+    help="letters of the phantom uniform_cylinder_text (one per axial section)",
+)
+image_group.add_argument(
+    "--phantom_text_contrast",
+    type=float,
+    default=0.15,
+    help="contrast of the letters of the phantom uniform_cylinder_text",
+)
+image_group.add_argument(
+    "--phantom_image",
+    type=str,
+    default=None,
+    help="activity image (NIfTI, in the scanner coordinate system) to simulate instead of "
+    "--phantom, resampled onto the simulation grid if needed",
+)
+image_group.add_argument(
+    "--phantom_attenuation_image",
+    type=str,
+    default=None,
+    help="attenuation image (NIfTI, 1/mm) of --phantom_image (default: water where the "
+    "activity is > 0)",
+)
+image_group.add_argument(
+    "--img_shape", type=parse_int_tuple, default=(55, 55, 21), help="shape of the image to simulate"
 )
 image_group.add_argument(
     "--voxel_size",
@@ -138,7 +166,44 @@ physics_group.add_argument(
     "realization in the delayed coincidences (0 means no randoms and no delayeds)",
 )
 
+scanner_group = parser.add_argument_group("Scanner Geometry")
+scanner_group.add_argument(
+    "--modules_per_panel",
+    type=int,
+    choices=(1, 2),
+    default=2,
+    help="2: 6 flat panels of 2 modules around the scanner axis (only symmetric under a "
+    "rotation by one panel, i.e. 60 deg), 1: 12 modules equally spaced around the axis",
+)
+scanner_group.add_argument(
+    "--panel_gap", type=float, default=4.0, help="gap between the modules of a panel (mm)"
+)
+scanner_group.add_argument(
+    "--num_axial_modules",
+    type=int,
+    default=3,
+    help="number of axial module positions (the transaxial arrangement of 12 modules is "
+    "repeated at each axial position)",
+)
+scanner_group.add_argument(
+    "--axial_gap", type=float, default=2.0, help="gap between neighboring axial module positions (mm)"
+)
+scanner_group.add_argument(
+    "--block_shape",
+    type=parse_int_tuple,
+    default=(10, 2, 3),
+    help="number of detecting elements (4.5 x 10 x 4.5 mm) per module (tangential, radial, axial)",
+)
+
 efficiency_group = parser.add_argument_group("Detection Efficiency Parameters")
+efficiency_group.add_argument(
+    "--efficiency_model",
+    choices=EFFICIENCY_MODELS,
+    default="structured",
+    help="structured: exaggerated, structured detecting element and module pair efficiencies "
+    "(sectors, rings, axial profiles, a dead patch; clear artifacts if they are ignored or "
+    "misinterpreted), random: random efficiencies (previous model)",
+)
 efficiency_group.add_argument(
     "--uniform_crystal_eff",
     action="store_true",
@@ -204,10 +269,11 @@ voxel_size = args.voxel_size
 # all events are in one energy bin (detection bin = detecting element)
 num_energy_bins = 1
 
+phantom_name = args.phantom if args.phantom_image is None else Path(args.phantom_image).stem
 if args.output_dir is None:
     output_dir = (
         Path("data")
-        / f"sim_{args.phantom}_{args.num_true_counts}_{args.seed}_{args.petsird_backend}"
+        / f"sim_{phantom_name}_{args.num_true_counts}_{args.seed}_{args.petsird_backend}"
     )
 else:
     output_dir = Path(args.output_dir)
@@ -221,17 +287,46 @@ np.random.seed(args.seed)
 # %%
 # scanner, phantom, efficiencies and forward model
 
-scanner_config = ScannerConfig()
+scanner_config = ScannerConfig(
+    modules_per_panel=args.modules_per_panel,
+    panel_gap=args.panel_gap,
+    num_axial_modules=args.num_axial_modules,
+    axial_gap=args.axial_gap,
+    block_shape=tuple(args.block_shape),
+)
 lor_desc = create_parallelproj_lor_descriptor(scanner_config)
 
-img, att_img = create_phantom(args.phantom, img_shape, voxel_size)
-np.save(output_dir / "attenuation_image.npy", att_img)
+if args.phantom_image is None:
+    phantom_kwargs = (
+        dict(text=args.phantom_text, contrast=args.phantom_text_contrast)
+        if args.phantom == "uniform_cylinder_text"
+        else {}
+    )
+    img, att_img = create_phantom(args.phantom, img_shape, voxel_size, **phantom_kwargs)
+else:
+    phantom_grid = centered_grid(img_shape, voxel_size)
+    img = load_image_on_grid(args.phantom_image, phantom_grid, "phantom activity image")
+    if args.phantom_attenuation_image is not None:
+        att_img = load_image_on_grid(
+            args.phantom_attenuation_image, phantom_grid, "phantom attenuation image"
+        )
+    else:
+        att_img = np.where(img > 0, MU_WATER, 0).astype(np.float32)
 
 tof_params = tof_parameters(args.tof_fwhm_mm, img_shape, voxel_size)
 tof_proj = create_tof_projector(lor_desc, img_shape, voxel_size, tof_params)
 
+# image grid of the simulation in the scanner coordinate system (stored in the NIfTI
+# files of all images)
+sim_grid = ImageGrid(
+    tuple(img_shape),
+    tuple(float(v) for v in voxel_size),
+    tuple(float(o) for o in to_numpy_array(tof_proj.img_origin)),
+)
+save_image(output_dir / "attenuation_image.nii", att_img, sim_grid, "attenuation coefficients (1/mm)")
+
 efficiency_model = generate_efficiency_model(
-    scanner_config, args.uniform_crystal_eff, args.uniform_sg_eff
+    scanner_config, args.uniform_crystal_eff, args.uniform_sg_eff, args.efficiency_model
 )
 
 res_model = GaussianFilterOperator(
@@ -248,7 +343,7 @@ fwd_op = create_forward_model(
 
 # sensitivity image of the forward model (incl. attenuation)
 sens_img = fwd_op.adjoint(np.ones(fwd_op.out_shape, dtype=np.float32))
-np.save(output_dir / "reference_sensitivity_image.npy", sens_img)
+save_image(output_dir / "reference_sensitivity_image.nii", sens_img, sim_grid, "sensitivity image (simulator)")
 
 # %%
 # expected trues and randoms, and Poisson realizations of the prompts and delayeds
@@ -312,7 +407,7 @@ with open(output_dir / "randoms_expectation.json", "w", encoding="UTF-8") as f:
 
 # ground truth activity image (before the image-based resolution model, which is part
 # of the forward model), scaled such that the forward model yields the expected counts
-np.save(output_dir / "ground_truth_image.npy", img)
+save_image(output_dir / "ground_truth_image.nii", img, sim_grid, "ground truth activity")
 
 if args.num_epochs_mlem > 0:
     recon = histogram_mlem(
@@ -322,7 +417,12 @@ if args.num_epochs_mlem > 0:
         args.num_epochs_mlem,
         contamination=expected_randoms if args.random_fraction > 0 else None,
     )
-    np.save(output_dir / f"reference_histogram_mlem_{args.num_epochs_mlem}_epochs.npy", recon)
+    save_image(
+        output_dir / f"reference_histogram_mlem_{args.num_epochs_mlem}_epochs.nii",
+        recon,
+        sim_grid,
+        f"histogram MLEM {args.num_epochs_mlem} epochs",
+    )
 
 # %%
 # listmode events of the prompts and delayeds
@@ -356,9 +456,11 @@ if args.save_lm_backprojection:
     lm_proj.tof_parameters = tof_params
     lm_proj.event_tofbins = prompt_events.tof_bin.astype(np.int16)
     lm_proj.tof = True
-    np.save(
-        output_dir / "lm_backprojection_tof.npy",
+    save_image(
+        output_dir / "lm_backprojection_tof.nii",
         lm_proj.adjoint(np.ones(prompt_events.num_events, dtype=np.float32)),
+        sim_grid,
+        "TOF LM back projection of the prompts (simulator)",
     )
 
 # %%

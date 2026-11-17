@@ -8,6 +8,8 @@ All derived files (cached sensitivity image, backprojections, reconstructions, f
 are written next to the listmode file and are tagged with a fingerprint of the listmode
 file and a hash of the reconstruction parameters. The events are read from the listmode
 file in every run (fast if the optional package petsird_fast is installed).
+All images are NIfTI files with their grid in the scanner coordinate system of the
+PETSIRD file (see image_io.py).
 """
 
 import argparse
@@ -23,7 +25,9 @@ from parallelproj.operators import GaussianFilterOperator
 from parallelproj.projectors import ListmodePETProjector
 
 from geometry_plots import plot_petsird_geometry
+from image_io import grid_from_affine, load_image, load_image_on_grid, save_image
 from petsird_reader import (
+    EFFICIENCY_MODES,
     check_header_support,
     first_events,
     get_all_detector_centers,
@@ -31,6 +35,7 @@ from petsird_reader import (
     get_tof_parameters,
     UnsupportedPETSIRDFeatureError,
     read_listmode_events,
+    select_efficiencies,
 )
 from randoms import (
     casey_singles,
@@ -45,9 +50,9 @@ from randoms import (
 )
 from reconstruction import (
     create_lm_subset_objectives,
-    default_image_grid,
     lm_osem,
     recon_params_hash,
+    reconstruction_grid,
     sensitivity_image,
 )
 from utils import (
@@ -77,10 +82,21 @@ parser = argparse.ArgumentParser(
 )
 parser.add_argument("fname", type=str, help="Path to the PETSIRD listmode file")
 parser.add_argument(
-    "--img_shape", type=int, nargs=3, default=None, help="Shape of the image to be reconstructed"
+    "--img_shape",
+    type=int,
+    nargs=3,
+    default=None,
+    help="shape of the image to be reconstructed (default: see --voxel_size)",
 )
 parser.add_argument(
-    "--voxel_size", type=float, nargs=3, default=[2.0, 2.0, 2.0], help="Voxel size in mm"
+    "--voxel_size",
+    type=float,
+    nargs=3,
+    default=None,
+    help="voxel size in mm (default 2 2 2). If neither --img_shape nor --voxel_size is "
+    "given, the grid of --attenuation_image is used (if given), otherwise a grid "
+    "covering the scanner FOV. Other grids are centered at the scanner iso center, and "
+    "the attenuation image is resampled onto them.",
 )
 parser.add_argument(
     "--fwhm_mm",
@@ -97,6 +113,15 @@ parser.add_argument(
     help="Whether to skip sensitivity image calculation and use unity image",
 )
 parser.add_argument("--non-tof", action="store_true", help="Whether to disable TOF in recon")
+parser.add_argument(
+    "--efficiencies",
+    choices=EFFICIENCY_MODES,
+    default="all",
+    help="detection efficiency factors used in the forward model of the events and in the "
+    "sensitivity image: all (calibration x detection bin x module pair), only module_pairs, "
+    "only detection_bins, or none (all 1); only module pairs in coincidence are used in all "
+    "modes. Useful to see the effect of (mis)interpreting the encoded efficiencies.",
+)
 parser.add_argument(
     "--attenuation_image", type=str, default=None, help="Path to attenuation image"
 )
@@ -153,7 +178,6 @@ parser.add_argument(
 args = parser.parse_args()
 
 fname = Path(args.fname)
-voxel_size = tuple(args.voxel_size)
 tof = not args.non_tof
 
 # %%
@@ -175,7 +199,7 @@ lm_fingerprint = lm_file_fingerprint(fname)
 print(f"Listmode file fingerprint: {lm_fingerprint}")
 
 
-def output_path(kind: str, suffix: str = ".npy", tag: str | None = None) -> Path:
+def output_path(kind: str, suffix: str = ".nii", tag: str | None = None) -> Path:
     """path of a derived file next to the listmode file"""
     return fname.with_name(f"{fname.stem}_{kind}_{tag or lm_fingerprint}{suffix}")
 
@@ -188,32 +212,45 @@ all_detector_centers = get_all_detector_centers(scanner_info.scanner_geometry)
 # %%
 # image grid, resolution model, attenuation image
 
-img_shape, img_origin = default_image_grid(
+# image grid (in the scanner coordinate system of the PETSIRD file): --img_shape /
+# --voxel_size, else the grid of the attenuation image, else the default grid
+att_grid = None
+if args.attenuation_image is not None:
+    print(f"Loading attenuation image from {args.attenuation_image}")
+    att_data, att_affine = load_image(args.attenuation_image)
+    try:
+        att_grid = grid_from_affine(att_data.shape, att_affine)
+    except ValueError:
+        att_grid = None  # rotated grid: resampled onto the default grid
+grid = reconstruction_grid(
     all_detector_centers,
-    voxel_size,
     tuple(args.img_shape) if args.img_shape is not None else None,
+    tuple(args.voxel_size) if args.voxel_size is not None else None,
+    att_grid,
 )
-img_origin = xp.asarray(img_origin)
+img_shape, voxel_size = grid.shape, grid.voxel_size
+img_origin = xp.asarray(np.asarray(grid.origin))
+print(f"Image grid: {grid}")
 
-if args.verbose:
-    print(f"Image shape: {img_shape}, origin: {img_origin}, voxel size: {voxel_size}")
+att_img: np.ndarray | None = None
+if args.attenuation_image is not None:
+    att_img = load_image_on_grid(args.attenuation_image, grid, "attenuation image")
 
 res_model = GaussianFilterOperator(
     img_shape, sigma=args.fwhm_mm / (FWHM_PER_SIGMA * np.asarray(voxel_size))
 )
 
-att_img: np.ndarray | None = None
-if args.attenuation_image is not None:
-    print(f"Loading attenuation image from {args.attenuation_image}")
-    att_img = np.load(args.attenuation_image)
-    if att_img.shape != img_shape:
-        raise ValueError(
-            f"Attenuation image shape {att_img.shape} does not match image shape {img_shape}"
-        )
+# header with the detection efficiency factors that are used (events and sensitivity)
+effs_header = select_efficiencies(header, args.efficiencies)
+if args.efficiencies != "all":
+    print(f"Using only the efficiency factors: {args.efficiencies}")
 
 # tag of all files that depend on the reconstruction parameters
 params_tag = (
-    f"{lm_fingerprint}_{recon_params_hash(img_shape, voxel_size, tof, att_img, args.fwhm_mm)}"
+    f"{lm_fingerprint}_"
+    + recon_params_hash(
+        img_shape, voxel_size, tof, att_img, args.fwhm_mm, args.efficiencies, grid.origin
+    )
 )
 
 # %%
@@ -226,7 +263,7 @@ else:
     sens_img = load_or_compute(
         output_path("sens", tag=params_tag),
         compute=lambda: sensitivity_image(
-            scanner_info,
+            effs_header.scanner,
             all_detector_centers,
             img_shape,
             voxel_size,
@@ -237,8 +274,8 @@ else:
             attenuation_image=att_img,
             verbose=args.verbose,
         ),
-        save=xp.save,
-        load=xp.load,
+        save=lambda path, img: save_image(path, img, grid, "sensitivity image"),
+        load=lambda path: xp.asarray(load_image(path)[0]),
         description="sensitivity image",
     )
 
@@ -255,7 +292,7 @@ print(
 t_read = time.perf_counter()
 all_events = read_listmode_events(
     reader,
-    header,
+    effs_header,
     all_detector_centers,
     verbose=args.verbose,
     fname=str(fname),
@@ -300,13 +337,23 @@ proj = ListmodePETProjector(
     img_origin=img_origin,
 )
 ones = xp.ones(events["coords0"].shape[0], dtype="float32")
-xp.save(output_path("nontof_backproj", tag=events_tag), proj.adjoint(ones))
+save_image(
+    output_path("nontof_backproj", tag=events_tag),
+    proj.adjoint(ones),
+    grid,
+    "non-TOF LM back projection of the prompts",
+)
 
 if tof:
     proj.tof_parameters = tof_params
     proj.event_tofbins = xp.asarray(events["tof_bins"], dtype=xp.int16).copy()
     proj.tof = True
-    xp.save(output_path("tof_backproj", tag=events_tag), proj.adjoint(ones))
+    save_image(
+        output_path("tof_backproj", tag=events_tag),
+        proj.adjoint(ones),
+        grid,
+        "TOF LM back projection of the prompts",
+    )
 del proj
 
 # %%
@@ -368,7 +415,10 @@ elif args.randoms_from_delayeds is not None:
         f"Estimated singles from {num_delayeds} delayeds ({args.randoms_from_delayeds}), "
         f"{num_zero} of {fans.num_bins} detection bins without delayeds"
     )
-    np.save(output_path("randoms_singles" + randoms_tag.removeprefix("_randoms")), randoms_singles)
+    np.save(
+        output_path("randoms_singles" + randoms_tag.removeprefix("_randoms"), suffix=".npy"),
+        randoms_singles,
+    )
 elif args.randoms_from_singles:
     if singles_hists["counts"].shape[0] == 0:
         raise ValueError(
@@ -467,9 +517,11 @@ subset_objectives = create_lm_subset_objectives(
 recon = lm_osem(subset_objectives, sens_img, args.num_epochs, xp=xp)
 
 opath = fname.with_name(
-    f"lm_osem_{args.num_epochs}_{args.num_subsets}_{events_tag}{randoms_tag}.npy"
+    f"lm_osem_{args.num_epochs}_{args.num_subsets}_{events_tag}{randoms_tag}"
+    + (f"_effs_{args.efficiencies}" if args.efficiencies != "all" else "")
+    + ".nii"
 )
-xp.save(opath, recon)
+save_image(opath, recon, grid, f"LM OSEM {args.num_epochs} epochs {args.num_subsets} subsets")
 print(f"LM OSEM recon saved to {opath}")
 
 # %%
