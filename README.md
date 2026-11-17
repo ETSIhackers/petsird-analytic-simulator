@@ -36,13 +36,13 @@ where `backend` is `petsird` or `petsird_fast`, see `--petsird_backend`)
 tree --charset=ascii data/sim_uniform_cylinder_4000000_0_petsird_fast
 
 data/sim_uniform_cylinder_4000000_0_petsird_fast
-|-- attenuation_image.npy
-|-- ground_truth_image.npy
+|-- attenuation_image.nii
+|-- ground_truth_image.nii
 |-- petsird_geometry_and_events.png
 |-- petsird_summary.txt
 |-- prompts_randoms_expectation.npy
 |-- randoms_expectation.json
-|-- reference_sensitivity_image.npy
+|-- reference_sensitivity_image.nii
 |-- sim_parameters.json
 `-- simulated_petsird_lm_file.bin
 ```
@@ -51,17 +51,18 @@ data/sim_uniform_cylinder_4000000_0_petsird_fast
 |---|---|
 | `simulated_petsird_lm_file.bin` | the PETSIRD listmode file |
 | `sim_parameters.json` | the parameters of the simulation |
-| `ground_truth_image.npy` | ground truth activity image, i.e. **before** the image-based resolution model (`--fwhm_mm`) which is part of the forward model of the simulation |
-| `attenuation_image.npy` | attenuation image (1 / mm) of the water body of the phantom, to be used for attenuation correction |
-| `reference_sensitivity_image.npy` | sensitivity image of the forward model of the simulation (efficiencies, attenuation, image-based resolution model) |
+| `ground_truth_image.nii` | ground truth activity image, i.e. **before** the image-based resolution model (`--fwhm_mm`) which is part of the forward model of the simulation |
+| `attenuation_image.nii` | attenuation image (1 / mm) of the water body of the phantom, to be used for attenuation correction |
+| `reference_sensitivity_image.nii` | sensitivity image of the forward model of the simulation (efficiencies, attenuation, image-based resolution model) |
 | `prompts_randoms_expectation.npy` | true (noise-free) expected randoms in the data bin (pair of detection bins and TOF bin) of every prompt, in the order of the prompts in the PETSIRD file: the additive contamination of a TOF LM reconstruction (multiply by the number of TOF bins for non-TOF) |
 | `randoms_expectation.json` | true (noise-free) expectation of the randoms: random fraction, expected trues and randoms, (scaled) singles of all detection bins (to test randoms corrections and estimations) |
 | `petsird_summary.txt` | (only with `--petsird_summary`) human-readable summary of the PETSIRD file (output of `petsird.helpers.analysis`, which reads all events with the yardl-generated Python code and is slow for large files) |
 | `petsird_geometry_and_events.png` | visualization of the PETSIRD geometry and the first events (see below) |
-| `lm_backprojection_tof.npy` | (only with `--save_lm_backprojection`) TOF LM backprojection of the events before writing them to PETSIRD |
-| `reference_histogram_mlem_<n>_epochs.npy` | (only with `--num_epochs_mlem n`) MLEM reconstruction of the histogrammed data with the exact forward model of the simulation |
+| `lm_backprojection_tof.nii` | (only with `--save_lm_backprojection`) TOF LM backprojection of the events before writing them to PETSIRD |
+| `reference_histogram_mlem_<n>_epochs.nii` | (only with `--num_epochs_mlem n`) MLEM reconstruction of the histogrammed data with the exact forward model of the simulation |
 
-All images are centered at (0,0,0) and use the voxel size `--voxel_size`.
+All images are NIfTI files (see [Image files](#image-files)), centered at (0,0,0)
+with the voxel size `--voxel_size`.
 
 **Randoms:** the prompts contain true coincidences and random coincidences with an
 expected random fraction R / (T + R) given by `--random_fraction` (default 0.5, where
@@ -99,7 +100,7 @@ The following phantoms are available (`--phantom`):
 
 All phantoms are embedded in a water body (linear attenuation coefficient
 0.0096 / mm) whose attenuation is included in the simulated data. The attenuation
-image (in 1 / mm) is saved as `attenuation_image.npy` and can be used for
+image (in 1 / mm) is saved as `attenuation_image.nii` and can be used for
 attenuation correction in the reconstruction (see below).
 
 The simulation can be customized in many ways (number of counts to simulate,
@@ -411,34 +412,73 @@ To create a simple 2-class attenuation image, use
 python 03_create_two_class_att_img.py my_petsird_file.bin
 ```
 
-which uses the TOF backprojection (`my_petsird_file_tof_backproj_<fingerprint>_<hash>.npy`)
+which uses the TOF backprojection (`my_petsird_file_tof_backproj_<fingerprint>_<hash>.nii`)
 created by the TOF NAC recon script above. If several reconstructions with different
-settings were run, pass the TOF backprojection `.npy` file of the TOF NAC recon instead.
+settings were run, pass the TOF backprojection `.nii` file of the TOF NAC recon instead.
 If no `--threshold` is given, Otsu's method is used for the segmentation.
-The attenuation image is saved as `my_petsird_file_att_img_<fingerprint>_<hash>.npy`.
+The attenuation image is saved as `my_petsird_file_att_img_<fingerprint>_<hash>.nii`.
 
 
 ### NON-TOF AC recon
 
 ```
-python 02_reconstruct_petsird.py my_petsird_file.bin --non-tof --attenuation_image my_att_img.npy
+python 02_reconstruct_petsird.py my_petsird_file.bin --non-tof --attenuation_image my_att_img.nii
 ```
 
 ### TOF AC recon
 
 ```
-python 02_reconstruct_petsird.py my_petsird_file.bin --attenuation_image my_att_img.npy
+python 02_reconstruct_petsird.py my_petsird_file.bin --attenuation_image my_att_img.nii
 ```
 
 For data created by the simulator, use the simulated attenuation image
-(`attenuation_image.npy` in the output directory) for a quantitatively correct
+(`attenuation_image.nii` in the output directory) for a quantitatively correct
 attenuation correction. The 2-class attenuation image created by
 `03_create_two_class_att_img.py` is only an approximation of it.
+
+The attenuation image defines the image grid of the reconstruction (shape, voxel size
+and position, from its NIfTI affine) unless `--img_shape` / `--voxel_size` are given.
+In that case (or for rotated grids), the attenuation image is resampled onto the
+reconstruction grid (centered at the scanner iso center) with trilinear interpolation,
+so an attenuation image on any grid in the scanner coordinate system can be used.
+
+## Image files
+
+All images (simulator: ground truth, attenuation, sensitivity, LM back projection,
+histogram MLEM; `02`: sensitivity images, back projections, reconstructions; `03`:
+attenuation images; `04`: histo-images) are NIfTI-1 files (`.nii`, float32), written and
+read with `python/image_io.py` (nibabel). Arrays that are not images (e.g.
+`prompts_randoms_expectation.npy`, one value per prompt, and the estimated singles
+`*_randoms_singles_*.npy`) are NumPy files.
+
+Conventions:
+- the NIfTI affine maps the voxel indices `(i, j, k)` of `img[i, j, k]` to the center of
+  the voxel in the **scanner coordinate system of the PETSIRD file** (in mm, the
+  coordinate system of the detecting elements / ADPs): `(x, y, z, 1) = affine @ (i, j, k, 1)`.
+  All grids of this repository are axis-aligned:
+  `affine = [[vx, 0, 0, ox], [0, vy, 0, oy], [0, 0, vz, oz], [0, 0, 0, 1]]` with the
+  voxel size `(vx, vy, vz)` and the center `(ox, oy, oz)` of voxel `[0, 0, 0]`.
+- `qform_code = sform_code = 1` ("scanner-based anatomical coordinates"), spatial unit
+  mm. The PETSIRD scanner coordinate system is **not** a patient coordinate system: the
+  orientation labels (L/R, A/P, S/I) that NIfTI viewers show have no meaning here.
+- units of the values (not stored in the files): attenuation images in 1 / mm, activity
+  (ground truth, reconstructions) in arbitrary units such that the forward model of the
+  simulation (with the sensitivity image of the same grid) gives the expected counts,
+  back projections and histo-images in counts (weighted counts with
+  `--efficiency_weighted` / `--attenuation_image`).
+
+Example (Python):
+
+```python
+import nibabel as nib
+nii = nib.load("data/sim_offcenter_cylinder_4000000_0_petsird_fast/attenuation_image.nii")
+img, affine = nii.get_fdata(), nii.affine   # img[i, j, k], voxel center = affine @ (i, j, k, 1)
+```
 
 ### Randoms correction
 
 ```
-python 02_reconstruct_petsird.py my_petsird_file.bin --attenuation_image my_att_img.npy --randoms_from_delayeds ml
+python 02_reconstruct_petsird.py my_petsird_file.bin --attenuation_image my_att_img.nii --randoms_from_delayeds ml
 ```
 
 (or `--randoms_from_singles`, see below) estimates the randoms from the delayed
@@ -494,7 +534,7 @@ accumulates the positions in an image (trilinear or nearest-voxel splatting, see
 `python/histo_images.py`). This is a fast TOF backprojection with a point-like TOF
 kernel (8M events in a few seconds), useful as a quick look at the data and to check the
 TOF convention of a file. The image and a figure with three central cuts are saved next
-to the listmode file (`<stem>_tof_histo_image_<stream>_<fingerprint>.npy / .png`).
+to the listmode file (`<stem>_tof_histo_image_<stream>_<fingerprint>.nii / .png`).
 
 The centers of all TOF bins of a LOR are anchored at the LOR midpoint, and for detectors arranged
 around the scanner axis the midpoints of many LORs coincide (e.g. at the scanner center and on the
@@ -502,7 +542,7 @@ scanner axis). With exact TOF bin centers, the image therefore shows a spike / l
 these positions. `--tof_position uniform` places the events uniformly within their TOF
 bins instead, which removes most of this artifact. A (much faster) alternative that is
 often good enough is a Gaussian post filter of the image, `--postfilter_fwhm_mm FWHM`.
-`--attenuation_image att.npy` (1 / mm, on the grid of the histo-image) weights every
+`--attenuation_image att.nii` (1 / mm, resampled onto the grid of the histo-image if needed) weights every
 event with the inverse attenuation factor `1 / exp(-int mu)` of its LOR. The histo-image
 is then approximately the activity times the geometric sensitivity without attenuation
 (it is not divided by the sensitivity).
@@ -580,6 +620,7 @@ flat modules (no installation needed, the scripts import them directly):
 | `simulation.py` | forward model, histogram to listmode conversion, ordering of the coincidences, PETSIRD header and writing |
 | `petsird_reader.py` | reading and interpreting PETSIRD data (supported features, ADPs, efficiencies, TOF, events) |
 | `reconstruction.py` | image grid, sensitivity image and LM OSEM reconstruction |
+| `image_io.py` | NIfTI image files (grid in the PETSIRD scanner coordinate system), resampling of images onto other grids |
 | `histo_images.py` | TOF histo-images: events at the center of their TOF bin, splatting into an image |
 | `efficiency_plots.py` | visualization of the encoded detection efficiencies and reference table of decoded LOR efficiencies (05) |
 | `randoms.py` | randoms model (product of singles), fans of the detection bins, Casey-type and ML estimation of the singles from the delayeds, randoms from singles histograms |
@@ -609,8 +650,8 @@ These checks are run in the CI:
 cd python
 python 01_analytic_petsird_lm_simulator.py --output_dir ../ci_output --phantom offcenter_cylinder --num_true_counts 200000 --save_lm_backprojection --skip_plots
 python 02_reconstruct_petsird.py ../ci_output/simulated_petsird_lm_file.bin --img_shape 55 55 19 --num_epochs 1
-python 02_reconstruct_petsird.py ../ci_output/simulated_petsird_lm_file.bin --img_shape 55 55 19 --num_epochs 1 --attenuation_image ../ci_output/attenuation_image.npy --randoms_from_delayeds ml
-python 02_reconstruct_petsird.py ../ci_output/simulated_petsird_lm_file.bin --img_shape 55 55 19 --num_epochs 1 --attenuation_image ../ci_output/attenuation_image.npy --randoms_from_singles
+python 02_reconstruct_petsird.py ../ci_output/simulated_petsird_lm_file.bin --num_epochs 1 --attenuation_image ../ci_output/attenuation_image.nii --randoms_from_delayeds ml
+python 02_reconstruct_petsird.py ../ci_output/simulated_petsird_lm_file.bin --num_epochs 1 --attenuation_image ../ci_output/attenuation_image.nii --randoms_from_singles
 cd ..
 python tests/check_simulation_and_recon.py ci_output
 ```

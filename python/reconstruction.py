@@ -34,6 +34,7 @@ from parallelproj.operators import (
 from parallelproj.projectors import ListmodePETProjector
 from parallelproj.tof import TOFParameters
 
+from image_io import ImageGrid
 from petsird_reader import (
     get_calibration_factor,
     get_detection_bin_efficiencies,
@@ -204,6 +205,30 @@ def default_image_grid(
     return tuple(img_shape), img_origin
 
 
+# default voxel size (mm) of reconstructions / histo-images
+DEFAULT_VOXEL_SIZE = (2.0, 2.0, 2.0)
+
+
+def reconstruction_grid(
+    all_detector_centers: list[np.ndarray],
+    img_shape: tuple[int, int, int] | None = None,
+    voxel_size: tuple[float, float, float] | None = None,
+    input_grid: ImageGrid | None = None,
+) -> ImageGrid:
+    """image grid of a reconstruction (or histo-image)
+
+    - img_shape and / or voxel_size given: grid centered at the scanner iso center
+      (default_image_grid, default voxel size DEFAULT_VOXEL_SIZE)
+    - otherwise, if an input image (e.g. attenuation image) is given: its grid
+    - otherwise: the default grid of the scanner (default_image_grid)
+    """
+    if img_shape is None and voxel_size is None and input_grid is not None:
+        return input_grid
+    voxel_size = tuple(float(v) for v in (voxel_size or DEFAULT_VOXEL_SIZE))
+    shape, origin = default_image_grid(all_detector_centers, voxel_size, img_shape)
+    return ImageGrid(tuple(int(n) for n in shape), voxel_size, tuple(float(o) for o in origin))
+
+
 def recon_params_hash(
     img_shape: tuple[int, int, int],
     voxel_size: tuple[float, float, float],
@@ -211,11 +236,13 @@ def recon_params_hash(
     att_img: np.ndarray | None,
     fwhm_mm: float,
     efficiencies: str = "all",
+    img_origin: tuple[float, float, float] | None = None,
 ) -> str:
     """short hash of all parameters that affect the sensitivity image (used in file names)
 
     efficiencies: efficiency mode (see petsird_reader.select_efficiencies), only part of
     the hash if it is not "all" (such that hashes of the default are unchanged)
+    img_origin: center of voxel [0, 0, 0] (mm), part of the hash if given
     """
     hash_obj = hashlib.sha256()
     hash_obj.update(str(img_shape).encode())
@@ -225,6 +252,9 @@ def recon_params_hash(
     hash_obj.update(att_img.tobytes() if att_img is not None else b"no_attenuation")
     if efficiencies != "all":
         hash_obj.update(f"efficiencies={efficiencies}".encode())
+    if img_origin is not None:
+        o = [float(v) for v in img_origin]
+        hash_obj.update(f"origin={o[0]:.3f},{o[1]:.3f},{o[2]:.3f}".encode())
     return hash_obj.hexdigest()[:6]
 
 

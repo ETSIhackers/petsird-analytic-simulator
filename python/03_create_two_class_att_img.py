@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 
 from pathlib import Path
 
+from image_io import grid_from_affine, load_image, save_image
 from utils import lm_file_fingerprint
 from viewer import show_vol_cuts
 
@@ -45,8 +46,8 @@ parser = argparse.ArgumentParser(
 parser.add_argument(
     "input_file",
     type=Path,
-    help="TOF backprojection .npy file written by 02_reconstruct_petsird.py "
-    "(<stem>_tof_backproj_<hash>.npy), or the PETSIRD listmode file it was created from",
+    help="TOF backprojection (NIfTI) written by 02_reconstruct_petsird.py "
+    "(<stem>_tof_backproj_<hash>.nii), or the PETSIRD listmode file it was created from",
 )
 parser.add_argument(
     "--mu_water",
@@ -73,14 +74,14 @@ threshold = args.threshold
 if not input_file.exists():
     raise SystemExit(f"File {input_file} does not exist")
 
-if input_file.suffix == ".npy":
+if input_file.suffix == ".nii":
     tof_backproj_file = input_file
 else:
     # PETSIRD listmode file: look for the TOF backprojection(s) written by
     # 02_reconstruct_petsird.py for this file (tagged with its fingerprint)
     candidates = sorted(
         input_file.parent.glob(
-            f"{input_file.stem}_tof_backproj_{lm_file_fingerprint(input_file)}_*.npy"
+            f"{input_file.stem}_tof_backproj_{lm_file_fingerprint(input_file)}_*.nii"
         )
     )
     if len(candidates) == 0:
@@ -102,17 +103,12 @@ sens_file = tof_backproj_file.parent / tof_backproj_file.name.replace(
     "_tof_backproj_", "_sens_"
 )
 
-# Load the TOF backprojection file
-tof_backproj = np.load(tof_backproj_file)
-
-# Load the sensitivity file
-sens_img = np.load(sens_file)
-
-# Check that shapes match
-if tof_backproj.shape != sens_img.shape:
-    raise ValueError(
-        f"Shape mismatch: TOF backproj {tof_backproj.shape} vs sensitivity {sens_img.shape}"
-    )
+# Load the TOF backprojection and the sensitivity image (same grid)
+tof_backproj, affine = load_image(tof_backproj_file)
+grid = grid_from_affine(tof_backproj.shape, affine)
+sens_img, sens_affine = load_image(sens_file)
+if not grid.matches(grid_from_affine(sens_img.shape, sens_affine)):
+    raise ValueError(f"different image grids of {tof_backproj_file} and {sens_file}")
 
 # Create sensitivity-corrected backprojection by element-wise division
 # Avoid division by zero by setting a small threshold
@@ -134,7 +130,7 @@ att_img_file = tof_backproj_file.parent / tof_backproj_file.name.replace(
     "_tof_backproj_", "_att_img_"
 )
 
-np.save(att_img_file, att_img)
+save_image(att_img_file, att_img, grid, f"two-class attenuation image (mu_water {mu_water}/mm)")
 
 print(f"Attenuation image saved to {att_img_file}")
 

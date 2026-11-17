@@ -8,8 +8,9 @@ useful as a quick look at the data and to check the TOF convention of a file.
 Non-TOF data (a single TOF bin) are not supported.
 
 The image is written next to the listmode file
-(<stem>_tof_histo_image_<stream>_<fingerprint>[_t<start>-<stop>ms].npy) together with a
-figure of three orthogonal cuts.
+(<stem>_tof_histo_image_<stream>_<fingerprint>[_t<start>-<stop>ms].nii, NIfTI with the
+grid in the scanner coordinate system of the PETSIRD file, see image_io.py) together
+with a figure of three orthogonal cuts.
 """
 
 import argparse
@@ -25,7 +26,8 @@ from petsird_reader import (
     get_all_detector_centers,
     read_listmode_events,
 )
-from reconstruction import default_image_grid
+from image_io import grid_from_affine, load_image, load_image_on_grid, save_image
+from reconstruction import reconstruction_grid
 from parallelproj.operators import GaussianFilterOperator
 from parallelproj.projectors import ListmodePETProjector
 
@@ -41,10 +43,15 @@ parser.add_argument(
     "--stream", choices=["prompts", "delayeds"], default="prompts", help="event stream to use"
 )
 parser.add_argument(
-    "--img_shape", type=int, nargs=3, default=None, help="Shape of the image (default: as 02)"
+    "--img_shape", type=int, nargs=3, default=None, help="shape of the image (default: as 02)"
 )
 parser.add_argument(
-    "--voxel_size", type=float, nargs=3, default=[2.0, 2.0, 2.0], help="Voxel size in mm"
+    "--voxel_size",
+    type=float,
+    nargs=3,
+    default=None,
+    help="voxel size in mm (default 2 2 2; without --img_shape / --voxel_size, the grid of "
+    "--attenuation_image is used if given, as in 02)",
 )
 parser.add_argument(
     "--interpolation",
@@ -100,7 +107,6 @@ parser.add_argument("--skip_plots", action="store_true", help="do not show the v
 args = parser.parse_args()
 
 fname = Path(args.fname)
-voxel_size = tuple(args.voxel_size)
 
 reader = petsird.BinaryPETSIRDReader(str(fname))
 header: petsird.Header = reader.read_header()
@@ -113,17 +119,26 @@ if tof_bin_edges.size - 1 < 2:
     raise ValueError("TOF histo-images require TOF data (more than one TOF bin)")
 
 all_detector_centers = get_all_detector_centers(scanner_info.scanner_geometry)
+# image grid as in 02: --img_shape / --voxel_size, else the grid of the attenuation
+# image, else the default grid
+att_grid = None
+if args.attenuation_image is not None:
+    att_data, att_affine = load_image(args.attenuation_image)
+    try:
+        att_grid = grid_from_affine(att_data.shape, att_affine)
+    except ValueError:
+        att_grid = None
+grid = reconstruction_grid(
+    all_detector_centers,
+    tuple(args.img_shape) if args.img_shape else None,
+    tuple(args.voxel_size) if args.voxel_size else None,
+    att_grid,
+)
+img_shape, voxel_size, img_origin = grid.shape, grid.voxel_size, np.asarray(grid.origin)
+print(f"Image grid: {grid}")
 att_img = None
 if args.attenuation_image is not None:
-    att_img = np.load(args.attenuation_image).astype(np.float32)
-# image shape: --img_shape, else the shape of the attenuation image, else the default grid
-if args.img_shape:
-    requested_img_shape = tuple(args.img_shape)
-elif att_img is not None:
-    requested_img_shape = tuple(att_img.shape)
-else:
-    requested_img_shape = None
-img_shape, img_origin = default_image_grid(all_detector_centers, voxel_size, requested_img_shape)
+    att_img = load_image_on_grid(args.attenuation_image, grid, "attenuation image")
 
 backend = resolve_petsird_backend(args.petsird_backend)
 time_range = tuple(args.time_range_ms) if args.time_range_ms is not None else None
@@ -140,10 +155,6 @@ weights = None
 if args.efficiency_weighted or args.attenuation_image is not None:
     weights = np.ones(events["coords0"].shape[0])
 if att_img is not None:
-    if att_img.shape != img_shape:
-        raise ValueError(
-            f"attenuation image shape {att_img.shape} does not match image shape {img_shape}"
-        )
     # attenuation factors exp(-int mu) of the (non-TOF) LORs of all events
     att_proj = ListmodePETProjector(
         np.ascontiguousarray(events["coords0"]),
@@ -189,8 +200,8 @@ if args.efficiency_weighted:
     tag += "_effs"
 if time_range is not None:
     tag += f"_t{time_range[0]}-{time_range[1]}ms"
-opath = fname.with_name(f"{fname.stem}_tof_histo_image_{args.stream}_{tag}.npy")
-np.save(opath, image)
+opath = fname.with_name(f"{fname.stem}_tof_histo_image_{args.stream}_{tag}.nii")
+save_image(opath, image, grid, f"TOF histo-image ({args.stream})")
 print(f"TOF histo-image saved to {opath}")
 
 # three orthogonal cuts through the center of the image

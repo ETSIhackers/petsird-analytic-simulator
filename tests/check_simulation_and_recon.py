@@ -34,7 +34,8 @@ reconstruction code:
 If reconstruction outputs exist, the LM back projections calculated from the PETSIRD
 file are compared to the ones of the simulator, and the sensitivity image of a TOF
 recon with attenuation correction (using the simulated attenuation image
-attenuation_image.npy) has to match the simulator's (reference_sensitivity_image.npy).
+attenuation_image.nii) has to match the simulator's (reference_sensitivity_image.nii).
+All images are NIfTI files whose grids (affines) are checked for consistency.
 
 If a recon estimated the randoms from the delayeds (--randoms_from_delayeds), the
 module pair randoms of the ML estimate have to match the expectation within the Poisson
@@ -63,6 +64,7 @@ from petsird.helpers.geometry import get_ADP
 from petsird.validate.geometry import validate_detecting_element
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
+from image_io import grid_from_affine, load_image  # noqa: E402
 from utils import FWHM_PER_SIGMA, lm_file_fingerprint  # noqa: E402
 
 parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -329,12 +331,28 @@ adp = np.array(
     dtype="float32",
 )
 
-img_shape = tuple(sim_params["img_shape"])
-voxel_size = tuple(sim_params["voxel_size"])
-# the simulator uses an image centered at (0,0,0)
-img_origin = (-(np.asarray(img_shape) - 1) / 2 * np.asarray(voxel_size)).astype(
-    "float32"
+# image grid of the simulation (from the NIfTI affine of the ground truth image)
+gt_img, gt_affine = load_image(out_dir / "ground_truth_image.nii")
+sim_grid = grid_from_affine(gt_img.shape, gt_affine)
+img_shape, voxel_size = sim_grid.shape, sim_grid.voxel_size
+img_origin = np.asarray(sim_grid.origin, dtype="float32")
+grid_center = np.asarray(sim_grid.origin) + 0.5 * (np.asarray(img_shape) - 1) * np.asarray(voxel_size)
+check(
+    sim_grid.shape == tuple(sim_params["img_shape"])
+    and np.allclose(sim_grid.voxel_size, sim_params["voxel_size"])
+    and np.allclose(grid_center, 0, atol=1e-3),
+    f"ground truth image grid ({sim_grid}) = simulation parameters, centered at (0, 0, 0)",
 )
+sim_images = ["attenuation_image.nii", "reference_sensitivity_image.nii"] + [
+    f.name for f in out_dir.glob("lm_backprojection_tof.nii")
+] + [f.name for f in out_dir.glob("reference_histogram_mlem_*_epochs.nii")]
+def image_grid(path):
+    data, affine = load_image(path)
+    return grid_from_affine(data.shape, affine)
+
+
+grids_ok = all(image_grid(out_dir / f).matches(sim_grid) for f in sim_images)
+check(grids_ok, f"all simulator images have the same grid ({', '.join(sim_images)})")
 
 tof_bin_edges = scanner.tof_bin_edges[0][0].edges
 lm_proj = ListmodePETProjector(
@@ -349,9 +367,9 @@ lm_proj.event_tofbins = tof_idx.astype("int16")
 lm_proj.tof = True
 lm_back_tof = lm_proj.adjoint(np.ones(num_events, dtype="float32"))
 
-sim_lm_back_tof_file = out_dir / "lm_backprojection_tof.npy"
+sim_lm_back_tof_file = out_dir / "lm_backprojection_tof.nii"
 if sim_lm_back_tof_file.exists():
-    d = rel_diff(np.load(sim_lm_back_tof_file), lm_back_tof)
+    d = rel_diff(load_image(sim_lm_back_tof_file)[0], lm_back_tof)
     check(d < 1e-4, f"TOF LM back projection of PETSIRD events matches simulator ({d:.1e})")
 else:
     check(False, "simulator TOF LM back projection exists (run with --save_lm_backprojection)")
@@ -381,11 +399,10 @@ lor_length = np.linalg.norm(p2 - p1, axis=1)
 lor_dir = (p2 - p1) / lor_length[:, None]
 lor_center = 0.5 * (p1 + p2)
 
-gt_img = np.load(out_dir / "ground_truth_image.npy")
 # sample the ground truth image (nearest voxel) at 401 points along every LOR
 t = np.linspace(-0.5, 0.5, 401)[None, :] * lor_length[:, None]
 sample_pos = lor_center[:, None, :] + t[..., None] * lor_dir[:, None, :]
-vox = np.rint(sample_pos / np.asarray(voxel_size) + (np.asarray(img_shape) - 1) / 2).astype(int)
+vox = np.rint((sample_pos - img_origin) / np.asarray(voxel_size)).astype(int)
 inside = np.all((vox >= 0) & (vox < np.asarray(img_shape)), axis=-1)
 vox = np.clip(vox, 0, np.asarray(img_shape) - 1)
 act = np.where(inside, gt_img[vox[..., 0], vox[..., 1], vox[..., 2]], 0)
@@ -447,8 +464,21 @@ check(
 # only consider recon outputs of the current listmode file (tagged with its fingerprint)
 stem = lm_file.stem
 fingerprint = lm_file_fingerprint(lm_file)
-recon_sens = sorted(out_dir.glob(f"{stem}_sens_{fingerprint}_*.npy"))
-recon_tof_back = sorted(out_dir.glob(f"{stem}_tof_backproj_{fingerprint}_*.npy"))
+def on_sim_grid(files):
+    """images of files on the simulation grid (other grids, e.g. recons with
+    --img_shape / --voxel_size, are skipped)"""
+    images = {}
+    for f in files:
+        data, affine = load_image(f)
+        if grid_from_affine(data.shape, affine).matches(sim_grid):
+            images[f.name] = data
+        else:
+            print(f"       {f.name}: different image grid than the simulation - skipped")
+    return images
+
+
+recon_sens = on_sim_grid(sorted(out_dir.glob(f"{stem}_sens_{fingerprint}_*.nii")))
+recon_tof_back = on_sim_grid(sorted(out_dir.glob(f"{stem}_tof_backproj_{fingerprint}_*.nii")))
 
 if recon_sens and recon_tof_back:
     # there can be multiple recon outputs (e.g. TOF / non-TOF, with / without attenuation)
@@ -457,19 +487,19 @@ if recon_sens and recon_tof_back:
     #   simulated attenuation image) has to match the simulator's. The simulator uses a
     #   TOF sinogram projector, the reconstruction a TOF LM projector, which differ
     #   slightly in the normalization of the TOF kernels.
-    ref_sens = np.load(out_dir / "reference_sensitivity_image.npy")
-    diffs = {f.name: rel_diff(ref_sens, np.load(f)) for f in recon_sens}
+    ref_sens = load_image(out_dir / "reference_sensitivity_image.nii")[0]
+    diffs = {name: rel_diff(ref_sens, img) for name, img in recon_sens.items()}
     for name, d in diffs.items():
         print(f"       {name}: rel. diff to simulator sensitivity image {d:.1e}")
     best = min(diffs, key=diffs.get)
     check(
         diffs[best] < 2e-3,
         f"sensitivity image of a recon matches the simulator's ({best}, {diffs[best]:.1e}) "
-        "(requires a TOF recon with --attenuation_image attenuation_image.npy)",
+        "(requires a TOF recon with --attenuation_image attenuation_image.nii)",
     )
-    for f in recon_tof_back:
-        d = rel_diff(lm_back_tof, np.load(f))
-        check(d < 1e-4, f"recon TOF LM back projection {f.name} matches PETSIRD events ({d:.1e})")
+    for name, img in recon_tof_back.items():
+        d = rel_diff(lm_back_tof, img)
+        check(d < 1e-4, f"recon TOF LM back projection {name} matches PETSIRD events ({d:.1e})")
 else:
     print("no reconstruction outputs found - skipping reconstruction checks")
 

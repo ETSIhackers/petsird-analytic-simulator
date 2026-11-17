@@ -24,11 +24,13 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from parallelproj import to_numpy_array
 from parallelproj.operators import GaussianFilterOperator
 from parallelproj.projectors import ListmodePETProjector
 
 from efficiencies import EFFICIENCY_MODELS, generate_efficiency_model, lor_efficiencies
 from geometry_plots import plot_petsird_geometry
+from image_io import ImageGrid, save_image
 from phantoms import PHANTOMS, create_phantom
 from randoms import coincidence_window_ns, randoms_of_events
 from scanner import ScannerConfig, create_parallelproj_lor_descriptor
@@ -268,10 +270,18 @@ scanner_config = ScannerConfig(
 lor_desc = create_parallelproj_lor_descriptor(scanner_config)
 
 img, att_img = create_phantom(args.phantom, img_shape, voxel_size)
-np.save(output_dir / "attenuation_image.npy", att_img)
 
 tof_params = tof_parameters(args.tof_fwhm_mm, img_shape, voxel_size)
 tof_proj = create_tof_projector(lor_desc, img_shape, voxel_size, tof_params)
+
+# image grid of the simulation in the scanner coordinate system (stored in the NIfTI
+# files of all images)
+sim_grid = ImageGrid(
+    tuple(img_shape),
+    tuple(float(v) for v in voxel_size),
+    tuple(float(o) for o in to_numpy_array(tof_proj.img_origin)),
+)
+save_image(output_dir / "attenuation_image.nii", att_img, sim_grid, "attenuation coefficients (1/mm)")
 
 efficiency_model = generate_efficiency_model(
     scanner_config, args.uniform_crystal_eff, args.uniform_sg_eff, args.efficiency_model
@@ -291,7 +301,7 @@ fwd_op = create_forward_model(
 
 # sensitivity image of the forward model (incl. attenuation)
 sens_img = fwd_op.adjoint(np.ones(fwd_op.out_shape, dtype=np.float32))
-np.save(output_dir / "reference_sensitivity_image.npy", sens_img)
+save_image(output_dir / "reference_sensitivity_image.nii", sens_img, sim_grid, "sensitivity image (simulator)")
 
 # %%
 # expected trues and randoms, and Poisson realizations of the prompts and delayeds
@@ -355,7 +365,7 @@ with open(output_dir / "randoms_expectation.json", "w", encoding="UTF-8") as f:
 
 # ground truth activity image (before the image-based resolution model, which is part
 # of the forward model), scaled such that the forward model yields the expected counts
-np.save(output_dir / "ground_truth_image.npy", img)
+save_image(output_dir / "ground_truth_image.nii", img, sim_grid, "ground truth activity")
 
 if args.num_epochs_mlem > 0:
     recon = histogram_mlem(
@@ -365,7 +375,12 @@ if args.num_epochs_mlem > 0:
         args.num_epochs_mlem,
         contamination=expected_randoms if args.random_fraction > 0 else None,
     )
-    np.save(output_dir / f"reference_histogram_mlem_{args.num_epochs_mlem}_epochs.npy", recon)
+    save_image(
+        output_dir / f"reference_histogram_mlem_{args.num_epochs_mlem}_epochs.nii",
+        recon,
+        sim_grid,
+        f"histogram MLEM {args.num_epochs_mlem} epochs",
+    )
 
 # %%
 # listmode events of the prompts and delayeds
@@ -399,9 +414,11 @@ if args.save_lm_backprojection:
     lm_proj.tof_parameters = tof_params
     lm_proj.event_tofbins = prompt_events.tof_bin.astype(np.int16)
     lm_proj.tof = True
-    np.save(
-        output_dir / "lm_backprojection_tof.npy",
+    save_image(
+        output_dir / "lm_backprojection_tof.nii",
         lm_proj.adjoint(np.ones(prompt_events.num_events, dtype=np.float32)),
+        sim_grid,
+        "TOF LM back projection of the prompts (simulator)",
     )
 
 # %%
