@@ -1,4 +1,4 @@
-# Analytic simulation of PETSIRD v0.13.2 data using parallelproj
+# Analytic simulation of PETSIRD v0.13.3 data using parallelproj
 
 This tool allows to "quickly" simulate and reconstruct PETSIRD TOF listmode data
 using a simplified physics model (true unscattered coincidences including
@@ -9,7 +9,7 @@ One of its aims is to be able to generate data that can be used to test implemen
 of software supporting the PETSIRD standard for listmode data.
 
 Requirements:
-- [PETSIRD](https://github.com/ETSInitiative/PETSIRD) v0.13.x (>= 0.13.2)
+- [PETSIRD](https://github.com/ETSInitiative/PETSIRD) v0.13.x (>= 0.13.3)
 - [parallelproj](https://github.com/gschramm/parallelproj) v2.x (requires python >= 3.12)
 - matplotlib (plots and the interactive 3-axis viewer in `python/viewer.py`)
 

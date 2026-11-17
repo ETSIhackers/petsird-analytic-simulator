@@ -7,6 +7,6 @@ dependencies:
   - matplotlib>=3.8.0
   - array-api-compat>=1.7
   - parallelproj>=2.0.2,<3
-  - petsird~=0.13.2
+  - petsird~=0.13.3
   - ipython
   - pytest
