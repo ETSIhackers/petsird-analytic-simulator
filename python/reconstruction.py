@@ -208,14 +208,21 @@ def recon_params_hash(
     tof: bool,
     att_img: np.ndarray | None,
     fwhm_mm: float,
+    efficiencies: str = "all",
 ) -> str:
-    """short hash of all parameters that affect the sensitivity image (used in file names)"""
+    """short hash of all parameters that affect the sensitivity image (used in file names)
+
+    efficiencies: efficiency mode (see petsird_reader.select_efficiencies), only part of
+    the hash if it is not "all" (such that hashes of the default are unchanged)
+    """
     hash_obj = hashlib.sha256()
     hash_obj.update(str(img_shape).encode())
     hash_obj.update(f"{voxel_size[0]:.6f},{voxel_size[1]:.6f},{voxel_size[2]:.6f}".encode())
     hash_obj.update(str(tof).encode())
     hash_obj.update(f"{fwhm_mm:.6f}".encode())
     hash_obj.update(att_img.tobytes() if att_img is not None else b"no_attenuation")
+    if efficiencies != "all":
+        hash_obj.update(f"efficiencies={efficiencies}".encode())
     return hash_obj.hexdigest()[:6]
 
 

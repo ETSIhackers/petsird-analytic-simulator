@@ -246,6 +246,30 @@ expected randoms of the selected prompts (over the whole acquisition) are scaled
 fraction of the acquisition time that is selected (the simulated randoms are constant
 over time).
 
+### Detection efficiency factors
+
+```
+python 02_reconstruct_petsird.py my_petsird_file.bin --efficiencies {all,module_pairs,detection_bins,none}
+```
+
+selects which of the encoded detection efficiency factors are used, consistently in the
+forward model of the events and in the sensitivity image:
+
+| mode | factor of an event / LOR |
+|---|---|
+| `all` (default) | calibration factor x detection bin efficiencies x module pair (SGID) efficiency |
+| `module_pairs` | module pair (SGID) efficiency only |
+| `detection_bins` | detection bin efficiencies only |
+| `none` | 1 (purely geometric sensitivity image) |
+
+In all modes, only module pairs in coincidence (SGID >= 0 in the module pair SGID LUT)
+are used. Reconstructions with only some (or none) of the factors show the artifacts of
+ignoring the others, e.g. for the simulated data: cold streaks from dead crystals (whose
+LORs are in the sensitivity image but have no events), non-uniformities from the
+modules with x3 / x(1/3) efficiencies, and patterns from the module pair efficiencies.
+This helps to check whether the encoded efficiencies are interpreted correctly. The
+reconstructions are tagged with `_effs_<mode>`.
+
 ### NON-TOF NAC recon
 
 ```

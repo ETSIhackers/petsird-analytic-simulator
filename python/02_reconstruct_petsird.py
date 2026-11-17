@@ -24,6 +24,7 @@ from parallelproj.projectors import ListmodePETProjector
 
 from geometry_plots import plot_petsird_geometry
 from petsird_reader import (
+    EFFICIENCY_MODES,
     check_header_support,
     first_events,
     get_all_detector_centers,
@@ -31,6 +32,7 @@ from petsird_reader import (
     get_tof_parameters,
     UnsupportedPETSIRDFeatureError,
     read_listmode_events,
+    select_efficiencies,
 )
 from randoms import (
     casey_singles,
@@ -97,6 +99,15 @@ parser.add_argument(
     help="Whether to skip sensitivity image calculation and use unity image",
 )
 parser.add_argument("--non-tof", action="store_true", help="Whether to disable TOF in recon")
+parser.add_argument(
+    "--efficiencies",
+    choices=EFFICIENCY_MODES,
+    default="all",
+    help="detection efficiency factors used in the forward model of the events and in the "
+    "sensitivity image: all (calibration x detection bin x module pair), only module_pairs, "
+    "only detection_bins, or none (all 1); only module pairs in coincidence are used in all "
+    "modes. Useful to see the effect of (mis)interpreting the encoded efficiencies.",
+)
 parser.add_argument(
     "--attenuation_image", type=str, default=None, help="Path to attenuation image"
 )
@@ -211,9 +222,15 @@ if args.attenuation_image is not None:
             f"Attenuation image shape {att_img.shape} does not match image shape {img_shape}"
         )
 
+# header with the detection efficiency factors that are used (events and sensitivity)
+effs_header = select_efficiencies(header, args.efficiencies)
+if args.efficiencies != "all":
+    print(f"Using only the efficiency factors: {args.efficiencies}")
+
 # tag of all files that depend on the reconstruction parameters
 params_tag = (
-    f"{lm_fingerprint}_{recon_params_hash(img_shape, voxel_size, tof, att_img, args.fwhm_mm)}"
+    f"{lm_fingerprint}_"
+    + recon_params_hash(img_shape, voxel_size, tof, att_img, args.fwhm_mm, args.efficiencies)
 )
 
 # %%
@@ -226,7 +243,7 @@ else:
     sens_img = load_or_compute(
         output_path("sens", tag=params_tag),
         compute=lambda: sensitivity_image(
-            scanner_info,
+            effs_header.scanner,
             all_detector_centers,
             img_shape,
             voxel_size,
@@ -255,7 +272,7 @@ print(
 t_read = time.perf_counter()
 all_events = read_listmode_events(
     reader,
-    header,
+    effs_header,
     all_detector_centers,
     verbose=args.verbose,
     fname=str(fname),
@@ -467,7 +484,9 @@ subset_objectives = create_lm_subset_objectives(
 recon = lm_osem(subset_objectives, sens_img, args.num_epochs, xp=xp)
 
 opath = fname.with_name(
-    f"lm_osem_{args.num_epochs}_{args.num_subsets}_{events_tag}{randoms_tag}.npy"
+    f"lm_osem_{args.num_epochs}_{args.num_subsets}_{events_tag}{randoms_tag}"
+    + (f"_effs_{args.efficiencies}" if args.efficiencies != "all" else "")
+    + ".npy"
 )
 xp.save(opath, recon)
 print(f"LM OSEM recon saved to {opath}")
