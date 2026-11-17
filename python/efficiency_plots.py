@@ -68,6 +68,21 @@ def _detection_bin_effs(scanner, module_type, energy_bin):
     return tables.effs[module_type].reshape(num_modules, num_det_els, num_energy_bins)[..., energy_bin]
 
 
+def _module_angles(layout: dict[str, np.ndarray]) -> np.ndarray:
+    """mean angle (deg, circular mean) of the detecting elements of every module"""
+    rad = np.radians(layout["angle_deg"])
+    return np.degrees(np.arctan2(np.sin(rad).mean(axis=1), np.cos(rad).mean(axis=1)))
+
+
+def _annotate_modules(ax, layout: dict[str, np.ndarray]) -> None:
+    """module numbers above the detecting elements of every module"""
+    for m, angle in enumerate(_module_angles(layout)):
+        ax.annotate(
+            f"m{m}", (angle, 1.0), xycoords=("data", "axes fraction"), xytext=(0, 2),
+            textcoords="offset points", ha="center", va="bottom", fontsize=8, fontweight="bold",
+        )
+
+
 def plot_detection_bin_efficiencies(
     scanner: petsird.ScannerInformation, module_type: int = 0, energy_bin: int = 0
 ) -> plt.Figure:
@@ -83,10 +98,11 @@ def plot_detection_bin_efficiencies(
         sc = ax.scatter(layout["angle_deg"][sel], layout["z"][sel], c=effs[sel], marker="s", s=14, cmap="viridis", vmin=0, vmax=vmax)
         dead = sel & (effs == 0)
         ax.scatter(layout["angle_deg"][dead], layout["z"][dead], marker="x", s=14, c="red", label="efficiency 0")
-        ax.set_title(f"depth layer {lay} (depth {layout['depth'][sel].mean():+.1f} mm from module center)", fontsize=10)
+        ax.set_title(f"depth layer {lay} (depth {layout['depth'][sel].mean():+.1f} mm from module center)", fontsize=10, pad=14)
         ax.set_xlabel("angle of the ADP around the scanner axis (deg)")
         ax.set_ylabel("z (mm)")
         ax.set_xlim(-180, 180)
+        _annotate_modules(ax, layout)
         if np.any(dead):
             ax.legend(loc="upper right", fontsize=8)
         fig.colorbar(sc, ax=ax, label="efficiency")
@@ -123,6 +139,13 @@ def _geometric_order(scanner, module_type):
     return order, boundaries
 
 
+def _element_ticks(set_ticks, order: np.ndarray, num_ticks: int = 12, rotation: int = 0) -> None:
+    """ticks with the detecting element numbers at every n-th position of a sorted axis"""
+    step = max(1, int(np.ceil(order.size / num_ticks)))
+    positions = np.arange(0, order.size, step)
+    set_ticks(positions, [str(order[p]) for p in positions], rotation=rotation)
+
+
 def plot_module_pair_efficiencies(
     scanner: petsird.ScannerInformation,
     module_types: tuple[int, int] = (0, 0),
@@ -153,12 +176,16 @@ def plot_module_pair_efficiencies(
         for b in b2:
             ax.axvline(b, color="w", lw=0.8)
         ax.set_title(f"SGID {k}", fontsize=10)
-        ax.set_xticks([])
-        ax.set_yticks([])
-    axs[0, 0].set_ylabel("element of the first module\n(sorted by layer, angle, z)")
-    axs[-1, 0].set_xlabel("element of the second module")
+        _element_ticks(ax.set_xticks, order2, rotation=90)
+        _element_ticks(ax.set_yticks, order1)
+        ax.tick_params(labelsize=6, length=2)
+    axs[0, 0].set_ylabel("detecting element of the first module\n(sorted by layer, angle, z)")
+    axs[-1, 0].set_xlabel("detecting element of the second module (sorted by layer, angle, z)")
     fig.colorbar(im, ax=axs, shrink=0.6, label="module pair efficiency")
-    fig.suptitle(f"module pair efficiencies (module types {module_types}, energy bins {energy_bins})")
+    fig.suptitle(
+        f"module pair efficiencies (module types {module_types}, energy bins {energy_bins}); tick labels: "
+        "detecting element numbers, white lines: depth layer boundaries (front layer first)"
+    )
     return fig
 
 
@@ -196,6 +223,7 @@ def plot_fans(scanner: petsird.ScannerInformation, detection_bins: list[int], mo
         ax.scatter(layout["angle_deg"][ma, el], layout["z"][ma, el], marker="*", s=160, c="cyan", edgecolors="k", label=f"detection bin {a} (module {ma}, element {el})")
         ax.legend(loc="upper right", fontsize=8)
         ax.set_xlim(-180, 180)
+        _annotate_modules(ax, layout)
         ax.set_xlabel("angle around the scanner axis (deg)")
         ax.set_ylabel("z (mm)")
         fig.colorbar(sc, ax=ax, label="LOR efficiency")
