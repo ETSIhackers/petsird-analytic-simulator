@@ -62,3 +62,31 @@ def test_letter_orientation():
     # up = +y mirrors the letter in y
     img_up = add_letters(zeros, ones, vs, text="P", contrast=1.0, letter_z_mm=(0.0,), up="+y")
     np.testing.assert_allclose(img_up[:, :, 1], img[:, ::-1, 1], atol=1e-6)
+
+
+@pytest.mark.parametrize("letter", ["O", "P", "R", "A"])
+def test_letters_have_empty_counters(letter):
+    """the counters (holes) of letters are not filled"""
+    from phantoms import add_letters
+
+    shape, vs = (55, 55, 3), (2.0, 2.0, 2.0)
+    zeros, ones = np.zeros(shape, np.float32), np.ones(shape, bool)
+    img = add_letters(zeros, ones, vs, text=letter, contrast=1.0, letter_z_mm=(0.0,))[:, :, 1]
+    letter_mask = img > 0.5
+    # fill the letter from the outside: background pixels not reachable from the image
+    # border are enclosed by the letter (counter)
+    outside = np.zeros_like(letter_mask)
+    outside[0, :] = outside[-1, :] = outside[:, 0] = outside[:, -1] = True
+    outside &= ~letter_mask
+    while True:
+        grown = outside.copy()
+        grown[1:] |= outside[:-1]
+        grown[:-1] |= outside[1:]
+        grown[:, 1:] |= outside[:, :-1]
+        grown[:, :-1] |= outside[:, 1:]
+        grown &= ~letter_mask
+        if np.array_equal(grown, outside):
+            break
+        outside = grown
+    counter = ~letter_mask & ~outside
+    assert counter.sum() >= 4, f"no empty counter in {letter}"

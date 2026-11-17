@@ -93,6 +93,7 @@ def _letter_coverage(
     -y (up="-y").
     """
     from matplotlib.font_manager import FontProperties
+    from matplotlib.path import Path
     from matplotlib.textpath import TextPath
 
     path = TextPath((0, 0), letter, size=1.0, prop=FontProperties(family="DejaVu Sans", weight="bold"))
@@ -110,7 +111,13 @@ def _letter_coverage(
         raise ValueError(f"up has to be '+y' or '-y', got {up}")
     letter_x = px / scale + 0.5 * (x0 + x1)
     letter_y = py / scale + 0.5 * (y0 + y1)
-    inside = path.contains_points(np.stack([letter_x.ravel(), letter_y.ravel()], axis=1))
+    # even-odd rule over the outlines of the glyph, such that the counters (holes, e.g.
+    # of O, P, R) are empty (Path.contains_points of the compound path fills them)
+    points = np.stack([letter_x.ravel(), letter_y.ravel()], axis=1)
+    num_outlines = sum(
+        Path(polygon).contains_points(points).astype(int) for polygon in path.to_polygons()
+    )
+    inside = num_outlines % 2 == 1
     return inside.reshape(px.shape).mean(-1)
 
 
