@@ -41,3 +41,61 @@ def test_module_pair_efficiencies_symmetries(tiny_config, tiny_efficiency_model)
 def test_module_offset():
     assert module_offset(5, 2, 8) == 3
     assert module_offset(2, 5, 8) == 5
+
+
+def _relative_change(a, b):
+    """median relative change between efficiencies (where both are > 0)"""
+    ok = (a > 0) & (b > 0)
+    return float(np.median(np.abs(a[ok] - b[ok]) / a[ok]))
+
+
+def test_structured_detecting_element_efficiencies_have_no_symmetries():
+    """flipping / swapping the tangential, layer or axial index order (typical reader
+    errors) changes the detecting element efficiencies substantially"""
+    from efficiencies import generate_efficiency_model
+    from scanner import ScannerConfig
+
+    config = ScannerConfig()
+    np.random.seed(0)
+    effs = generate_efficiency_model(config).det_el_effs.reshape(config.num_modules, *config.block_shape)
+    for axis, label in ((1, "tangential"), (2, "layer"), (3, "axial")):
+        assert _relative_change(effs, np.flip(effs, axis=axis)) > 0.2, label
+    # module order around the ring (e.g. mirrored scanner geometry)
+    assert _relative_change(effs, np.flip(effs, axis=0)) > 0.2
+    # one dead patch of 3 x 3 elements in the front layer of module 7, all others alive
+    dead = effs == 0
+    assert dead.sum() == 9 and np.all(dead[7, :, 0, :].sum() == 9)
+
+
+def test_structured_module_pair_efficiencies_are_strongly_non_symmetric():
+    """transposed module pair matrices (typical reader error) differ substantially, except
+    for opposite modules where the matrix has to be symmetric"""
+    from efficiencies import generate_efficiency_model
+    from scanner import ScannerConfig
+
+    config = ScannerConfig()
+    np.random.seed(0)
+    model = generate_efficiency_model(config)
+    for d, m in model.module_pair_effs.items():
+        np.testing.assert_array_equal(model.module_pair_effs[config.num_modules - d], m.T)
+        if 2 * d == config.num_modules:
+            np.testing.assert_array_equal(m, m.T)
+        else:
+            assert _relative_change(m, m.T) > 0.3, d
+    # alternating levels between module offsets (symmetry groups)
+    means = {d: m.mean() for d, m in model.module_pair_effs.items()}
+    assert means[4] > 2 * means[3] and means[6] > 2 * means[5]
+
+
+def test_random_efficiency_model_still_available():
+    from efficiencies import generate_efficiency_model
+    from scanner import ScannerConfig
+
+    config = ScannerConfig()
+    np.random.seed(0)
+    effs = generate_efficiency_model(config, model="random").det_el_effs
+    assert effs.max() > 3 and 0 < np.count_nonzero(effs == 0) < 100
+    import pytest
+
+    with pytest.raises(ValueError):
+        generate_efficiency_model(config, model="unknown")

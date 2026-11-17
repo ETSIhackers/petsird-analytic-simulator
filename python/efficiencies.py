@@ -56,21 +56,119 @@ class EfficiencyModel:
         return sorted(self.module_pair_effs).index(offset)
 
 
-def generate_efficiency_model(
-    config: ScannerConfig, uniform_crystal_eff: bool = False, uniform_sg_eff: bool = False
-) -> EfficiencyModel:
-    """random (non-physical) efficiency model (uses the global numpy random state)
+# efficiency models of generate_efficiency_model
+EFFICIENCY_MODELS = ("structured", "random")
 
+
+def _normalized_index(n: int) -> np.ndarray:
+    """0 ... 1 for n indices (0 for a single index)"""
+    return np.arange(n) / (n - 1) if n > 1 else np.zeros(n)
+
+
+def _structured_det_el_effs(config: ScannerConfig) -> np.ndarray:
+    """structured (exaggerated, non-physical) detecting element efficiencies
+
+    eff(m, t, r, a) = gain(m) * tangential(t) * layer(r) * axial(a) * (1 + jitter)
+
+    with the module m, and the tangential / radial (depth layer) / axial index t, r, a of
+    the detecting element in its module (block_shape order):
+    - gain(m) = 1 + 0.6 sin(2 pi m / M + 0.4), module 2 x 1.8: sector artifacts
+    - tangential(t) = 0.5 + 0.8 u_t: linear ramp, not mirror symmetric
+    - layer(r) = 1.4 - 0.8 u_r: front layer 1.4, back layer 0.6
+    - axial(a) = 1.2 - 2 (u_a - 0.35)^2: off-center peak, low end planes, not symmetric
+    - jitter: uniform in [-0.1, 0.1]
+    (u: index normalized to [0, 1]) and a "dead" patch (efficiency 0) of up to 3 x 3
+    detecting elements (tangential x axial) in the front layer of module 7 / 12 * M.
+    None of the components is symmetric under the flips / swaps of indices that a
+    reader could get wrong.
+    """
+    nt, nr, na = config.block_shape
+    u_t, u_r, u_a = (_normalized_index(n) for n in (nt, nr, na))
+    num_modules = config.num_modules
+
+    gain = 1 + 0.6 * np.sin(2 * np.pi * np.arange(num_modules) / num_modules + 0.4)
+    if num_modules > 2:
+        gain[2] *= 1.8
+    tangential = 0.5 + 0.8 * u_t
+    layer = 1.4 - 0.8 * u_r
+    axial = 1.2 - 2.0 * (u_a - 0.35) ** 2
+
+    # (module, t, r, a) -> flattened detecting element index = np.ravel_multi_index((t, r, a))
+    effs = (
+        gain[:, None, None, None]
+        * tangential[None, :, None, None]
+        * layer[None, None, :, None]
+        * axial[None, None, None, :]
+    )
+    effs = effs * (1 + np.random.uniform(-0.1, 0.1, effs.shape))
+
+    # dead patch (central 3 x 3 tangential x axial elements of the front layer)
+    t0, a0 = max(0, nt // 2 - 1), max(0, na // 2 - 1)
+    effs[(7 * num_modules) // 12, t0 : t0 + 3, 0, a0 : a0 + 3] = 0
+    return effs.reshape(num_modules, -1).astype("float32")
+
+
+def _structured_module_pair_effs(config: ScannerConfig, d: int) -> np.ndarray:
+    """structured (exaggerated) module pair efficiencies of module offset d
+
+    eff[e1, e2] = level(d) * tangential(t1, t2) * axial(a1, a2) * layers(r1, r2) * (1 + jitter)
+
+    for the detecting elements e1 (first module of the pair) and e2 (second module):
+    - level(d) = 1 + 0.5 (-1)^d: alternating between module offsets (symmetry groups)
+    - tangential(t1, t2) = 1 + 0.5 cos(pi (u_t1 + u_t2)) + 0.3 (u_t1 - u_t2): depends on
+      the radial position of the LOR in the module pair (ring artifacts), not symmetric
+    - axial(a1, a2) = 1.3 - 0.6 |u_a1 - u_a2|: oblique LORs less efficient
+    - layers(r1, r2) = 1 + 0.6 (u_r2 - u_r1): front -> back 1.6, back -> front 0.4, i.e.
+      strongly non-symmetric (transposition errors are visible)
+    - jitter: uniform in [-0.1, 0.1]
+    """
+    nt, nr, na = config.block_shape
+    t, r, a = np.unravel_index(np.arange(config.num_det_els_per_module), config.block_shape)
+    u_t = _normalized_index(nt)[t]
+    u_r = _normalized_index(nr)[r]
+    u_a = _normalized_index(na)[a]
+    tangential = (
+        1
+        + 0.5 * np.cos(np.pi * (u_t[:, None] + u_t[None, :]))
+        + 0.3 * (u_t[:, None] - u_t[None, :])
+    )
+    axial = 1.3 - 0.6 * np.abs(u_a[:, None] - u_a[None, :])
+    layers = 1 + 0.6 * (u_r[None, :] - u_r[:, None])
+    m = (1 + 0.5 * (-1) ** d) * tangential * axial * layers
+    return m * (1 + np.random.uniform(-0.1, 0.1, m.shape))
+
+
+def generate_efficiency_model(
+    config: ScannerConfig,
+    uniform_crystal_eff: bool = False,
+    uniform_sg_eff: bool = False,
+    model: str = "structured",
+) -> EfficiencyModel:
+    """non-physical efficiency model (uses the global numpy random state)
+
+    model "structured" (default): exaggerated, structured efficiencies (see
+    _structured_det_el_effs and _structured_module_pair_effs), such that ignoring or
+    misinterpreting them gives clear, recognizable artifacts (sectors, rings, axial
+    bands, a cold streak from the dead patch) and with as few symmetries as possible.
+
+    model "random" (previous model):
     - detecting element efficiencies: uniform in [0.2, 2.2], x3 in the first module,
       /3 in the last module, elements with efficiency < 0.21 are "dead" (0)
-    - module pair efficiencies: random non-symmetric matrices (to be able to detect
-      transposition errors when reading the data) consistent with the rotational
-      symmetry of the scanner (matrix of offset n - d = transpose of offset d)
+    - module pair efficiencies: random non-symmetric matrices with a level alternating
+      between module offsets
+
+    In both models, the module pair efficiencies are consistent with the rotational
+    symmetry of the scanner (matrix of offset n - d = transpose of offset d, symmetric
+    matrix for opposite modules), such that they can be encoded with one SGID per offset.
     """
+    if model not in EFFICIENCY_MODELS:
+        raise ValueError(f"unknown efficiency model {model}, available: {EFFICIENCY_MODELS}")
     num_det_els = config.num_det_els_per_module
 
     if uniform_crystal_eff:
         det_el_effs = np.ones((config.num_modules, num_det_els), dtype="float32")
+    elif model == "structured":
+        det_el_effs = _structured_det_el_effs(config)
     else:
         det_el_effs = 0.2 + 2 * np.astype(
             np.random.rand(config.num_modules, num_det_els), "float32"
@@ -89,13 +187,15 @@ def generate_efficiency_model(
         elif (config.num_modules - d) in module_pair_effs:
             module_pair_effs[d] = module_pair_effs[config.num_modules - d].T.copy()
         else:
-            # level alternating between offsets (same level for d and num_modules - d)
-            level = 1 + 0.5 * (-1) ** d
-            m = np.random.uniform(0.5, 1.5, (num_det_els, num_det_els))
+            if model == "structured":
+                m = _structured_module_pair_effs(config, d)
+            else:
+                # level alternating between offsets (same level for d and num_modules - d)
+                m = (1 + 0.5 * (-1) ** d) * np.random.uniform(0.5, 1.5, (num_det_els, num_det_els))
             if 2 * d == config.num_modules:
                 # opposite modules: matrix has to be symmetric
                 m = 0.5 * (m + m.T)
-            module_pair_effs[d] = (level * m).astype("float32")
+            module_pair_effs[d] = m.astype("float32")
 
     return EfficiencyModel(det_el_effs=det_el_effs, module_pair_effs=module_pair_effs)
 

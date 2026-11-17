@@ -27,7 +27,7 @@ import numpy as np
 from parallelproj.operators import GaussianFilterOperator
 from parallelproj.projectors import ListmodePETProjector
 
-from efficiencies import generate_efficiency_model, lor_efficiencies
+from efficiencies import EFFICIENCY_MODELS, generate_efficiency_model, lor_efficiencies
 from geometry_plots import plot_petsird_geometry
 from phantoms import PHANTOMS, create_phantom
 from randoms import coincidence_window_ns, randoms_of_events
@@ -140,6 +140,14 @@ physics_group.add_argument(
 
 efficiency_group = parser.add_argument_group("Detection Efficiency Parameters")
 efficiency_group.add_argument(
+    "--efficiency_model",
+    choices=EFFICIENCY_MODELS,
+    default="structured",
+    help="structured: exaggerated, structured detecting element and module pair efficiencies "
+    "(sectors, rings, axial profiles, a dead patch; clear artifacts if they are ignored or "
+    "misinterpreted), random: random efficiencies (previous model)",
+)
+efficiency_group.add_argument(
     "--uniform_crystal_eff",
     action="store_true",
     help="use uniform crystal efficiencies, otherwise use a random distribution",
@@ -231,7 +239,7 @@ tof_params = tof_parameters(args.tof_fwhm_mm, img_shape, voxel_size)
 tof_proj = create_tof_projector(lor_desc, img_shape, voxel_size, tof_params)
 
 efficiency_model = generate_efficiency_model(
-    scanner_config, args.uniform_crystal_eff, args.uniform_sg_eff
+    scanner_config, args.uniform_crystal_eff, args.uniform_sg_eff, args.efficiency_model
 )
 
 res_model = GaussianFilterOperator(

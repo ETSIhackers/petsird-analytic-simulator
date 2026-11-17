@@ -140,6 +140,11 @@ Physics / simulation parameters:
                         and no delayeds) (default: 0.5)
 
 Detection Efficiency Parameters:
+  --efficiency_model {structured,random}
+                        structured: exaggerated, structured detecting element and module pair
+                        efficiencies (sectors, rings, axial profiles, a dead patch; clear
+                        artifacts if they are ignored or misinterpreted), random: random
+                        efficiencies (previous model) (default: structured)
   --uniform_crystal_eff
                         use uniform crystal efficiencies, otherwise use a random distribution
                         (default: False)
@@ -187,13 +192,27 @@ time.
   Their material (LYSO, `material_id` 1) is defined in `ScannerInformation.bulk_materials`.
 - The detection efficiencies consist of detection bin (crystal) efficiencies,
   module pair (symmetry group) efficiencies and a calibration factor of 1.
-  The crystal efficiencies are random (including some "dead" crystals).
   Module pairs are grouped into symmetry groups by their offset
   `(i_mod_1 - i_mod_2) mod 12` (first module = module with the higher index).
-  The module pair efficiency matrices `values[bin in first module][bin in second module]`
-  are random and non-symmetric, such that readers that e.g. transpose them or mix up
-  the module order produce wrong results. Consistent with the rotational symmetry of
-  the scanner, the matrix of offset `12 - d` is the transpose of the one of offset `d`.
+  Consistent with the rotational symmetry of the scanner, the module pair efficiency
+  matrix `values[bin in first module][bin in second module]` of offset `12 - d` is the
+  transpose of the one of offset `d`.
+- The efficiencies are non-physical and deliberately exaggerated and structured
+  (`--efficiency_model structured`, default, see `python/efficiencies.py`), such that
+  ignoring or misinterpreting them gives clear, recognizable artifacts, and with as few
+  symmetries as possible, such that flipped / swapped indices or transposed matrices
+  change the result:
+  - crystal efficiency = module gain (sinusoidal around the ring, module 2 x 1.8) x
+    tangential ramp (0.5 ... 1.3) x layer factor (front 1.4, back 0.6) x axial profile
+    (off-center peak, low end planes) x 10% jitter, and a dead patch of 3 x 3 crystals
+    in the front layer of module 7
+  - module pair efficiency = level alternating with the module offset (1.5 / 0.5) x a
+    function of the tangential positions of both crystals (i.e. of the radial position
+    of the LOR) x an axial factor (oblique LORs lower) x a strongly non-symmetric layer
+    factor (front -> back 1.6, back -> front 0.4) x 10% jitter
+  - `--efficiency_model random` gives the previous random efficiencies (crystal
+    efficiencies uniform in [0.2, 2.2], x3 / x(1/3) in the first / last module, some
+    dead crystals, random non-symmetric module pair matrices)
 
 ## Reconstructions of PETSIRD listmode files
 
@@ -264,9 +283,10 @@ forward model of the events and in the sensitivity image:
 
 In all modes, only module pairs in coincidence (SGID >= 0 in the module pair SGID LUT)
 are used. Reconstructions with only some (or none) of the factors show the artifacts of
-ignoring the others, e.g. for the simulated data: cold streaks from dead crystals (whose
-LORs are in the sensitivity image but have no events), non-uniformities from the
-modules with x3 / x(1/3) efficiencies, and patterns from the module pair efficiencies.
+ignoring the others, e.g. for the simulated (structured) efficiencies: a cold streak
+from the dead patch (whose LORs are in the sensitivity image but have no events), sector
+artifacts from the module gains, axial bands from the axial profile, and ring artifacts
+from the module pair efficiencies.
 This helps to check whether the encoded efficiencies are interpreted correctly. The
 reconstructions are tagged with `_effs_<mode>`.
 
