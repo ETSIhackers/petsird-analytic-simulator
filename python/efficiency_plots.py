@@ -18,6 +18,7 @@ import csv
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap
 import numpy as np
 import petsird
 from petsird.helpers import expand_detection_bin, get_detection_efficiency
@@ -82,15 +83,22 @@ def plot_sgid_luts(scanner: petsird.ScannerInformation) -> plt.Figure:
     """module pair SGID LUTs of all module type pairs (-1 / white: not in coincidence)"""
     num_types = scanner.scanner_geometry.number_of_module_types()
     pairs = [(m1, m2) for m1 in range(num_types) for m2 in range(m1 + 1)]
-    fig, axs = plt.subplots(1, len(pairs), figsize=(5.5 * len(pairs), 5), layout="constrained", squeeze=False)
-    for ax, (m1, m2) in zip(axs[0], pairs):
-        lut = get_module_pair_sgid_lut(scanner, m1, m2)
+    luts = [get_module_pair_sgid_lut(scanner, m1, m2) for m1, m2 in pairs]
+    # about 0.2 inch per module for large LUTs (such that the SGIDs can be printed)
+    size = max(5.0, 0.2 * max(max(lut.shape) for lut in luts))
+    fig, axs = plt.subplots(1, len(pairs), figsize=(1.1 * size * len(pairs), size), layout="constrained", squeeze=False)
+    for ax, (m1, m2), lut in zip(axs[0], pairs, luts):
         masked = np.ma.masked_less(lut, 0)
-        ax.imshow(masked, cmap="tab20", interpolation="nearest")
-        if lut.size <= 900:
+        # one distinct color per SGID (60 colors, repeated for more SGIDs)
+        colors = [c for name in ("tab20", "tab20b", "tab20c") for c in plt.get_cmap(name).colors]
+        num_sgids = max(1, int(lut.max()) + 1)
+        cmap = ListedColormap([colors[k % len(colors)] for k in range(num_sgids)])
+        ax.imshow(masked, cmap=cmap, vmin=-0.5, vmax=num_sgids - 0.5, interpolation="nearest")
+        if max(lut.shape) <= 60:
+            fontsize = 7 if max(lut.shape) <= 30 else 5
             for (i, j), v in np.ndenumerate(lut):
                 if v >= 0:
-                    ax.text(j, i, str(v), ha="center", va="center", fontsize=7)
+                    ax.text(j, i, str(v), ha="center", va="center", fontsize=fontsize)
         _index_ticks(ax.set_xticks, lut.shape[1], 24)
         _index_ticks(ax.set_yticks, lut.shape[0], 24)
         ax.set_xlabel(f"module (type {m2}) of the second detection bin")
@@ -112,9 +120,10 @@ def plot_module_pair_efficiencies(
     _, n2, e2 = module_type_info(scanner, m2)
     mp = mp.reshape(-1, n1, e1, n2, e2)[:, :, energy_bins[0], :, energy_bins[1]]
     num_sgids = mp.shape[0]
-    ncols = min(4, num_sgids)
+    ncols = min(num_sgids, max(4, int(np.ceil(np.sqrt(num_sgids)))))
     nrows = int(np.ceil(num_sgids / ncols))
-    fig, axs = plt.subplots(nrows, ncols, figsize=(3.6 * ncols + 1, 3.6 * nrows + 0.6), layout="constrained", squeeze=False)
+    panel = 3.6 if num_sgids <= 16 else 2.8
+    fig, axs = plt.subplots(nrows, ncols, figsize=(panel * ncols + 1, panel * nrows + 0.6), layout="constrained", squeeze=False)
     vmax = np.percentile(mp, 99)
     for k, ax in enumerate(axs.ravel()):
         if k >= num_sgids:

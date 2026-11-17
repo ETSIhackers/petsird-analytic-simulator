@@ -13,9 +13,11 @@ TINY_VOXEL_SIZE = (4.0, 4.0, 4.0)
 
 @pytest.fixture
 def tiny_config() -> ScannerConfig:
-    # 8 modules with 3 x 2 x 2 detecting elements, opposite modules are in coincidence
+    # 2 x 8 modules (4 panels of 2 modules at 2 axial positions) with 3 x 2 x 2 detecting
+    # elements, opposite modules are in coincidence
     return ScannerConfig(
-        num_modules=8,
+        num_transaxial_modules=8,
+        num_axial_modules=2,
         radius=60.0,
         block_shape=(3, 2, 2),
         block_spacing=(4.0, 6.0, 4.0),

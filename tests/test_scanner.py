@@ -37,7 +37,8 @@ def test_detecting_elements_follow_petsird_constraints(tiny_config):
     g = get_detecting_element_geometry_from_geometry(geom)
     radial = g["adp"][..., :2] / np.linalg.norm(g["adp"][..., :2], axis=-1, keepdims=True)
     assert np.all(np.sum(g["box_axis"][..., :2] * radial, axis=-1) > 0.9)
-    phi = 2 * np.pi * (np.arange(tiny_config.num_modules) // tiny_config.modules_per_panel) / tiny_config.num_panels
+    t = np.arange(tiny_config.num_modules) % tiny_config.num_transaxial_modules
+    phi = 2 * np.pi * (t // tiny_config.modules_per_panel) / tiny_config.num_panels
     normal = np.stack([-np.sin(phi), np.cos(phi), np.zeros_like(phi)], axis=-1)
     np.testing.assert_allclose(g["box_axis"], np.broadcast_to(normal[:, None, :], g["box_axis"].shape), atol=1e-5)
 
@@ -52,13 +53,15 @@ def get_detecting_element_geometry_from_geometry(geom):
 def test_coincident_module_pairs(tiny_config):
     pairs = coincident_module_pairs(tiny_config)
     assert all(i < j for i, j in pairs)
+    nt, na = tiny_config.num_transaxial_modules, tiny_config.num_axial_modules
     assert all(
-        circular_distance(i, j, tiny_config.num_modules) >= tiny_config.min_coincidence_distance
+        circular_distance(i % nt, j % nt, nt) >= tiny_config.min_coincidence_distance
         for i, j in pairs
     )
-    # all pairs except neighbors (circular distance 1)
-    n = tiny_config.num_modules
-    assert len(pairs) == n * (n - 1) // 2 - n
+    # all pairs except transaxial neighbors / the same transaxial module (circular
+    # distance 0 or 1), for all axial module offsets
+    ordered_per_axial_pair = nt * (nt - 3)
+    assert len(pairs) == na * ordered_per_axial_pair // 2 + na * (na - 1) // 2 * ordered_per_axial_pair
 
 
 def _rotation_z(phi):
@@ -71,20 +74,32 @@ def _module_detector_centers(config):
     return np.asarray(lor_desc.scanner.all_lor_endpoints).reshape(config.num_modules, -1, 3)
 
 
-def test_default_scanner_has_panel_symmetry_only():
-    """6 flat panels of 2 modules: a rotation by one panel (60 deg) maps module m onto
-    module m + 2 (element by element), a rotation by 30 deg does not map the scanner onto
-    itself (as it does for equally spaced modules)"""
+def _by_axial_position(config, centers):
+    return centers.reshape(config.num_axial_modules, config.num_transaxial_modules, -1, 3)
+
+
+def test_default_scanner_symmetries():
+    """6 flat panels of 2 modules at 3 axial positions: a rotation by one panel (60 deg)
+    maps transaxial module t onto t + 2 at the same axial position (element by element),
+    a rotation by 30 deg does not map the scanner onto itself (as it does for equally
+    spaced modules); the axial positions are shifted copies of each other"""
     config = ScannerConfig()
-    assert (config.num_panels, config.modules_per_panel) == (6, 2)
-    centers = _module_detector_centers(config)
+    assert (config.num_panels, config.modules_per_panel, config.num_axial_modules) == (6, 2, 3)
+    assert config.num_modules * config.num_det_els_per_module == 2160
+    centers = _by_axial_position(config, _module_detector_centers(config))
     rotated = centers @ _rotation_z(np.pi / 3).T
-    np.testing.assert_allclose(rotated, np.roll(centers, -2, axis=0), atol=1e-3)
+    np.testing.assert_allclose(rotated, np.roll(centers, -2, axis=1), atol=1e-3)
     rotated_30 = centers @ _rotation_z(np.pi / 6).T
-    assert np.abs(rotated_30 - np.roll(centers, -1, axis=0)).max() > 1.0
+    assert np.abs(rotated_30 - np.roll(centers, -1, axis=1)).max() > 1.0
+
+    # axial positions along +z, separated by the axial gap, centered at z = 0
+    pitch = config.block_shape[2] * config.block_spacing[2] + config.axial_gap
+    for a in range(1, config.num_axial_modules):
+        np.testing.assert_allclose(centers[a], centers[0] + np.array([0, 0, a * pitch]), atol=1e-4)
+    np.testing.assert_allclose(centers[..., 2].mean(), 0, atol=1e-4)
 
     # equally spaced modules: symmetric under a rotation by one module
-    equidistant = ScannerConfig(modules_per_panel=1)
+    equidistant = ScannerConfig(modules_per_panel=1, num_axial_modules=1)
     centers = _module_detector_centers(equidistant)
     np.testing.assert_allclose(centers @ _rotation_z(np.pi / 6).T, np.roll(centers, -1, axis=0), atol=1e-3)
 
@@ -107,7 +122,7 @@ def test_panel_layout():
 
 def test_equidistant_module_transforms():
     """modules_per_panel = 1: modules equally spaced on the circle, facing the center"""
-    config = ScannerConfig(modules_per_panel=1)
+    config = ScannerConfig(modules_per_panel=1, num_axial_modules=1)
     for m, t in enumerate(module_transforms(config)):
         phi = 2 * np.pi * m / config.num_modules
         np.testing.assert_allclose(t[:3, 3], config.radius * np.array([-np.sin(phi), np.cos(phi), 0]), atol=1e-4)
@@ -117,4 +132,6 @@ def test_invalid_modules_per_panel():
     import pytest
 
     with pytest.raises(ValueError):
-        ScannerConfig(num_modules=12, modules_per_panel=5)
+        ScannerConfig(num_transaxial_modules=12, modules_per_panel=5)
+    with pytest.raises(ValueError):
+        ScannerConfig(num_axial_modules=0)

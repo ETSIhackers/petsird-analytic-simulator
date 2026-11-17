@@ -45,41 +45,61 @@ def crystal_bulk_material() -> petsird.BulkMaterial:
 
 @dataclass(frozen=True)
 class ScannerConfig:
-    """block modules (cuboids of detecting elements) arranged in flat panels on a circle
+    """block modules (cuboids of detecting elements) arranged in flat panels around the
+    scanner axis, repeated at several axial positions
 
-    The scanner consists of num_modules / modules_per_panel flat panels, equally spaced
-    on a circle. Each panel contains modules_per_panel modules side by side (in the
-    tangential direction, separated by panel_gap), all facing the same direction (the
-    panel normal). With modules_per_panel = 1, the modules are equally spaced on the
-    circle and face the scanner center.
+    Transaxially, num_transaxial_modules modules form num_transaxial_modules /
+    modules_per_panel flat panels, equally spaced around the scanner axis. Each panel
+    contains modules_per_panel modules side by side (in the tangential direction,
+    separated by panel_gap), all facing the same direction (the panel normal). With
+    modules_per_panel = 1, the modules are equally spaced around the axis and face the
+    scanner center.
+    Axially, this arrangement is repeated at num_axial_modules axial module positions
+    (separated by axial_gap), centered at z = 0.
 
-    The default (6 panels of 2 modules) only has the symmetry of a rotation by one
-    panel (60 deg), not by one module, such that module pairs with the same module
-    index offset are in general not geometrically equivalent (see efficiencies.py).
+    Module index = axial module index * num_transaxial_modules + transaxial module index.
+    The transaxial module index increases counterclockwise (seen from +z, also within a
+    panel), the axial module index along +z.
+
+    The default (6 panels of 2 modules, 3 axial module positions) is only symmetric
+    under a rotation by one panel (60 deg); in addition, module pairs are symmetric under
+    an axial shift by one axial module position (see efficiencies.py).
     """
 
-    # number of block modules
-    num_modules: int = 12
+    # number of modules around the scanner axis (at each axial module position)
+    num_transaxial_modules: int = 12
+    # number of axial module positions
+    num_axial_modules: int = 3
     # distance from the scanner center to the center of the panels (mm)
     radius: float = 100.0
-    # number of modules per flat panel (1: modules equally spaced on the circle)
+    # number of modules per flat panel (1: modules equally spaced around the axis)
     modules_per_panel: int = 2
     # gap between neighboring modules of a panel (mm)
     panel_gap: float = 4.0
+    # gap between neighboring axial module positions (mm)
+    axial_gap: float = 2.0
     # number of detecting elements per module in the 3 module directions
     # (tangential, radial, axial)
-    block_shape: tuple[int, int, int] = (10, 2, 9)
+    block_shape: tuple[int, int, int] = (10, 2, 3)
     # spacing between the detecting elements = size of the elements (mm)
     block_spacing: tuple[float, float, float] = (4.5, 10.0, 4.5)
-    # module pairs with a circular distance <= this value are not in coincidence
+    # module pairs with a transaxial circular distance < this value are not in
+    # coincidence (for all axial module offsets)
     min_coincidence_distance: int = 3
 
     def __post_init__(self):
-        if self.modules_per_panel < 1 or self.num_modules % self.modules_per_panel != 0:
+        if self.modules_per_panel < 1 or self.num_transaxial_modules % self.modules_per_panel != 0:
             raise ValueError(
-                f"num_modules ({self.num_modules}) has to be a multiple of modules_per_panel "
-                f"({self.modules_per_panel})"
+                f"num_transaxial_modules ({self.num_transaxial_modules}) has to be a "
+                f"multiple of modules_per_panel ({self.modules_per_panel})"
             )
+        if self.num_axial_modules < 1:
+            raise ValueError("num_axial_modules has to be >= 1")
+
+    @property
+    def num_modules(self) -> int:
+        """total number of modules"""
+        return self.num_transaxial_modules * self.num_axial_modules
 
     @property
     def num_det_els_per_module(self) -> int:
@@ -87,7 +107,13 @@ class ScannerConfig:
 
     @property
     def num_panels(self) -> int:
-        return self.num_modules // self.modules_per_panel
+        return self.num_transaxial_modules // self.modules_per_panel
+
+    def transaxial_index(self, i_mod: int) -> int:
+        return i_mod % self.num_transaxial_modules
+
+    def axial_index(self, i_mod: int) -> int:
+        return i_mod // self.num_transaxial_modules
 
 
 def circular_distance(i_mod_1: int, i_mod_2: int, num_modules: int) -> int:
@@ -99,24 +125,29 @@ def circular_distance(i_mod_1: int, i_mod_2: int, num_modules: int) -> int:
 def module_transforms(config: ScannerConfig) -> list[np.ndarray]:
     """4x4 affine transformations from the module to the scanner coordinate system
 
-    The modules are translated by the radius along the y-axis (and within their panel
-    along the x-axis) and then rotated around the z-axis (scanner axis) by the angle of
-    their panel. The module index increases counterclockwise (seen from +z), also
-    within a panel.
+    The modules are translated by the radius along the y-axis (within their panel along
+    the x-axis, to their axial position along the z-axis) and then rotated around the
+    z-axis (scanner axis) by the angle of their panel. The transaxial module index
+    increases counterclockwise (seen from +z), also within a panel.
     """
     n = config.modules_per_panel
     # tangential module center distance within a panel
     pitch = config.block_shape[0] * config.block_spacing[0] + config.panel_gap
+    # axial module center distance
+    axial_pitch = config.block_shape[2] * config.block_spacing[2] + config.axial_gap
 
     panel_angles = np.linspace(0, 2 * np.pi, config.num_panels, endpoint=False)
 
     transforms = []
     for i_mod in range(config.num_modules):
-        phi = panel_angles[i_mod // n]
+        i_trans = config.transaxial_index(i_mod)
+        i_ax = config.axial_index(i_mod)
+        phi = panel_angles[i_trans // n]
         translation = np.eye(4, dtype="float32")
         # counterclockwise = towards -x for the panel at phi = 0
-        translation[0, -1] = ((n - 1) / 2 - (i_mod % n)) * pitch
+        translation[0, -1] = ((n - 1) / 2 - (i_trans % n)) * pitch
         translation[1, -1] = config.radius
+        translation[2, -1] = (i_ax - (config.num_axial_modules - 1) / 2) * axial_pitch
         rotation = np.asarray(
             [
                 [math.cos(phi), -math.sin(phi), 0, 0],
@@ -131,11 +162,15 @@ def module_transforms(config: ScannerConfig) -> list[np.ndarray]:
 
 
 def coincident_module_pairs(config: ScannerConfig) -> list[tuple[int, int]]:
-    """all module pairs (i, j) with i < j that are in coincidence"""
+    """all module pairs (i, j) with i < j that are in coincidence: transaxial circular
+    distance >= min_coincidence_distance, all axial module offsets"""
     return [
         (i, j)
         for i, j in combinations(range(config.num_modules), 2)
-        if circular_distance(i, j, config.num_modules) >= config.min_coincidence_distance
+        if circular_distance(
+            config.transaxial_index(i), config.transaxial_index(j), config.num_transaxial_modules
+        )
+        >= config.min_coincidence_distance
     ]
 
 

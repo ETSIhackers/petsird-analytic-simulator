@@ -144,11 +144,27 @@ scanner_group.add_argument(
     type=int,
     choices=(1, 2),
     default=2,
-    help="2: 6 flat panels of 2 modules (only symmetric under a rotation by one panel, "
-    "i.e. 60 deg), 1: 12 modules equally spaced on the circle (previous geometry)",
+    help="2: 6 flat panels of 2 modules around the scanner axis (only symmetric under a "
+    "rotation by one panel, i.e. 60 deg), 1: 12 modules equally spaced around the axis",
 )
 scanner_group.add_argument(
     "--panel_gap", type=float, default=4.0, help="gap between the modules of a panel (mm)"
+)
+scanner_group.add_argument(
+    "--num_axial_modules",
+    type=int,
+    default=3,
+    help="number of axial module positions (the transaxial arrangement of 12 modules is "
+    "repeated at each axial position)",
+)
+scanner_group.add_argument(
+    "--axial_gap", type=float, default=2.0, help="gap between neighboring axial module positions (mm)"
+)
+scanner_group.add_argument(
+    "--block_shape",
+    type=parse_int_tuple,
+    default=(10, 2, 3),
+    help="number of detecting elements (4.5 x 10 x 4.5 mm) per module (tangential, radial, axial)",
 )
 
 efficiency_group = parser.add_argument_group("Detection Efficiency Parameters")
@@ -242,7 +258,13 @@ np.random.seed(args.seed)
 # %%
 # scanner, phantom, efficiencies and forward model
 
-scanner_config = ScannerConfig(modules_per_panel=args.modules_per_panel, panel_gap=args.panel_gap)
+scanner_config = ScannerConfig(
+    modules_per_panel=args.modules_per_panel,
+    panel_gap=args.panel_gap,
+    num_axial_modules=args.num_axial_modules,
+    axial_gap=args.axial_gap,
+    block_shape=tuple(args.block_shape),
+)
 lor_desc = create_parallelproj_lor_descriptor(scanner_config)
 
 img, att_img = create_phantom(args.phantom, img_shape, voxel_size)

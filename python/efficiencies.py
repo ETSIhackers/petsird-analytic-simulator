@@ -29,61 +29,81 @@ def module_offset(i_mod_1: int, i_mod_2: int, num_modules: int) -> int:
     return (i_mod_1 - i_mod_2) % num_modules
 
 
+# symmetry class of a module pair: (p1, p2, d, da), see module_pair_class
+PairClass = tuple[int, int, int, int]
+
+
 def module_pair_class(
-    i_mod_1: int, i_mod_2: int, num_modules: int, modules_per_panel: int
-) -> tuple[int, int, int]:
-    """symmetry class (p1, p2, d) of the module pair (first module i_mod_1, second module i_mod_2)
+    i_mod_1: int, i_mod_2: int, num_transaxial_modules: int, modules_per_panel: int
+) -> PairClass:
+    """symmetry class (p1, p2, d, da) of the module pair (first module i_mod_1, second module i_mod_2)
 
-    p1, p2: position of the first / second module in its panel (index mod modules_per_panel)
-    d: module offset (i_mod_1 - i_mod_2) mod num_modules
+    With the transaxial / axial module indices t = i_mod % num_transaxial_modules and
+    a = i_mod // num_transaxial_modules (see ScannerConfig):
+    p1, p2: position of the first / second module in its panel (t mod modules_per_panel)
+    d: transaxial module offset (t1 - t2) mod num_transaxial_modules
+    da: axial module offset a1 - a2 (>= 0 since i_mod_1 >= i_mod_2)
 
-    The scanner is symmetric under a rotation by one panel, which maps module i onto
-    module i + modules_per_panel (mod num_modules) and keeps the positions in the panels.
+    The module pair efficiencies only depend on the relative geometry of the two
+    modules, which is invariant under
+    - a rotation by one panel, which maps the transaxial module index t onto
+      t + modules_per_panel (mod num_transaxial_modules) and keeps the positions in the
+      panels, and
+    - an axial shift by one axial module position (for module pairs, not for the scanner).
     Module pairs that are mapped onto each other with the same order of the first and
     second module have the same class and therefore the same module pair efficiencies.
     Since PETSIRD stores module pairs (of the same type) in lower-triangular order (first
-    module index >= second module index), a rotation can swap the order of the modules,
-    which maps class (p1, p2, d) to class (p2, p1, num_modules - d) (transposed_class):
-    its module pair efficiencies are the transposed ones.
-    With one module per panel, the class is given by the offset only (p1 = p2 = 0).
+    module index >= second module index), a rotation can swap the order of two modules at
+    the same axial position (da = 0), which maps class (p1, p2, d, 0) to class
+    (p2, p1, num_transaxial_modules - d, 0) (transposed_class): its module pair
+    efficiencies are the transposed ones. For da > 0, the first module is always the one
+    at the higher axial position, so no symmetry swaps the order.
+    The axial mirror (z -> -z) is not used: it reverses the order of the detecting
+    elements within a module (neither the same nor the transposed matrix).
     """
+    t1, a1 = i_mod_1 % num_transaxial_modules, i_mod_1 // num_transaxial_modules
+    t2, a2 = i_mod_2 % num_transaxial_modules, i_mod_2 // num_transaxial_modules
     return (
-        i_mod_1 % modules_per_panel,
-        i_mod_2 % modules_per_panel,
-        module_offset(i_mod_1, i_mod_2, num_modules),
+        t1 % modules_per_panel,
+        t2 % modules_per_panel,
+        module_offset(t1, t2, num_transaxial_modules),
+        a1 - a2,
     )
 
 
-def transposed_class(cls: tuple[int, int, int], num_modules: int) -> tuple[int, int, int]:
-    """class of the module pairs with swapped first / second module"""
-    p1, p2, d = cls
-    return (p2, p1, (num_modules - d) % num_modules)
+def transposed_class(cls: PairClass, num_transaxial_modules: int) -> PairClass:
+    """class of the module pairs with swapped first / second module (only stored in
+    PETSIRD for da = 0)"""
+    p1, p2, d, da = cls
+    return (p2, p1, (num_transaxial_modules - d) % num_transaxial_modules, -da)
 
 
-def _class_order(cls: tuple[int, int, int]) -> tuple[int, int, int]:
-    """SGIDs are ordered by module offset, then by the panel positions"""
-    p1, p2, d = cls
-    return (d, p1, p2)
+def _class_order(cls: PairClass) -> tuple[int, int, int, int]:
+    """SGIDs are ordered by axial module offset, transaxial module offset, then by the
+    panel positions"""
+    p1, p2, d, da = cls
+    return (da, d, p1, p2)
 
 
 @dataclass
 class EfficiencyModel:
     # detecting element efficiencies, shape (num_modules, num_det_els_per_module)
     det_el_effs: np.ndarray
-    # module pair efficiencies: class (p1, p2, d) -> matrix (num_det_els, num_det_els)
+    # module pair efficiencies: class (p1, p2, d, da) -> matrix (num_det_els, num_det_els)
     # indexed by [element in first module, element in second module]
-    module_pair_effs: dict[tuple[int, int, int], np.ndarray]
+    module_pair_effs: dict[PairClass, np.ndarray]
+    num_transaxial_modules: int
     modules_per_panel: int = 1
 
     @property
     def num_modules(self) -> int:
         return self.det_el_effs.shape[0]
 
-    def pair_class(self, i_mod_1: int, i_mod_2: int) -> tuple[int, int, int]:
+    def pair_class(self, i_mod_1: int, i_mod_2: int) -> PairClass:
         """class of the module pair (first module i_mod_1, second module i_mod_2)"""
-        return module_pair_class(i_mod_1, i_mod_2, self.num_modules, self.modules_per_panel)
+        return module_pair_class(i_mod_1, i_mod_2, self.num_transaxial_modules, self.modules_per_panel)
 
-    def sgid(self, cls: tuple[int, int, int]) -> int:
+    def sgid(self, cls: PairClass) -> int:
         """symmetry group ID of a module pair class (one SGID per class)"""
         return sorted(self.module_pair_effs, key=_class_order).index(cls)
 
@@ -104,13 +124,16 @@ def _structured_det_el_effs(config: ScannerConfig) -> np.ndarray:
 
     with the module m, and the tangential / radial (depth layer) / axial index t, r, a of
     the detecting element in its module (block_shape order):
-    - gain(m) = 1 + 0.6 sin(2 pi m / M + 0.4), module 2 x 1.8: sector artifacts
+    - gain(m) = (1 + 0.6 sin(2 pi m_t / M_t + 0.4)) * (1 + 0.8 sin(2.2 u_m_a)) with the
+      transaxial / axial module index m_t / m_a (M_t transaxial modules), module 2 x 1.8:
+      sector artifacts and axial bands
     - tangential(t) = 0.5 + 0.8 u_t: linear ramp, not mirror symmetric
     - layer(r) = 1.4 - 0.8 u_r: front layer 1.4, back layer 0.6
     - axial(a) = 1.2 - 2 (u_a - 0.35)^2: off-center peak, low end planes, not symmetric
     - jitter: uniform in [-0.1, 0.1]
     (u: index normalized to [0, 1]) and a "dead" patch (efficiency 0) of up to 3 x 3
-    detecting elements (tangential x axial) in the front layer of module 7 / 12 * M.
+    detecting elements (tangential x axial) in the front layer of the module with
+    transaxial index 7 / 12 * M_t at the central axial module position.
     None of the components is symmetric under the flips / swaps of indices that a
     reader could get wrong.
     """
@@ -118,7 +141,10 @@ def _structured_det_el_effs(config: ScannerConfig) -> np.ndarray:
     u_t, u_r, u_a = (_normalized_index(n) for n in (nt, nr, na))
     num_modules = config.num_modules
 
-    gain = 1 + 0.6 * np.sin(2 * np.pi * np.arange(num_modules) / num_modules + 0.4)
+    nt_mod, na_mod = config.num_transaxial_modules, config.num_axial_modules
+    m_t = np.arange(num_modules) % nt_mod
+    u_m_a = _normalized_index(na_mod)[np.arange(num_modules) // nt_mod]
+    gain = (1 + 0.6 * np.sin(2 * np.pi * m_t / nt_mod + 0.4)) * (1 + 0.8 * np.sin(2.2 * u_m_a))
     if num_modules > 2:
         gain[2] *= 1.8
     tangential = 0.5 + 0.8 * u_t
@@ -136,22 +162,25 @@ def _structured_det_el_effs(config: ScannerConfig) -> np.ndarray:
 
     # dead patch (central 3 x 3 tangential x axial elements of the front layer)
     t0, a0 = max(0, nt // 2 - 1), max(0, na // 2 - 1)
-    effs[(7 * num_modules) // 12, t0 : t0 + 3, 0, a0 : a0 + 3] = 0
+    dead_module = ((na_mod - 1) // 2) * nt_mod + (7 * nt_mod) // 12
+    effs[dead_module, t0 : t0 + 3, 0, a0 : a0 + 3] = 0
     return effs.reshape(num_modules, -1).astype("float32")
 
 
-def _class_level(config: ScannerConfig, cls: tuple[int, int, int]) -> float:
+def _class_level(config: ScannerConfig, cls: PairClass) -> float:
     """level of the module pair efficiencies of a class
 
-    level(p1, p2, d) = 1 + 0.5 (-1)^d + 0.3 (u_p1 - u_p2) + 0.2 (u_p1 + u_p2)
+    level(p1, p2, d, da) = (1 + 0.5 (-1)^(d + da) + 0.3 (u_p1 - u_p2) + 0.2 (u_p1 + u_p2)) / (1 + 0.3 da)
 
-    (u_p: position in the panel normalized to [0, 1]): alternating between module
-    offsets and different for module pairs with the same offset but different positions
-    in their panels (e.g. 1.0 / 0.4 for classes (1, 0, 3) / (0, 1, 3) of the default scanner).
+    (u_p: position in the panel normalized to [0, 1]): alternating between transaxial
+    module offsets (with opposite phase for odd axial module offsets), different for
+    module pairs with the same offsets but different positions in their panels (e.g.
+    1.0 / 0.4 for classes (1, 0, 3, 0) / (0, 1, 3, 0) of the default scanner), and lower
+    for larger axial module offsets.
     """
-    p1, p2, d = cls
+    p1, p2, d, da = cls
     u = _normalized_index(config.modules_per_panel)
-    return 1 + 0.5 * (-1) ** d + 0.3 * (u[p1] - u[p2]) + 0.2 * (u[p1] + u[p2])
+    return (1 + 0.5 * (-1) ** (d + da) + 0.3 * (u[p1] - u[p2]) + 0.2 * (u[p1] + u[p2])) / (1 + 0.3 * da)
 
 
 def _structured_module_pair_effs(config: ScannerConfig, level: float) -> np.ndarray:
@@ -226,14 +255,14 @@ def generate_efficiency_model(
 
     classes = sorted(
         {
-            module_pair_class(j, i, config.num_modules, config.modules_per_panel)
+            module_pair_class(j, i, config.num_transaxial_modules, config.modules_per_panel)
             for i, j in coincident_module_pairs(config)
         },
         key=_class_order,
     )
     module_pair_effs = {}
     for cls in classes:
-        transposed = transposed_class(cls, config.num_modules)
+        transposed = transposed_class(cls, config.num_transaxial_modules)
         if uniform_sg_eff:
             module_pair_effs[cls] = np.ones((num_det_els, num_det_els), dtype="float32")
         elif transposed in module_pair_effs:
@@ -252,6 +281,7 @@ def generate_efficiency_model(
     return EfficiencyModel(
         det_el_effs=det_el_effs,
         module_pair_effs=module_pair_effs,
+        num_transaxial_modules=config.num_transaxial_modules,
         modules_per_panel=config.modules_per_panel,
     )
 
